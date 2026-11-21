@@ -45,6 +45,34 @@ add_library(dcusa_runtime STATIC
 target_include_directories(dcusa_runtime PUBLIC src)
 dcusa_warnings(dcusa_runtime)
 
+# ---- recomp: guest memory, machine state, dispatch, helpers for translated code ----
+add_library(dcusa_recomp STATIC
+    src/recomp/guest_memory.cpp
+    src/recomp/dispatch.cpp
+    src/recomp/guest.cpp)
+target_include_directories(dcusa_recomp PUBLIC src)
+target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime)
+dcusa_warnings(dcusa_recomp)
+
+# ---- translated game code ----
+# tools/x86tr generates it from the player's prepared EXE image (dcprepare, then
+# discover.py and translate.py). It lives in the build tree only; point
+# DCUSA_GENERATED_DIR at a translate.py output folder to build it.
+set(DCUSA_GENERATED_DIR "" CACHE PATH "translate.py output folder (holds sources.txt); empty to build without game code")
+if(DCUSA_GENERATED_DIR)
+    if(NOT EXISTS "${DCUSA_GENERATED_DIR}/sources.txt")
+        message(FATAL_ERROR "DCUSA_GENERATED_DIR has no sources.txt: run tools/x86tr/translate.py first")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${DCUSA_GENERATED_DIR}/sources.txt")
+    file(STRINGS "${DCUSA_GENERATED_DIR}/sources.txt" dcusa_generated_names)
+    list(TRANSFORM dcusa_generated_names PREPEND "${DCUSA_GENERATED_DIR}/")
+    add_library(dcusa_generated STATIC ${dcusa_generated_names})
+    target_link_libraries(dcusa_generated PUBLIC dcusa_recomp)
+    # Same floating-point rules as the runtime; no warnings (the code mirrors the
+    # guest instruction by instruction) and no debug info (it would run to gigabytes).
+    target_compile_options(dcusa_generated PRIVATE -w -O2 -g0 -ffp-contract=off -fno-fast-math)
+endif()
+
 # ---- tools ----
 add_executable(dcprepare tools/dcprepare/main.cpp)
 target_link_libraries(dcprepare PRIVATE dcusa_system)
@@ -54,7 +82,7 @@ dcusa_warnings(dcprepare)
 enable_testing()
 function(dcusa_test name)
     add_executable(${name} tests/${name}.cpp)
-    target_link_libraries(${name} PRIVATE dcusa_system dcusa_runtime)
+    target_link_libraries(${name} PRIVATE dcusa_system dcusa_recomp)
     dcusa_warnings(${name})
     add_test(NAME ${name} COMMAND ${name} ${ARGN})
     set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
@@ -65,6 +93,27 @@ dcusa_test(test_pe32)
 dcusa_test(test_exe_image)
 dcusa_test(test_content)
 dcusa_test(test_fail_closed)
+
+# Translator semantics against real x86: tools/x86tr/semtest.py runs every case
+# natively as x86_64 under Rosetta 2 and translates the same snippet assembled
+# for i386; the test checks the translation reproduces the x86 results.
+find_package(Python3 COMPONENTS Interpreter)
+set(DCUSA_PYTHONPATH "${CMAKE_CURRENT_SOURCE_DIR}/build/pylib" CACHE PATH
+    "PYTHONPATH for tools/x86tr (where capstone is installed)")
+if(APPLE AND Python3_FOUND)
+    set(dcusa_semdir "${CMAKE_CURRENT_BINARY_DIR}/x86sem")
+    file(GLOB dcusa_x86tr_scripts CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/x86tr/*.py")
+    add_custom_command(
+        OUTPUT "${dcusa_semdir}/x86_semantics.cpp"
+        COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${DCUSA_PYTHONPATH}"
+                ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/x86tr/semtest.py" --out "${dcusa_semdir}"
+        DEPENDS ${dcusa_x86tr_scripts}
+        COMMENT "x86 semantics cases: ground truth under Rosetta, translation of the i386 encodings")
+    add_executable(test_x86_semantics "${dcusa_semdir}/x86_semantics.cpp")
+    target_link_libraries(test_x86_semantics PRIVATE dcusa_recomp)
+    target_compile_options(test_x86_semantics PRIVATE -w -O1 -ffp-contract=off -fno-fast-math)
+    add_test(NAME test_x86_semantics COMMAND test_x86_semantics)
+endif()
 # Needs the player's files (skips otherwise). Writes caches under the build tree only.
 dcusa_test(test_game_files "${DCUSA_GAME_LIBRARY}" "${CMAKE_CURRENT_BINARY_DIR}/test-cache")
 set_tests_properties(test_game_files PROPERTIES LABELS "game-files" TIMEOUT 300)
