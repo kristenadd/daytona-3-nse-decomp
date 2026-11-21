@@ -1,0 +1,26 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "mac-host",
+      "displayName": "macOS host (tools and tests)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/mac-host",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "mac-host", "configurePreset": "mac-host" }
+  ],
+  "testPresets": [
+    {
+      "name": "mac-host",
+      "configurePreset": "mac-host",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    }
+  ]
+}
