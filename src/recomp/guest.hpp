@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <limits>
 
 #include "recomp/cpu.hpp"
 #include "recomp/dispatch.hpp"
+#include "recomp/native.hpp"
 #include "recomp/x86ops.hpp"
 
 namespace dcusa::recomp {
@@ -19,6 +21,15 @@ namespace dcusa::recomp {
 // A guest function the translator could not translate, or did not select.
 [[noreturn]] void guest_unported(Cpu& c, std::uint32_t va, const char* why);
 void guest_cpuid(Cpu& c);
+// `pause` in a spin loop: the other guest threads get a turn.
+void guest_pause(Cpu& c);
+// Set every couple of milliseconds while another guest thread could run; the
+// translated code checks it at loop back-edges and yields (GUEST_PREEMPT).
+extern std::atomic<bool> g_preempt;
+// Counters a temporary translator probe can bump (printed with DCUSA_WATCH).
+extern std::uint64_t g_probe[8];
+void debug_probe(Cpu& c, std::uint32_t va, std::uint32_t a, std::uint32_t b, std::uint32_t d, std::uint32_t e);
+void guest_preempt(Cpu& c);
 std::uint64_t guest_rdtsc();
 
 template <class T, int N, class V, class Op> inline void lanes(V& d, const V& s, Op op) {
@@ -56,6 +67,30 @@ template <class T> inline T x86_nan(T r, T a) {
     if (a != a) return x86_quiet(a);
     return x86_default_nan<T>();
 }
+
+// Locked x86 operations and xchg with memory. Sequentially consistent, which is
+// what the lock prefix guarantees; the address must be naturally aligned (the
+// translator traps otherwise, since a split lock has no single host instruction).
+template <class T> inline T atomic_load(std::uint8_t* M, std::uint32_t a) {
+    return __atomic_load_n(reinterpret_cast<T*>(M + a), __ATOMIC_SEQ_CST);
+}
+template <class T> inline T atomic_xchg(std::uint8_t* M, std::uint32_t a, T v) {
+    return __atomic_exchange_n(reinterpret_cast<T*>(M + a), v, __ATOMIC_SEQ_CST);
+}
+template <class T> inline bool atomic_cmpxchg(std::uint8_t* M, std::uint32_t a, T& expected, T desired) {
+    return __atomic_compare_exchange_n(reinterpret_cast<T*>(M + a), &expected, desired, false, __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST);
+}
+template <class T, class Op> inline T atomic_rmw(std::uint8_t* M, std::uint32_t a, Op op) {
+    auto* p = reinterpret_cast<T*>(M + a);
+    T seen = __atomic_load_n(p, __ATOMIC_SEQ_CST);
+    for (;;) {
+        if (__atomic_compare_exchange_n(p, &seen, op(seen), false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return seen;
+    }
+}
+inline void fence_full() { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+inline void fence_store() { __atomic_thread_fence(__ATOMIC_RELEASE); }
+inline void fence_load() { __atomic_thread_fence(__ATOMIC_ACQUIRE); }
 
 inline Xmm xmm_load(const std::uint8_t* M, std::uint32_t a, unsigned bytes) {
     Xmm v{};
@@ -156,6 +191,11 @@ using namespace dcusa::recomp;
     std::uint8_t cf = c.cf, pf = c.pf, af = c.af, zf = c.zf, sf = c.sf, of = c.of;                   \
     std::uint32_t ta = 0, tb = 0;                                                                    \
     (void)M; (void)ta; (void)tb
+#define GUEST_PREEMPT()                                                                      \
+    do {                                                                                     \
+        if (__builtin_expect(::dcusa::recomp::g_preempt.load(std::memory_order_relaxed), 0)) \
+            ::dcusa::recomp::guest_preempt(c);                                               \
+    } while (0)
 #define SYNC()                                                                                       \
     (c.r[0] = eax, c.r[1] = ecx, c.r[2] = edx, c.r[3] = ebx, c.r[4] = esp, c.r[5] = ebp, c.r[6] = esi, \
      c.r[7] = edi, c.cf = cf, c.pf = pf, c.af = af, c.zf = zf, c.sf = sf, c.of = of)

@@ -1,0 +1,283 @@
+# Phase 4 — audio, video, input, arcade services
+
+Phase 4 from [PHASE0.md](PHASE0.md). It can run beside [Phase 3](PHASE3.md).
+
+**Exit criterion:** every Win32 import used by translated code is native or fails
+closed with a report.
+
+The fail-closed half is already true. A handler answers the imports below, and
+any other import aborts with the DLL and the name. File reads, the wait on a
+guest thread, the message queue, DirectInput, a silent DirectSound device, and
+`FindWindow` of `NRT Application` are in place. ADX, CSB, Sofdec, AVI, and the
+shell security and credit messages are not answered as a service. The exit
+criterion is not met until ADX, CSB, Sofdec, and AVI are native on a run that
+needs them. The cabinet check at `0x577622` now sees localhost as `127.0.0.1`,
+and with `NumCabinets=1` that sets the ping ready byte. After the first
+outbound `DYT` packet, one reply is delivered through `select` and `recv`
+with no host socket: id `0x2C`, the message that sets the link ready byte.
+`Freeplay` then reads as 1. The same run opens `rom/sound/snd_db.txt`,
+`rom/sprite/sprdb.bin`, `rom/auth2d/aetdb.bin`, and the two haar cascades.
+Guest threads now run (PHASE2 item 12): `CreateThread` through the CRT wrapper
+`0xC215BB` starts the procedure on its own `Cpu`, TEB and stack, and threads take
+turns at blocking calls. The sound server `0xB66530`, the CRI workers `0xBFF0EB`,
+the NRT IO thread and the resource worker run their own loops. The earlier
+shortcuts (alive words written by `CreateThread`, waits that always returned 0,
+the CRI pump in `f_00B50540` and in the frame function) are gone. Events,
+semaphores and mutexes are real; `timeSetEvent` pulses its auto-reset event on
+the host clock (`0x59DD26` passes `TIME_PERIODIC | TIME_CALLBACK_EVENT_PULSE`).
+`CoCreateInstance` returns `REGDB_E_CLASSNOTREG`, so WIC and the camera stay
+closed. The process heap stays 64 MB because the memory manager `VirtualAlloc`s
+100 MB from the arena that starts there; further CRT allocations use
+`0x37000000`, then a region from `0x80000000` that commits as it grows.
+`VirtualAlloc` continues at `0x40000000` once its first region is full. The run
+builds a GDI font DC (no host font). `GetFileTime`, `FileTimeToLocalFileTime`,
+and `FileTimeToSystemTime` return success with a fixed stamp. A 90 s run opens
+243 files and keeps drawing and presenting with no unported import. New
+handlers it needed: `PathStripToRootW`, `GetDiskFreeSpaceW` (64 GB free of 128),
+`GetWindowLongW` (with `SetWindowLongW` storing per index), `DestroyWindow` and
+`UnregisterClassA` for the helper window `0x59E423` makes, `GetModuleHandleExW`
+for the CRT's thread exit, and `WSACleanup` (#116). The DirectSound buffer now
+follows the `dsound.h` slot order and reports `DSBSTATUS_PLAYING | LOOPING`; it is
+still silent. ADX, CSB, Sofdec, and AVI are still not decoded. The presented
+image is still black.
+
+The game folder is read-only. Writes go to a container next to the cache.
+No host socket is opened. With an empty queue, `PeekMessageW` returns 0, so the
+frame loop does not quit. `dcrun --content <folder>` finds the edition under
+that folder, reads it, and stays in the loop.
+
+## The shell's security challenge (answered)
+
+Every 10 s the game sends DYT message `0x2A` with a 4-byte challenge and counts
+it unanswered (`[link+0x30]`); after five it asks for a reboot (`0x584B20` →
+`0x5BE410` → `[0x17353E0]`) and the boot ends in `ExitProcess`. The shell's
+answer is message `0x2E` whose 4-byte payload, run through the game's check
+`0x584600` (XOR `0xB1`, twelve rounds of a 32-bit shift register with fixed
+feedback taps, a bit reversal of byte 0, XOR `0xC0`, XOR `0x77`), gives the
+challenge back. The check is affine over GF(2), so `src/recomp/shell.cpp`
+inverts it exactly; `send` queues the answer and `select` / `recv` (with
+`MSG_PEEK`) deliver it. CTest `test_shell` checks 20,000 challenges. With it the
+boot reaches attract (PHASE3).
+
+Also answered on the way: `CreateProcessA` (the boot starts
+`c:\sega\shell\InpWrapper.exe`, the parallel-port force-feedback helper, and
+skips it on failure: FALSE, `ERROR_FILE_NOT_FOUND`), `closesocket` (#3),
+`DeleteDC`, `DeleteObject`, `IDirectSoundBuffer::GetFormat` / `SetFormat` (the
+buffer keeps its `WAVEFORMATEX`), `QueryInterface` for `IDirectSoundBuffer8`,
+`ID3D11Buffer::GetDesc`. The file table holds 65,536 handles (file handles at
+`0x100000`, find handles at `0x200000`), `VirtualFree(MEM_RELEASE)` makes a
+region reusable, and the heap continues at `0x80000000` past its two fixed
+regions.
+
+## Landed
+
+`dcrun --content` calls `set_guest_files` with the install root (the folder that
+holds `Daytona/` and `GameData/`), the current directory `Daytona`, and a
+writable container. Guest paths use the `D:` drive. `..` cannot leave the
+install. A read opens the container copy when one exists, otherwise the
+install. A write never modifies the install. `CreateFileA` / `CreateFileW`,
+`ReadFile`, `WriteFile`, `SetFilePointer`, `SetFilePointerEx`, `GetFileSize`,
+`GetFileSizeEx`, `GetFileAttributesA`, `GetFileAttributesExW`, the
+`FindFirstFile` / `FindNextFile` calls, `CloseHandle`, `GetCurrentDirectoryW`,
+`SetCurrentDirectoryW`, `GetFullPathNameA` / `W`, `GetFileTime`,
+`FileTimeToLocalFileTime`, and `FileTimeToSystemTime` are that layer. The
+time calls use a fixed FILETIME / SYSTEMTIME; they do not read host mtimes.
+`GetPrivateProfileIntA` and `GetPrivateProfileStringA` read an ini when the
+file and the key exist, and otherwise return the caller's default.
+`WaitForSingleObject` returns 0. The wait at `0x4881C4` treats that as
+finished, and the wait at `0x4FC81D` continues only for 0. `GetExitCodeThread`
+writes 0, not `STILL_ACTIVE` (259).
+
+`PeekMessageW` at `0x41ECF6` returns a posted message, or 0 when the queue is
+empty. `PostQuitMessage` posts `0x12`. `GetClientRect` writes a 1920×1080
+client. `XInputGetState` reads `set_pad_snapshot`. A disconnected pad still
+returns 1167, which `0x6A0281` counts as no pad.
+
+`FindWindowA` and `FindWindowW` return `0x2001` when the class or the title
+contains `NRT`, which is the class at `0x1415734` and `0x1417FF8`. Any other
+name returns 0, so the `SendMessage` of `0x8064` stays on the path that already
+returns success. `DirectInput8Create` returns an `IDirectInput8`. `CreateDevice`
+returns a device whose `GetDeviceState` fills a `DIJOYSTATE` from the same
+`PadSnapshot`: the wheel is `lX` around 32767, the accelerator is `lY`, the
+brake is the first slider, and Start, View, Shift, Test, Service, and Coin are
+buttons 0 through 6. `Acquire`, `Poll`, `SetDataFormat`, and
+`SetCooperativeLevel` return 0. `DirectSoundCreate8` (ordinal 11) returns a
+device. `CreateSoundBuffer` returns a buffer whose `Lock` points at guest
+memory at `0x36000000` and whose `Play`, `Stop`, and `GetCurrentPosition`
+succeed. No samples are mixed.
+
+## Already answered
+
+Startup, the window, the clock, the heap, and the first frame's graphics calls
+are handled. The ones this phase inherits:
+
+- Paths. `PathFileExistsA` and `PathFileExistsW` return false. `PathIsDirectoryW`
+  is true only for an empty root or a drive root, so the walk in `0x6C0210`
+  stops. `GetPrivateProfileStringA` and `GetPrivateProfileIntA` return the
+  caller's default. The first integer read is `Credit/Freeplay`, default 0.
+- The window is the handle `0x2001`. No host window is created.
+  `GetForegroundWindow` returns it. `SetWindowLongW` installs `0x6A0740`.
+- `XInputGetState` returns `ERROR_DEVICE_NOT_CONNECTED` (1167). `0x6A0281`
+  counts that as no pad and init still succeeds.
+- Winsock ordinals that startup uses return success and transmit nothing:
+  `WSAStartup` (#115), `socket` (#23), `bind` (#2), `listen` (#13), `connect`
+  (#4), `send` (#19), `select` (#18, which returns 0 so the caller skips
+  `recv`), `inet_addr`, `htons`, `ntohs`, `htonl`, `ioctlsocket`, `setsockopt`,
+  `gethostname` (fails, and `0x5641A8` keeps the address it already parsed).
+  The listen address is `192.168.1.x:27000`.
+- `timeGetTime` and the multimedia timer period calls. `timeSetEvent` arms a
+  host-clock timer that pulses its event.
+- `CreateThread` at `0x591C63` starts the body at `0x56AE20`, which loops while
+  byte `+0x1C` is set and sleeps between passes. It runs as a guest thread.
+
+## What is still fail-closed
+
+By DLL, the imports with no handler:
+
+| DLL | Count | What a run needs from it |
+| --- | --- | --- |
+| KERNEL32 | 136 | `CreateFileA` / `CreateFileW`, `ReadFile`, `WriteFile`, `SetFilePointer`, `FindFirstFile` / `FindNextFile`, `GetFileSize`, `CloseHandle`, `Sleep`, `LoadLibrary` |
+| USER32 | 43 | `GetClientRect`, `DispatchMessageW`, `SendMessageW`, `PostMessageW`, `DefWindowProcW`, `PeekMessageA` |
+| WS2_32 | 20 | The ordinals not in the list above, including `recv` (#16) and `recvfrom` (#17) |
+| AVIFIL32 | 14 | AVI read and write |
+| GDI32 | 8 | Fonts and a memory DC. `GetStockObject` is already handled |
+| SHELL32 | 6 | `ShellExecuteA`, drag-drop, the tray icon |
+| WINHTTP | 5 | Proxy discovery. No request is sent |
+| ole32 | 5 | `CoCreateInstance`, structured storage |
+| MSVFW32 | 4 | `ICOpen` / `ICDecompress` |
+| SHLWAPI | 4 | `PathStripPathW` and three neighbours. The six path handlers above exist |
+| OLEAUT32 | 3 | Three ordinals |
+| AVICAP32 | 2 | `capCreateCaptureWindowA` |
+| IPHLPAPI | 2 | `GetAdaptersAddresses`, `GetIfTable` |
+| DINPUT8 | 1 | `DirectInput8Create` is handled. An unknown method on the device still fails closed |
+| DSOUND | 1 | Ordinal 11, `DirectSoundCreate8`, is a silent device. ADX is not decoded |
+| DWrite | 1 | `DWriteCreateFactory` |
+| ADVAPI32 | 1 | `GetUserNameA` |
+| NETAPI32 | 1 | `Netbios` |
+| WINMM | 1 | `timeSetEvent` |
+
+`XINPUT9_1_0.dll` has one import, `XInputGetState`, and it is handled.
+
+## Work
+
+### 1. Files
+
+Content is about 5.2 GB for 2019, addressed by path from the game folder.
+`nrt/dx11/` is NRFC (magic `NRFC`, version 20150701): `car/` and `course/`,
+with course `.nds` files of 370–400 MB that are streamed. Sprites are FARC.
+Nothing is one archive index, so a path map is enough.
+
+`CreateFileA`, `CreateFileW`, `ReadFile`, `SetFilePointer`, `GetFileSize`,
+`GetFileAttributesExW`, `FindFirstFile` / `FindNextFile`, and `CloseHandle`
+read that tree. A missing file is a failed open, not a throw. Writes
+(`WriteFile`, `WritePrivateProfileStringA`, `CreateDirectoryA`, `DeleteFile`)
+go to the container copy of `GameData/`. The player's folder is not modified.
+
+`LoadLibrary` returns 0. The game then uses the imports it already has.
+
+NRT containers, FARC archives and loose DDS now open from the IO and loader
+threads. Phase 3 still has no course or car to draw; boot has not yet reached the
+course load.
+
+### 2. The message queue and the pad
+
+`PeekMessageW` is called at `0x41ECF6` with the filter open and `PM_REMOVE`.
+It has to return a message when one is posted, and 0 when the queue is empty.
+`0x41ECFA` skips the rest on 0. A message of `0x12` (`WM_QUIT`) at `0x41ED00`
+leaves the loop. `GetClientRect` returns the 1920×1080 client the swap chain
+described. `DispatchMessageW` calls the procedure `SetWindowLongW` installed
+(`0x6A0740`). `PostQuitMessage` is the way a run ends. Until something posts
+it, the loop keeps spinning, which is the Phase 2 stop.
+
+`DirectInput8Create` and `XInputGetState` read one `PadSnapshot`: wheel, gas,
+brake, view, gear, start, test, service, coin. No pad still returns
+`ERROR_DEVICE_NOT_CONNECTED` from XInput, so the current init path stays valid.
+Force feedback is computed by `soc::ForceFeedbackImpl` and was sent to a
+parallel-port motor. The snapshot records the request. Core Haptics and wheel
+motors are Phase 7 and Phase 8.
+
+Autoplay (`AutoPlaySetting.ini`, or a scripted snapshot) is what Phase 5 drives.
+The handler has to accept that source as well as a live pad.
+
+### 3. The shell service
+
+The cabinet split is `Shell.exe` on one side and the game on the other. The
+game sends window messages. Each known message gets a native answer. An unknown
+message fails closed.
+
+- Security. `GAME_MSG_SECURITY_CHALLENGE` is answered authenticated. Any other
+  security call fails closed. There is no dongle and no I/O-board handshake.
+- Credits. `SHELL_MSG_SETCREDIT` and the free-play default. A coin button posts
+  the same message.
+- Test and service. `test_mode::` is 34 classes. The test button reaches that
+  menu. Bookkeeping is stored in the container.
+- Settings. `config.ini`, `GameSettings.ini`, `HighScoreData.xml`, and the
+  shell variable files are read-write copies in the container. The profile
+  reads that already return the caller's default keep doing so when the copy
+  has no key.
+
+`SendMessageW` and `PostMessageW` are how these arrive. They share the queue
+from item 2.
+
+### 4. Audio
+
+DirectSound is ordinal 11, `DirectSoundCreate8`, under CRI ADX 10.71c and CRI
+CSB. Sound is `rom/sound/`: 58 ADX streams and `SE.csb` (a `@UTF` table, 15.8
+MB). WinMM `timeSetEvent` is the mixer tick.
+
+The CRI entry points (`ADXT_*`, `mwPly*` for pictures, the cue player) are
+native, found by address, the same way the CRT copies are. The translated CRI
+and its threads are not on the path that plays a buffer. ADX is decoded to the
+`AudioOutput` buffer. CSB cues trigger those decodes. `timeSetEvent` posts to
+the queue on the host tick instead of starting a guest thread.
+
+### 5. Video
+
+Movies are `rom/movie/`: 24 Sofdec `.sfd` files (MPEG program stream, 481 MB)
+and 2 AVI files (173 MB). Sofdec is the `mwPly` boundary from item 4, decoded
+to a texture Phase 3 can sample. AVI and VFW (`AVIFIL32`, `MSVFW32`) are the
+same idea for the two AVI files: open, decode a frame, close. `ICDecompress`
+fails closed until that decoder exists.
+
+### 6. Left fail-closed on purpose
+
+- Networking. `connect` already returns success and `select` already times out.
+  The remaining Winsock ordinals, `WINHTTP`, `IPHLPAPI`, and `Netbios` stay
+  fail-closed unless a call site on the standalone path requires a specific
+  success value. Standalone is `NETWORK_TYPE=2`. Linked cabinets, rank, and
+  the satellite modes are not ported.
+- The camera. `capCreateCaptureWindowA` fails closed. OpenCV is not run. The
+  face billboard has no camera.
+- `CreateProcessA`, `ShellExecuteA`, the tray icon, and drag-drop. The game
+  does not spawn a process.
+- `LoadLibrary` of a DLL that is not the ones already imported.
+
+### 7. EEPROM
+
+The i960 side has `_Check_EEPROM` and `EEPROM_to_DRAM`. Backup RAM is a file in
+the container, loaded into the guest buffer the Model 2 program reads. It is
+written back when the game writes it. The player's ROM images are not modified.
+
+## Suggested order
+
+1. File reads, then container writes. **Done** for the handlers the run uses
+   (including the file-time stubs and `OVERLAPPED` reads, which complete in the
+   call and set their event).
+2. The message queue, `GetClientRect`, and quit. Then the pad snapshot, with
+   no pad still meaning "not connected". **Done.**
+3. The shell messages: security answer, free play, test, service. **Partly.**
+   Freeplay, the `0x2C` reply and the security challenge (`0x2A` → `0x2E`) are
+   answered; credits, test and service as a full service are not.
+4. ADX and CSB at the CRI boundary, and `timeSetEvent` as a host tick.
+   **Partly.** `timeSetEvent` pulses its event on the host clock and the CRI
+   threads run; ADX and CSB are not decoded.
+5. Sofdec, then the two AVI files. **Not done.**
+6. EEPROM for the Model 2 backup. **Not done.**
+
+Camera, HTTP, NetBIOS, and linked play stay fail-closed.
+
+## Out of this phase
+
+- Pixels. Phase 3.
+- A window, a controller UI, and haptics. Phases 7 and 8.
+- Opening a socket.

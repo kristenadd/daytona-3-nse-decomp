@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 
+#include "recomp/threads.hpp"
 #include "runtime/fail_closed.hpp"
 
 namespace dcusa::recomp {
@@ -16,7 +17,8 @@ void trap(Cpu&, std::uint32_t va, const char* what) {
 void guest_unported(Cpu&, std::uint32_t va, const char* why) { fail_closed(Unported::Function, va, why); }
 
 // The CPU the translated code can actually run: x87, MMX, SSE, SSE2, CMOV, CX8,
-// TSC; nothing newer, since nothing newer is translated.
+// TSC. Leaf 1 ECX stays 0, so the CRT and the game's feature table never select
+// the SSE4 or AVX paths. Those instructions stay on the trap allow-list.
 void guest_cpuid(Cpu& c) {
     std::uint32_t leaf = c.r[Cpu::EAX];
     std::uint32_t a = 0, b = 0, cx = 0, d = 0;
@@ -33,6 +35,20 @@ void guest_cpuid(Cpu& c) {
     c.r[Cpu::EBX] = b;
     c.r[Cpu::ECX] = cx;
     c.r[Cpu::EDX] = d;
+}
+
+void guest_pause(Cpu& c) { sched_yield(c); }
+
+std::atomic<bool> g_preempt{false};
+std::uint64_t g_probe[8] = {};
+
+void debug_probe(Cpu& c, std::uint32_t va, std::uint32_t a, std::uint32_t b, std::uint32_t d, std::uint32_t e) {
+    std::fprintf(stderr, "probe %08X thread %u: %08X %08X %08X %08X\n", va, c.mem ? *reinterpret_cast<const std::uint32_t*>(c.mem + c.fs_base + 0x24) : 0u, a, b, d, e);
+}
+
+void guest_preempt(Cpu& c) {
+    g_preempt.store(false, std::memory_order_relaxed);
+    sched_yield(c);
 }
 
 std::uint64_t guest_rdtsc() {

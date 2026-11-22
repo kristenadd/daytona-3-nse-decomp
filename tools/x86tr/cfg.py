@@ -21,6 +21,9 @@ STOPS = {'ret', 'retf', 'int3', 'hlt', 'ud2', 'iretd'}
 MAX_TABLE = 1024
 
 
+THREAD_NAME_EXCEPTION = '0x406d1388'
+
+
 class Insn:
     __slots__ = ('va', 'size', 'mnem', 'ops')
 
@@ -96,12 +99,23 @@ class Walker:
         self._sorted_count = 0
 
     def _bound(self, trace, reg):
-        """Entries of a table indexed by `reg`: from a preceding `cmp reg, N; ja`."""
+        """Entries of a table indexed by `reg`.
+
+        `cmp reg, N` followed by an unsigned above-branch allows 0..N, so N + 1 entries.
+        A `jb` (below) only reaches the table for 0..N-1; the extra slot is dropped later,
+        when it is not a code address. `and reg, M` with M a small 2^n-1 mask leaves 0..M.
+        """
         for insn in reversed(trace[-12:]):
             if insn.mnem == 'cmp':
                 m = CMP_IMM.match(insn.ops)
                 if m and m.group(1) == reg:
                     return _imm(m.group(2)) + 1
+            if insn.mnem == 'and':
+                m = CMP_IMM.match(insn.ops)
+                if m and m.group(1) == reg:
+                    mask = _imm(m.group(2))
+                    if 0 < mask <= 31 and mask & (mask + 1) == 0:
+                        return mask + 1
             if insn.mnem in ('mov', 'movzx', 'lea', 'add', 'sub', 'dec', 'inc') and insn.ops.startswith(reg + ','):
                 # the index was rewritten; a bound on the old value no longer applies
                 m = BYTE_INDEX.match(insn.ops) if insn.mnem == 'movzx' else None
@@ -140,8 +154,13 @@ class Walker:
                 break
             t = img.u32(va)
             if not img.in_text(t):
+                # The cmp bound is one high when the branch into the table is `jb` (ecx < N)
+                # rather than `ja` (ecx > N). Only the final slot is spare; an earlier
+                # non-code word means this is not a table.
+                if bounded and targets and k == count - 1:
+                    break
                 if bounded:
-                    return JumpTable(table, None, True)  # a bounded table with a non-code entry: not a jump table
+                    return JumpTable(table, None, True)
                 break
             targets.append(t)
         if not targets:
@@ -152,12 +171,16 @@ class Walker:
                 self.data_in_text.update(range(index_table[0], index_table[0] + index_table[1]))
         return JumpTable(table, targets, bounded, index_table)
 
-    def _call_returns(self, insn):
+    def _call_returns(self, insn, trace=()):
         t = insn.direct_target()
         if t is not None and t in self.noreturn:
             return False
         m = re.match(r'^dword ptr \[(0x[0-9a-f]+)\]$', insn.ops)
         if m and int(m.group(1), 16) in self.noreturn:
+            # RaiseException(0x406D1388) names a thread for a debugger. The caller's
+            # own __except swallows it, so the call returns.
+            if any(i.mnem == 'push' and i.ops == THREAD_NAME_EXCEPTION for i in trace[-8:]):
+                return True
             return False
         # MSVC pads after calls that never return; a call right before int3 padding is one.
         nxt = insn.next
@@ -165,13 +188,43 @@ class Walker:
             return False
         return True
 
+    def _epilog_past_thunk(self, limit, target):
+        """True when every function start in [limit, target) is a tiny function
+        that returns before target. MSVC plants an SEH cleanup between a body
+        and its epilog, and that cleanup is a call target, so it becomes the
+        walk limit and the epilog would otherwise be left out of the function."""
+        import bisect
+        starts = self._sorted_starts
+        i = bisect.bisect_left(starts, limit)
+        if i >= len(starts) or starts[i] >= target:
+            return False
+        while i < len(starts) and starts[i] < target:
+            thunk = starts[i]
+            va = thunk
+            saw_ret = False
+            for _ in range(10):
+                insn = self.dec.at(va)
+                if insn is None or va >= target:
+                    return False
+                if insn.mnem.startswith('ret'):
+                    saw_ret = insn.va - thunk <= 32
+                    break
+                va = insn.next
+            if not saw_ret:
+                return False
+            i += 1
+        return True
+
     def _leaves(self, entry, target, limit):
         """A direct jump that leaves the function: to a known start, before the entry,
-        at or past the next known start, or onto int3 alignment padding (a function start)."""
+        at or past the next known start, or onto int3 alignment padding (a function start).
+        A jump past a tiny SEH thunk to this function's own epilog does not leave."""
         if target == entry:
             return False
-        if target in self.function_starts or target < entry or (limit is not None and target >= limit):
+        if target in self.function_starts or target < entry:
             return True
+        if limit is not None and target >= limit:
+            return not self._epilog_past_thunk(limit, target)
         return self.image.in_text(target - 1) and self.image.u8(target - 1) == 0xCC
 
     def walk(self, entry):
@@ -235,7 +288,7 @@ class Walker:
                     t = insn.direct_target()
                     if t is not None:
                         fn.callees.add(t)
-                    if not self._call_returns(insn):
+                    if not self._call_returns(insn, trace):
                         fn.noreturn_calls.add(va)
                         break
                 va = insn.next

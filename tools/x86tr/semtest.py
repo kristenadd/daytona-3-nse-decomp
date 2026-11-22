@@ -67,6 +67,17 @@ def build_cases():
     add('xadd eax, ecx')
     add('xadd dword ptr [{b}], edx')
     add('lock xadd dword ptr [{b}+4], esi')
+    for op, form in (('add', 'dword ptr [{b}], eax'), ('sub', 'dword ptr [{b}+4], ecx'),
+                     ('and', 'dword ptr [{b}+8], 0xff00'), ('or', 'byte ptr [{b}+1], 0x80'),
+                     ('xor', 'word ptr [{b}+2], si'), ('inc', 'dword ptr [{b}]'), ('dec', 'byte ptr [{b}+3]'),
+                     ('neg', 'dword ptr [{b}+8]'), ('not', 'dword ptr [{b}+12]'),
+                     ('xadd', 'dword ptr [{b}], edx'), ('bts', 'dword ptr [{b}], 3'),
+                     ('btr', 'word ptr [{b}+2], 9'), ('btc', 'dword ptr [{b}+4], 13'),
+                     ('cmpxchg', 'dword ptr [{b}], edx'), ('cmpxchg8b', 'qword ptr [{b}]')):
+        add('lock %s %s' % (op, form), 0x40 if op.startswith('cmpxchg') else (0x1 if op[:2] == 'bt' else 0x8D5))
+    add('xchg dword ptr [{b}], esi')
+    add('mfence')
+    add('sfence\nlfence')
     # Rosetta sets cmpxchg's other flags from DEST - EAX, real CPUs (per Bochs and QEMU) from
     # EAX - DEST; compiled code reads only ZF. The translation follows the CPUs.
     add('cmpxchg ecx, edx', 0x40)

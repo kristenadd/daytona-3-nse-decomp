@@ -1,0 +1,397 @@
+# Phase 3 — graphics
+
+Phase 3 from [PHASE0.md](PHASE0.md): a D3D11 device that draws, a Metal backend, and
+shaders translated from the player's own HLSL.
+
+**Exit criterion:** attract-mode frames match Windows captures within tolerance.
+
+The tolerance and the capture set belong to Phase 5. This phase produces the frames.
+Nothing from the game folder is committed. Shader source stays in the player's EXE and
+is translated on the machine that prepares the cache.
+
+Phase 2 left a device that answers every call the first frame makes. Buffers and
+textures keep the bytes `CreateBuffer`, `CreateTexture2D`, `UpdateSubresource`,
+and `Map` / `Unmap` move. `ClearRenderTargetView` fills a stored target from
+the four floats. `DrawIndexed` fills a triangle into the bound render target
+when the vertices are in screen pixels or in NDC, and samples a bound pixel-shader
+texture when the layout has a texcoord. RGBA8, BGRA8, BC1, and BC3 are sampled
+as color. R16G16 float, RGBA16 float, R16 float, and R32 float are sampled as
+grayscale or two channels. An untextured triangle larger than 64 pixels is left
+alone: those are the 3D scene, and they are not in screen space until a vertex
+shader runs. `Present` copies that target. `DCUSA_FRAME` writes present 1 and
+present 30 as PPM files next to the path it names. `DCUSA_STATS` prints the
+draw counts.
+
+`D3DCompile` reads `Texture2D` and `SamplerState` names out of the HLSL and
+ignores `#define` lines, so `#define Texture2D sampler2D` is not a binding.
+`D3DReflect` reports those names. `GetOutputParameterDesc` returns a failure
+HRESULT so the output-signature loop stops, and constant buffers are not
+reported, so the variable walk that follows a cbuffer is not entered. The
+first drawn shader's only texture is `g_Texture` at register t0. The draws
+before the first present are fullscreen quads in NDC, blitting one target
+into the next, and that chain starts from a 512×512 R32 texture that is still
+all zeros. A 256×256 RGBA upload does land: it is a font atlas, and no draw
+in the first 30 presents binds it. One mesh is submitted in that window, and
+30 by present 30. Its shader's texture is `g_VelocityMap`. The vertices are a
+sphere of radius one million. A perspective matrix unmapped into a 272-byte
+constant buffer (x scale about 1.79, y scale about 3.19, the 16:9 projection)
+is applied to those positions, and they land in NDC around the center of the
+view. The pass binds no vertex constant buffer of its own, and the texture it
+samples is empty, so the triangles take their vertex color. The next draw
+is a fullscreen quad that samples that target into the following one. Draw 20
+of that frame is the fullscreen blit into the back buffer. Its pixel shader
+is the glare composite: it samples `g_Texture`, `g_LightShaft` and three glare
+maps. `g_Texture` is a 1920×1080 RGBA16F target that is still all zeros, and
+so are the other full-size inputs. The only mesh that paints is the velocity
+sphere, 128 triangles into a target that composite does not sample. No draw
+in the first 30 presents binds an RGBA texture, so the font atlas is loaded
+and never sampled. Clears and triangle writes of float targets store
+half-floats and R32 floats.
+
+The passes that do run are Shadow, PreScene, Main, PostProcess, Motion Blur,
+Glare, and Gamma. EnvCube, Reflect, DOF, and Radiation Blur do not. Main is
+entered and still submits no course mesh.
+
+The load stall is past. It was not one missing call: the NRT IO thread
+(`f_00781BB0`), the resource worker (`f_0075C930`), and the CRI file, sound and
+stream workers never ran, and earlier runs drained their queues with hand edits
+inside the generated files. Guest threads now run cooperatively (PHASE2 item 12),
+and those edits are gone. With the threads running, a translator bug showed up:
+flags were treated as dead when control passed into the next discovered piece of
+a function. zlib's `inflate` is split into 109 pieces, and every `FArC`
+(gzip) archive failed with "invalid bit length repeat". The real `aet.bin` offsets
+were small, but the relocated pointers were garbage. With flags kept live across
+those exits, the guest's own zlib decodes stored, fixed, dynamic, Huffman-only and
+RLE gzip streams byte for byte.
+
+A 90 s content run now starts 14 guest threads and opens 243 files with no
+fail-closed stop: `GameData/.shaders/shader_cache.bin`, `NRTBox.dx11.nrfc`, the
+pit-crew and crowd robots, `ND_M_Bgc_O_kb_eye_down`, the `rom/auth2d` and
+`rom/sprite` FARCs, minimap, lightprobe, network, 166 sidebar DDS and the
+wait-scene DDS. Textures created reach 292 by present 300. `ReadFile` with an
+`OVERLAPPED` completes in the call and sets its event. Other fixes on the way:
+`GetModuleFileName` returns `D:\Daytona\Daytona.exe`, so "exe folder + `\nrt\...`"
+stays inside the game folder. `VirtualAlloc` continues at `0x40000000`, and the heap
+continues at `0x80000000`; the boot asks for single 53 MB blocks, and running out of
+heap was a clean shutdown, not a crash. The `IDirectSoundBuffer` slots now follow
+`dsound.h` (Lock `+0x2C`, Play `+0x30`, GetStatus `+0x24`, Stop `+0x48`, Unlock
+`+0x4C`); before, only `+0x10` was right.
+
+The D3D11 objects (vtables, singletons, the object pool) used to sit at
+`0x25100000`, 17 MB into the process heap. Once the boot filled the heap, heap
+blocks and D3D objects overwrote each other, and every `D3DCompile` rewrote the
+vtables over live heap data. They are at `0x100000`–`0x3F0000` now, below the
+image, with the reflection name pool.
+
+The presented image is still black. The glare composite's inputs are still empty,
+because no course or car is drawn yet. The run is slow: about 1.7 presents a second,
+and half the CPU is the 2D reference device painting full-screen float targets
+(`draw_indexed` / `store_color`). Boot state `[0x1735608]`, the five subsystem
+states, and the 778-entry resource manager have not been re-read since the threads
+started running.
+
+`dcrun --content <folder>` mounts that install and stays in the frame loop.
+`DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
+`DCUSA_FRAME=<path>` writes present 1, 30, and every `DCUSA_EVERY`th as PPM.
+`DCUSA_IO=1` logs every open and read with the thread that did it.
+**Attract mode renders.** With `DCUSA_METAL=1`, `DCUSA_SHADERS` and
+`DCUSA_TRANSLATE=1`, a run boots in about 8,000 presents (70 s on an M3 Max):
+boot state `[0x1735608]` goes 0 → 5 → 8, the five subsystems reach state 2, net
+status `[0x15FF5DC]+0x74` becomes 1, and the resource queue drains to 0. From
+there the game plays its attract loop: a race with cars, track, trees and sky
+behind the FREE PLAY / PRESS START BUTTON overlay, and the "NEW LIVE CAMERA
+SYSTEM" card with driver portraits. A frame is about 1,300 draws (436 depth-only,
+403 scene, 354 blur, shadows, the post chain); 397 shaders are translated, 185
+pipelines built, nothing skipped. Colours are not yet checked against Windows.
+What it took, in order of discovery:
+
+- Preemption at loop back-edges (PHASE2 item 12). The boot's resource walk
+  (`f_004FDF60` → `f_0051E7F0`) loops without a blocking call; with purely
+  cooperative switching the loader threads it waits on never ran.
+- The guest's file table held 256 handles; the boot keeps several hundred
+  containers open, and after that every open failed with
+  `ERROR_TOO_MANY_OPEN_FILES`. A failed read leaves a resource in state 3, and
+  the walk spins forever on such an entry (the "state 3" path does not advance
+  its iterator). The table is 65,536 now.
+- `UpdateSubresource` honours its box and only keeps subresource 0;
+  `VirtualFree(MEM_RELEASE)` returns regions for reuse (53-64 MB streaming
+  buffers come and go).
+- D3D11 objects are reference counted and released objects' slots reused; the
+  pool moved to `0xE0000000` with room for a million (the boot keeps over
+  12,000 buffers alive).
+- The player's `GameData/.shaders/shader_cache.bin` is hidden: with it the game
+  creates shaders from Microsoft DXBC instead of compiling its HLSL. Our
+  `D3DCompile` bytecode is `DXBC`, `DCUS`, then the request key, so the cache
+  the game writes into the container still finds the translation.
+- Shaders a new scene compiles are translated during the run
+  (`DCUSA_TRANSLATE=1` runs `translate_shaders.py --only <key>`).
+- Constant buffers keep their explicit registers (`CB_PER_SCENE` is `b9`, bound
+  once per frame by the game at that number); only unpinned resources are
+  numbered by the lowest free slot. Without this every 3D draw read zeros for
+  its scene constants and the frame was white.
+- Reflection reports array lengths and matrix orientation
+  (`D3D_SVC_MATRIX_COLUMNS` for HLSL's default column-major).
+- Draws with no pixel shader (depth-only shadow passes) get a pipeline with no
+  fragment function.
+- The shell's security challenge is answered (PHASE4): without it the game
+  asked for a reboot 50 s in.
+
+`dcrun --content <folder>` mounts that install and stays in the frame loop.
+`DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
+`DCUSA_FRAME=<path>` writes present 1, 30, and every `DCUSA_EVERY`th as PPM.
+`DCUSA_IO=1` logs every open and read with the thread that did it.
+The HLSL the boot compiles is translated to MSL (item 4), and with
+`DCUSA_METAL=1` an offscreen Metal device draws every call (item 5). The
+presented frame is still black, and that now reflects what the game draws: at
+this point of boot each frame is only the post-process chain over an empty scene
+(no sprite, text or mesh pass yet), so every HDR input is RGB 0. The exit
+criterion is not met: attract has not been reached, and the Windows captures
+belong to Phase 5.
+An unknown COM slot still fails closed as `not ported (service) SLOT:
+Interface+XX`.
+
+## What the first frame already calls
+
+The objects live in `src/recomp/d3d11.cpp`. Vtables are 256 slots because
+`ClearState` is context `+0x1B8`. Kinds, in order: Device, Context, Dxgi, Adapter,
+Factory, Output, Swap, Texture, Srv, Sampler, Rtv, Query, Blob, Shader, Reflector,
+Buffer, Dsv, Layout, Raster, DepthState, Blend, then DirectInput and DirectSound.
+
+`D3D11CreateDevice` (`0x6B967F`) returns feature level `0xB000`. The startup path
+then calls:
+
+- Device: `CheckFeatureSupport` (threading flags both false),
+  `CheckMultisampleQualityLevels` (one sample), `CreateBuffer`, `CreateTexture2D`,
+  `CreateShaderResourceView`, `CreateRenderTargetView`, `CreateSamplerState`,
+  `CreateQuery` (562 of them at `0x6B28C0`), `UpdateSubresource` (the bytes are
+  dropped), `CreateVertexShader`, `CreatePixelShader`, `CreateComputeShader`,
+  `CreateInputLayout`, `CreateRasterizerState`, `CreateDepthStencilState`,
+  `CreateBlendState`, `CreateDepthStencilView`, `SetPrivateData`.
+- Context, from the draw at `0x6CFDB0`: `VSSetConstantBuffers` `+0x1C`,
+  `PSSetShaderResources` `+0x20`, `PSSetShader` `+0x24` (pops 16; the caller pushes
+  an extra zero that `mov esp, ebp` drops), `PSSetSamplers` `+0x28`, `VSSetShader`
+  `+0x2C`, `DrawIndexed` `+0x30`, `PSSetConstantBuffers` `+0x40`,
+  `IASetInputLayout` `+0x44`, `IASetVertexBuffers` `+0x48` (five arguments),
+  `IASetIndexBuffer` `+0x4C`, `IASetPrimitiveTopology` `+0x60`,
+  `VSSetSamplers` `+0x68`, `OMSetBlendState` `+0x8C`, `OMSetDepthStencilState`
+  `+0x90`, `RSSetState` `+0xAC`, plus `OMSetRenderTargets`, `RSSetViewports`,
+  `RSSetScissorRects`, `ClearRenderTargetView`, `ClearDepthStencilView`,
+  `ClearState`, `GenerateMips`, `Map` / `Unmap`, and query `Begin` / `End` /
+  `GetData`.
+- `Map` returns a 64 MB scratch at `0x31000000`. `Unmap` pops 12. `GetData`
+  returns `S_OK` and zeroes the caller's buffer; any other HRESULT makes `0x6B89F6`
+  skip the copy.
+- DXGI: one adapter ("Port", 512 MB), one output, a 1920×1080 mode, a factory, a
+  swap chain. `GetBuffer` is an `ID3D11Texture2D` and keeps a 1920×1080 RGBA
+  target. `Present` (`0x6BBA27`, `0x6BBA31`) copies the bound target. Its
+  callers ignore the HRESULT. `GetFullscreenState` writes windowed.
+  `GetDesc` writes 1920×1080 and a 60/1 refresh, because `0x6BB6F4` divides the
+  denominator by the numerator. `GetContainingOutput` returns the output.
+  `WaitForVBlank` returns `S_OK`.
+- `D3DCompile` (`0x6DB5CF`) returns a blob and does not compile. `D3DReflect`
+  reports no bound resources, which `0x6DC860` treats as success.
+- `D3DPERF_BeginEvent` and `D3DPERF_EndEvent` return 0. `d3d9.dll` exports nothing
+  else. `DWriteCreateFactory` is imported and has no literal call site in the
+  generated code.
+
+`CreateComputeShader` is accepted. Whether a geometry shader, a hull shader, or a
+domain shader is created is not yet counted. The profiles in the EXE are
+`vs/ps_4_0` and `vs/ps/gs/cs_5_0`.
+
+## Work
+
+### 1. Keep the same entries, store the resources
+
+The guest-visible objects stay where they are. A create call records the
+description and the bytes. `Map` still returns a pointer in the scratch at
+`0x31000000`. `Unmap` copies a write back. The copy at `0x4092A1` therefore
+lands in the resource. A texture bigger than the 64 MB scratch is not stored.
+
+Constant buffers, vertex buffers, index buffers, and textures are the four the
+draw at `0x6CFDB0` binds. Samplers, blend, depth, and rasterizer state are
+recorded the same way. Views point at the resource they were created from.
+
+### 2. Count the shader stages
+
+Before a Metal pipeline is built, count creations and draws of each stage on a
+run that reaches attract:
+
+- vertex, pixel (already created on the first frame)
+- geometry
+- compute (created; not yet dispatched on the first frame)
+- hull and domain, if any
+
+A stage with a zero count is not implemented. Geometry and compute are expected.
+Tessellation is not, until a count says otherwise.
+
+### 3. Shaders, at prepare time
+
+Sixty HLSL modules are embedded in the EXE (`#ifdef HLSL`, about 1,300 `float4`,
+321 `SV_Position`). The game compiles them at run time. `GameData/.shaders/shader_cache.bin`
+holds 434 DXBC blobs from compiler 9.30.9200.20499. The player may not have that
+file. Model 2 uses `rom/shader/*.fxo` (DXBC plus DX9 bytecode) and `m2*.glsl`.
+
+Translation runs while the cache is prepared, on the machine that has the EXE.
+The HLSL is compiled with DXC to SPIR-V and SPIRV-Cross to MSL, and the MSL is
+stored in the cache under the shader's hash. A hash-keyed override replaces one
+module when the cross-compile is wrong. The override is written to match
+behaviour. The original HLSL is not committed.
+
+`D3DCompile` then finds the cached module instead of returning an empty blob.
+`D3DReflect` reports the bindings that module actually has, so `0x6DC860` sets
+up the constant buffers and textures the shader uses. A shader with no cache
+entry fails closed with the hash.
+
+The `.fxo` path is separate and smaller. It is DXBC, or the GLSL beside it, not
+the embedded HLSL.
+
+### 4. An offscreen Metal device
+
+The first backend draws into a texture, not a window. The window is the Phase 7
+shell. `Present` keeps the contract it has now (success, callers ignore the
+HRESULT) and publishes the texture for the Phase 5 compare.
+
+The device needs buffers, 2D textures including BCn, samplers, blend and depth
+state, multiple render targets, and the stages the count in item 2 found.
+iPhone and visionOS do not all support BCn
+(`MTLDevice.supportsBCTextureCompression`). Where it is missing, prepare
+transcodes to ASTC. The Mac used for the oracle can sample BCn directly.
+
+`rsqrtss` is used 85 times in reachable code, plus one `rcpps` and one `rcpss`.
+They are exact today. Hardware is about 12 bits. A table waits until a captured
+frame shows the difference.
+
+### 5. What a frame is made of
+
+NRT draws the HD scene from `nrt/dx11/` (NRFC containers, DDS, zlib). The race
+the player recognises is the i960 program in `rom/daytona_rom/`, interpreted by
+m2e, with NRT models substituted by model id. Model 2 polygons and the `.fxo`
+shaders are the fallback path, not the HD path.
+
+Attract has to get far enough to issue the draws. That needs the files Phase 4
+opens. Until those reads exist, this phase can be driven by a captured command
+list rather than by `dcrun`.
+
+### 6. Text
+
+`DWriteCreateFactory` is the only DirectWrite import. GDI text imports that are
+still fail-closed are `CreateFontW`, `GetGlyphOutlineW`, `GetGlyphIndicesW`,
+`GetTextMetricsW`, `CreateCompatibleDC`, `SelectObject`, `DeleteDC`, and
+`DeleteObject`. They are Phase 4 imports. This phase consumes the glyphs if the
+game rasters text into a texture, and uses a Metal font path only if DirectWrite
+is actually called.
+
+### 7. The 2D reference
+
+A full software rasterizer is larger than the attract comparison needs. The
+reference device covers the 2D and UI draws: colour, alpha, a texture sample,
+scissor. The 3D comparison is captured Windows frames, numbered under autoplay,
+with a perceptual tolerance. Phase 5 owns the diff. This phase names the frame
+image and the tolerance the diff will use.
+
+## Suggested order
+
+1. Record resource bytes and descriptions behind the existing create and `Map`
+   calls. **Done.** The guest ABI does not change. Float clears and triangle
+   writes store native half / R32.
+2. Count shader stages on a run that draws. **Partly.** Passes that run are
+   known; GS/HS/DS census is not. Blocked on a run that loads the course.
+3. Finish resource loads so Main has a course mesh and the glare composite's
+   `g_Texture` is not empty. **Done: boot completes and attract renders.** (The
+   notes below are from before that.) The IO, resource and CRI
+   threads run, the guest's zlib decodes the archives, and boot loads 243 files
+   in 90 s. Next: confirm the boot state machine advances, then find what still
+   stands between the wait scene and the course load (`f_005825A0`, net status
+   `[0x15FF5DC]+0x74`). Speeding up the 2D reference (or skipping paints of
+   targets nothing samples) would shorten each try.
+4. Prepare-time HLSL to MSL, keyed by hash, and make `D3DCompile` / `D3DReflect`
+   return that module. **Done for every shader the boot compiles.** The game
+   assembles each source at run time (`#define HLSL`, `#define ENABLE_CBUFFER 1`,
+   per-shader macros, then module text; only 2 of 78 are verbatim in the EXE),
+   so the input is the request itself. `DCUSA_SHADERS=<dir>` makes `D3DCompile`
+   write `src/<key>.hlsl` and `src/<key>.json` (key: FNV-1a 64 of source,
+   macros, entry, profile). `tools/shaderprep/translate_shaders.py <dir>` runs
+   glslang (HLSL front end; Homebrew has no DXC) and spirv-cross, and writes
+   `msl/<key>.metal`, `<key>.json` and `<key>.refl`. A stage counts only when
+   `spirv-val` accepts it: glslang as is, then with local texture arrays
+   unrolled, then without glslang's optimizer. The 3 `g_PreShadowPS` variants
+   build a local `Texture2DShadow[4]` from four globals, which glslang turns
+   into invalid SPIR-V; the unroll stage drops that array and turns each
+   `tex2DCmp*(TexShadow[i], ...)` into a `?:` over the same call on each global
+   (same value: texture reads have no side effects and `?:` is not control
+   flow). The module's own `#ifndef GLSL` alternative is not equivalent (it
+   always samples shadow map 0), so it is not used.
+   Textures, samplers and constant buffers are numbered from 0 per class, like
+   `t#` / `s#` / `b#`, by rewriting the SPIR-V binding decorations, and the MSL
+   uses those numbers (`--msl-decoration-binding`). Constant buffer offsets and
+   sizes come from the same SPIR-V, so they need not match D3D's packing: the
+   game finds every variable through reflection. `override/<key>.metal` +
+   `.json` replace one module; none is needed now.
+   Boot compiles 78 requests (70 `ps_4_0`, 8 `vs_4_0`). All 78 translate, and
+   all 78 compile and expose `main0` on the Metal device (`mslcheck`, CTest
+   `test_msl`). With a translation present, `D3DReflect` answers from it:
+   `GetDesc` (bound resources and constant buffers), `GetResourceBindingDesc`
+   (cbuffers included) and `…ByName`, `GetConstantBufferByIndex` / `ByName`,
+   `GetVariableByName`, and the constant buffer, variable and type interfaces
+   (`GetDesc`, `GetVariableByIndex` / `ByName`, `GetType`, `GetBuffer`). Out of
+   range gives D3D's invalid object, whose `GetDesc` fails. By present 30 the
+   game has read 81 buffer, 1,034 variable and 3,914 type descriptions with no
+   unported slot. Later scenes will compile requests the boot does not; a run
+   captures them, and the next translate picks them up.
+5. Offscreen Metal for the stages that count is non-zero. BCn where the device
+   has it, ASTC where it does not. **Running for vertex and pixel shaders.**
+   `src/gpu/metal.{hpp,mm}`, on with `DCUSA_METAL=1` plus `DCUSA_SHADERS`.
+   `d3d11.cpp` keeps a full state mirror (`gpu::DrawState`): every VS / PS
+   constant buffer, view and sampler slot, up to 8 render targets and the depth
+   view, input layout (semantic, index, format, slot, offset,
+   `APPEND_ALIGNED`, per-instance step), vertex / index buffers, topology,
+   viewport, scissor, and blend / depth / rasterizer descriptions. It feeds the
+   backend at each guest write (create with data, `UpdateSubresource`, `Unmap`),
+   clear and draw; the 2D software reference is skipped then. Every upload is a
+   new Metal object, so draws already encoded keep the bytes they saw (D3D's
+   contract for constant buffers rewritten between draws).
+   - Pipelines: translated VS + PS, vertex descriptor built by matching the VS
+     inputs' semantics (`input` lines in the `.refl`, from glslang's
+     `-fhlsl_functionality1`) to the layout, colour formats, blend, depth
+     format; cached. Stage-interface locations are fixed per semantic
+     (`TEXCOORDn` = n, `COLORn` = 16 + n, ...) so any VS/PS pair links the way
+     D3D links them. Constant buffers keep their `b#` index; vertex streams are
+     Metal buffers 16+.
+   - Metal binding reflection of each pipeline gives what each stage reads. A
+     buffer, texture or sampler the game left empty gets a zero stand-in (D3D
+     reads zeros there). A depth texture bound where the shader reads
+     `Texture2D` is read through an `R32Float` copy taken after each pass or
+     clear that wrote the depth.
+   - New render targets and depth textures are cleared to zero, as D3D creates
+     them; Metal leaves private textures undefined, and the NaN in them spread
+     through the whole composite.
+   - Formats: RGBA8 / BGRA8 (sRGB too), RGBA16F/Unorm, RG16F, R16F, R32F,
+     RGB10A2, RG11B10, R8 / A8 / RG8, BC1-BC7 including BC6H, and depth (D32 and
+     D24S8 as `Depth32Float(_Stencil8)`). Only mip 0 is uploaded; a texture has
+     more levels only when it is created for `GenerateMips`. `Present` commits
+     the frame, waits, and reads the back buffer back for the frame image.
+   - `Draw` (`+0x34`) is answered with Metal. Geometry, hull, domain and
+     compute stages, stencil, depth bias, MSAA, texture arrays / cubes / 3D,
+     non-zero mips from the guest, typed views that differ from the resource
+     format, and ASTC for devices without BCn are not done. Boot compiles only
+     `vs_4_0` / `ps_4_0`, so the stage census stays open until attract.
+   - A 90 s content run under `MTL_DEBUG_LAYER=1`: 25,548 draws, 15 pipelines,
+     none skipped, no validation error, about 13 presents a second (the 2D
+     reference managed 1.7). CTest `test_metal` draws through the backend and
+     checks pixels: layout by semantic, texture and point sampler, a constant
+     buffer changed between draws, viewport, clear, depth read as colour, and a
+     zero stand-in.
+   - Debugging: `DCUSA_METAL_TRACE=<n>` prints every draw and clear of present
+     n with shaders, targets, state and the first pixel-shader constants;
+     `DCUSA_METAL_SCAN=<n>` reads back every colour target and prints
+     non-zero, NaN and per-channel maxima.
+6. `.fxo` for the Model 2 path. **Not started.**
+7. The 2D reference and the frame image Phase 5 will diff. **2D reference
+   written and unit-tested.** Presented frames are still black.
+
+## Out of this phase
+
+- A host window and `CAMetalLayer`. Phase 7.
+- Opening the game's files. Phase 4. The game folder stays read-only.
+- The i960 hot loop. It stays translated until Phase 5 profiles it.
+- Committing shaders, ROM, or DDS.

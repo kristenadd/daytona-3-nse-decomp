@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(DaytonaUSA LANGUAGES C CXX)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,28 +52,119 @@ dcusa_warnings(dcusa_runtime)
 add_library(dcusa_recomp STATIC
     src/recomp/guest_memory.cpp
     src/recomp/dispatch.cpp
-    src/recomp/guest.cpp)
+    src/recomp/guest.cpp
+    src/recomp/loader.cpp
+    src/recomp/native.cpp
+    src/recomp/win32.cpp
+    src/recomp/threads.cpp
+    src/recomp/shell.cpp
+    src/recomp/host_files.cpp
+    src/recomp/d3d11.cpp
+    src/gpu/metal.mm)
 target_include_directories(dcusa_recomp PUBLIC src)
-target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime)
+target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal")
+set_source_files_properties(src/gpu/metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+# d3d11.cpp runs tools/shaderprep on a shader it has no translation for (DCUSA_TRANSLATE=1).
+set_source_files_properties(src/recomp/d3d11.cpp PROPERTIES COMPILE_DEFINITIONS "DCUSA_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
 dcusa_warnings(dcusa_recomp)
 
 # ---- translated game code ----
-# tools/x86tr generates it from the player's prepared EXE image (dcprepare, then
-# discover.py and translate.py). It lives in the build tree only; point
-# DCUSA_GENERATED_DIR at a translate.py output folder to build it.
-set(DCUSA_GENERATED_DIR "" CACHE PATH "translate.py output folder (holds sources.txt); empty to build without game code")
-if(DCUSA_GENERATED_DIR)
-    if(NOT EXISTS "${DCUSA_GENERATED_DIR}/sources.txt")
+# tools/x86tr generates it from the player's prepared EXE image. Set
+# DCUSA_PREPARED_CACHE and the build runs discovery and translation itself.
+# DCUSA_GENERATED_DIR remains for a folder that was translated by hand.
+set(DCUSA_PREPARED_CACHE "" CACHE FILEPATH
+    "dcprepare cache. When set, discovery and translation run as part of the build")
+set(DCUSA_GENERATED_DIR "" CACHE PATH
+    "translate.py output folder (holds sources.txt); empty to build without game code")
+set(DCUSA_PYTHONPATH "${CMAKE_CURRENT_SOURCE_DIR}/build/pylib" CACHE PATH
+    "PYTHONPATH for tools/x86tr (where capstone is installed)")
+
+set(dcusa_generated_dir "")
+if(DCUSA_PREPARED_CACHE)
+    if(NOT EXISTS "${DCUSA_PREPARED_CACHE}")
+        message(FATAL_ERROR "DCUSA_PREPARED_CACHE does not exist: ${DCUSA_PREPARED_CACHE}")
+    endif()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    # Cache header: 8-byte magic, then five little-endian u32s. Edition is the second.
+    file(READ "${DCUSA_PREPARED_CACHE}" dcusa_hdr LIMIT 16 HEX)
+    string(TOLOWER "${dcusa_hdr}" dcusa_hdr)
+    string(SUBSTRING "${dcusa_hdr}" 0 16 dcusa_magic)
+    if(NOT dcusa_magic STREQUAL "4443555341494d47")
+        message(FATAL_ERROR "DCUSA_PREPARED_CACHE is not a prepared image: ${DCUSA_PREPARED_CACHE}")
+    endif()
+    string(SUBSTRING "${dcusa_hdr}" 24 2 dcusa_e0)
+    string(SUBSTRING "${dcusa_hdr}" 26 2 dcusa_e1)
+    string(SUBSTRING "${dcusa_hdr}" 28 2 dcusa_e2)
+    string(SUBSTRING "${dcusa_hdr}" 30 2 dcusa_e3)
+    math(EXPR dcusa_edition "0x${dcusa_e0} + 0x${dcusa_e1} * 256 + 0x${dcusa_e2} * 65536 + 0x${dcusa_e3} * 16777216")
+    if(NOT dcusa_edition EQUAL 2017 AND NOT dcusa_edition EQUAL 2019)
+        message(FATAL_ERROR "prepared image edition ${dcusa_edition} is not 2017 or 2019")
+    endif()
+    set(dcusa_x86tr_dir "${CMAKE_SOURCE_DIR}/build/x86tr/${dcusa_edition}")
+    set(dcusa_generated_dir "${dcusa_x86tr_dir}/gen")
+    file(GLOB dcusa_x86tr_scripts CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/x86tr/*.py")
+    # The stamp lives in the build tree. The generated shards keep their own mtimes, so
+    # they are not the custom command's outputs: an unchanged shard would look stale.
+    set(dcusa_stamp "${CMAKE_CURRENT_BINARY_DIR}/x86tr-translated.stamp")
+    set(dcusa_translate_script "${CMAKE_SOURCE_DIR}/cmake/translate.cmake")
+    execute_process(
+        COMMAND ${CMAKE_COMMAND}
+                -DDCUSA_CACHE=${DCUSA_PREPARED_CACHE}
+                -DDCUSA_X86TR_DIR=${dcusa_x86tr_dir}
+                -DDCUSA_GEN_DIR=${dcusa_generated_dir}
+                -DDCUSA_PYTHON=${Python3_EXECUTABLE}
+                -DDCUSA_PYTHONPATH=${DCUSA_PYTHONPATH}
+                -DDCUSA_SOURCE=${CMAKE_SOURCE_DIR}
+                -DDCUSA_STAMP=${dcusa_stamp}
+                -P "${dcusa_translate_script}"
+        RESULT_VARIABLE dcusa_translate_rc)
+    if(NOT dcusa_translate_rc EQUAL 0)
+        message(FATAL_ERROR "translation failed (${dcusa_translate_rc})")
+    endif()
+    if(NOT EXISTS "${dcusa_generated_dir}/sources.txt")
+        message(FATAL_ERROR "translation did not write ${dcusa_generated_dir}/sources.txt")
+    endif()
+    message(STATUS "Translating edition ${dcusa_edition} from ${DCUSA_PREPARED_CACHE}")
+elseif(DCUSA_GENERATED_DIR)
+    set(dcusa_generated_dir "${DCUSA_GENERATED_DIR}")
+endif()
+
+if(dcusa_generated_dir)
+    if(NOT EXISTS "${dcusa_generated_dir}/sources.txt")
         message(FATAL_ERROR "DCUSA_GENERATED_DIR has no sources.txt: run tools/x86tr/translate.py first")
     endif()
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${DCUSA_GENERATED_DIR}/sources.txt")
-    file(STRINGS "${DCUSA_GENERATED_DIR}/sources.txt" dcusa_generated_names)
-    list(TRANSFORM dcusa_generated_names PREPEND "${DCUSA_GENERATED_DIR}/")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${dcusa_generated_dir}/sources.txt")
+    file(STRINGS "${dcusa_generated_dir}/sources.txt" dcusa_generated_names)
+    list(TRANSFORM dcusa_generated_names PREPEND "${dcusa_generated_dir}/")
+    if(DCUSA_PREPARED_CACHE)
+        add_custom_command(
+            OUTPUT "${dcusa_stamp}"
+            COMMAND ${CMAKE_COMMAND}
+                    -DDCUSA_CACHE=${DCUSA_PREPARED_CACHE}
+                    -DDCUSA_X86TR_DIR=${dcusa_x86tr_dir}
+                    -DDCUSA_GEN_DIR=${dcusa_generated_dir}
+                    -DDCUSA_PYTHON=${Python3_EXECUTABLE}
+                    -DDCUSA_PYTHONPATH=${DCUSA_PYTHONPATH}
+                    -DDCUSA_SOURCE=${CMAKE_SOURCE_DIR}
+                    -DDCUSA_STAMP=${dcusa_stamp}
+                    -P "${dcusa_translate_script}"
+            DEPENDS "${DCUSA_PREPARED_CACHE}" "${dcusa_translate_script}" ${dcusa_x86tr_scripts}
+            COMMENT "Discover and translate Daytona.exe"
+            VERBATIM USES_TERMINAL)
+        add_custom_target(dcusa_translate DEPENDS "${dcusa_stamp}")
+    endif()
     add_library(dcusa_generated STATIC ${dcusa_generated_names})
     target_link_libraries(dcusa_generated PUBLIC dcusa_recomp)
+    if(TARGET dcusa_translate)
+        add_dependencies(dcusa_generated dcusa_translate)
+    endif()
     # Same floating-point rules as the runtime; no warnings (the code mirrors the
     # guest instruction by instruction) and no debug info (it would run to gigabytes).
     target_compile_options(dcusa_generated PRIVATE -w -O2 -g0 -ffp-contract=off -fno-fast-math)
+
+    add_executable(dcrun tools/dcrun/main.cpp)
+    target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system)
+    dcusa_warnings(dcrun)
 endif()
 
 # ---- tools ----
@@ -93,13 +187,29 @@ dcusa_test(test_pe32)
 dcusa_test(test_exe_image)
 dcusa_test(test_content)
 dcusa_test(test_fail_closed)
+dcusa_test(test_loader)
+dcusa_test(test_native)
+dcusa_test(test_imports)
+dcusa_test(test_threads)
+dcusa_test(test_metal)
+dcusa_test(test_shell)
+
+# Prepared MSL compiles with the system Metal device. The shaders come from the
+# player's executable (tools/shaderprep), so the test skips where none exist.
+if(APPLE)
+    add_executable(mslcheck tools/mslcheck/main.mm)
+    target_compile_options(mslcheck PRIVATE -fobjc-arc)
+    target_link_libraries(mslcheck PRIVATE "-framework Foundation" "-framework Metal")
+    set(DCUSA_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/prepared/shaders" CACHE PATH
+        "Folder of captured and translated shaders (src/, msl/)")
+    add_test(NAME test_msl COMMAND mslcheck "${DCUSA_SHADER_DIR}/msl")
+    set_tests_properties(test_msl PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 
 # Translator semantics against real x86: tools/x86tr/semtest.py runs every case
 # natively as x86_64 under Rosetta 2 and translates the same snippet assembled
 # for i386; the test checks the translation reproduces the x86 results.
 find_package(Python3 COMPONENTS Interpreter)
-set(DCUSA_PYTHONPATH "${CMAKE_CURRENT_SOURCE_DIR}/build/pylib" CACHE PATH
-    "PYTHONPATH for tools/x86tr (where capstone is installed)")
 if(APPLE AND Python3_FOUND)
     set(dcusa_semdir "${CMAKE_CURRENT_BINARY_DIR}/x86sem")
     file(GLOB dcusa_x86tr_scripts CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/x86tr/*.py")

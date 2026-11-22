@@ -18,11 +18,14 @@ pops it.
         build/mac-host/prepared/DCUSA2019.cache build/x86tr/2019/functions.json build/x86tr/2019/gen
 """
 import argparse
+import bisect
 import collections
 import json
 import os
 import sys
 import time
+
+import trap_allow
 
 sys.path.insert(0, os.path.dirname(__file__))
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32  # noqa: E402
@@ -68,6 +71,8 @@ class FunctionTranslator(X87Mixin, SseMixin):
         self.tmp = 0
         self.refs = set()
         self.fused = {}
+        self.locked = False
+        self.site_overrides = SITE_OVERRIDES.get(getattr(tr.img, 'edition', None), {})
 
     # ---------------- operands ----------------
     def rn(self, insn, r):
@@ -226,6 +231,10 @@ class FunctionTranslator(X87Mixin, SseMixin):
     def goto_or_leave(self, target):
         if self.inside(target):
             self.targets.add(target)
+            # A backward jump closes a loop: another guest thread may be owed
+            # the CPU there (threads.cpp preempts only at these points).
+            if target <= self.order[self.cur_idx]:
+                return 'GUEST_PREEMPT(); goto L_%08X;' % target
             return 'goto L_%08X;' % target
         return 'SYNC(); %s; return;' % self.call_expr(target)
 
@@ -248,8 +257,12 @@ class FunctionTranslator(X87Mixin, SseMixin):
             insn = self.insns[va]
             self.out = []
             self.cur_idx = idx
+            site = self.site_overrides.get(va)
             try:
-                self.emit(insn)
+                if site:
+                    self.out = [site[1]]
+                else:
+                    self.emit(insn)
             except Unsupported as e:
                 # Fails closed only if reached: most are behind CPU feature checks
                 # (SSE4 / AVX paths in the C runtime) that the reported cpuid rules out.
@@ -268,6 +281,9 @@ class FunctionTranslator(X87Mixin, SseMixin):
         for p in range(len(bounds) - 1):
             lines.append(('void %s(Cpu& c) {' % name) if p == 0 else ('static void %s_p%d(Cpu& c) {' % (name, p)))
             lines.append('    PROLOGUE();')
+            if p == 0:
+                lines.extend('    ' + site[0] for site_va, site in sorted(self.site_overrides.items())
+                             if site[0] and site_va in self.insns)
             for va, insn, stmts in blocks[bounds[p]:bounds[p + 1]]:
                 if va in self.targets:
                     lines.append('L_%08X:;' % va)
@@ -339,6 +355,27 @@ class FunctionTranslator(X87Mixin, SseMixin):
             out.append(nxt)
         return out
 
+    def leaves(self, va):
+        """True when control can go from `va` to code outside this function
+        other than by ret or a call: a tail jmp, a branch out, a fall-through
+        into the next function, or an indirect jmp that is not a jump table."""
+        insn = self.insns[va]
+        m = insn.mnemonic.split()[-1]
+        nxt = va + insn.size
+        if m in ('ret', 'retf', 'int3', 'ud2', 'hlt'):
+            return False
+        if m == 'jmp':
+            if va in self.fn.jump_tables:
+                return any(not self.inside(t) for t in self.fn.jump_tables[va].targets)
+            op = insn.operands[0]
+            return not (op.type == X.X86_OP_IMM and self.inside(op.imm & 0xFFFFFFFF))
+        if m.startswith('j') or m.startswith('loop'):
+            if not self.inside(insn.operands[0].imm & 0xFFFFFFFF):
+                return True
+        if m == 'call' and va in self.fn.noreturn_calls:
+            return False
+        return not self.inside(nxt)
+
     def flag_effect(self, insn):
         parts = insn.mnemonic.split()
         m = parts[-1]
@@ -371,12 +408,17 @@ class FunctionTranslator(X87Mixin, SseMixin):
         for t in self.fn.jump_tables.values():
             self.branch_in.update(t.targets)
         self.branch_in.add(self.entry)
+        # A jump or fall-through into another translated function passes the
+        # flags in the Cpu. The code there may read them (discovery can start a
+        # function at a label between a cmp and its jcc), so every flag is live
+        # at such an exit. A ret, or a call that does not return, ends them.
+        self.exit_live = {va: (F.ALL if self.leaves(va) else 0) for va in self.order}
         live_in = dict.fromkeys(self.order, 0)
         changed = True
         while changed:
             changed = False
             for va in reversed(self.order):
-                out = 0
+                out = self.exit_live[va]
                 for s in succ[va]:
                     out |= live_in[s]
                 d, u = self.effects[va]
@@ -386,7 +428,7 @@ class FunctionTranslator(X87Mixin, SseMixin):
                     changed = True
         self.live_out = {}
         for va in self.order:
-            out = 0
+            out = self.exit_live[va]
             for s in succ[va]:
                 out |= live_in[s]
             self.live_out[va] = out
@@ -405,6 +447,7 @@ class FunctionTranslator(X87Mixin, SseMixin):
             prefix = None  # CET hint (a ds override byte) with no effect here
         if prefix not in (None, 'lock'):
             raise Unsupported('prefix %s on %s' % (prefix, m))
+        self.locked = prefix == 'lock'
         handler = getattr(self, 'i_' + m, None)
         if handler is not None:
             return handler(insn)
@@ -423,18 +466,43 @@ class FunctionTranslator(X87Mixin, SseMixin):
             return
         raise Unsupported(m)
 
+    # ---------------- atomics ----------------
+    def atomic_mem(self, insn, op):
+        """A memory operand the lock prefix (or xchg, which locks implicitly) applies to."""
+        if op.type != X.X86_OP_MEM:
+            if self.locked:
+                raise Unsupported('lock on a register')
+            return False
+        return self.locked or insn.mnemonic.split()[-1] == 'xchg'
+
+    def atomic_rmw(self, insn, op, size, new_value):
+        """Updates the memory operand atomically. `new_value` is a C expression in `o`, the old
+        contents. Leaves `o_` holding that old value."""
+        a = self.addr(insn, op)
+        if size > 1:
+            self.out.append('if ((%s & %du) != 0) { SYNC(); trap(c, %s, "unaligned locked access"); }' % (
+                a, size - 1, h(insn.address)))
+        ut = UT[size]
+        self.out.append('%s o_ = atomic_rmw<%s>(M, %s, [&](%s o) { return (%s)(%s); });' % (
+            ut, ut, a, ut, ut, new_value))
+
     # integer arithmetic -------------------------------------------------
     def arith(self, insn, kind, carry=False, store=True):
         d, s = insn.operands
         size = d.size
         need = self.need(insn)
-        a = self.tmpvar(UT[size], self.read(insn, d))
         b = self.tmpvar(UT[size], self.read(insn, s, size))
         cin = '(uint32_t)cf' if carry else None
+        extra = (' %s %s' % (('+' if kind == 'add' else '-'), cin)) if cin else ''
         op = '+' if kind == 'add' else '-'
-        r = self.tmpvar(UT[size], '(%s)(%s %s %s%s)' % (UT[size], a, op, b, (' %s %s' % (op, cin)) if cin else ''))
+        if store and self.atomic_mem(insn, d):
+            self.atomic_rmw(insn, d, size, 'o %s %s%s' % (op, b, extra))
+            a = 'o_'
+        else:
+            a = self.tmpvar(UT[size], self.read(insn, d))
+        r = self.tmpvar(UT[size], '(%s)(%s %s %s%s)' % (UT[size], a, op, b, extra))
         self.out.extend(self.flag_code(need, kind, a, b, r, size, cin))
-        if store:
+        if store and a != 'o_':
             self.out.append(self.write(insn, d, r))
 
     def same_reg(self, insn):
@@ -481,9 +549,15 @@ class FunctionTranslator(X87Mixin, SseMixin):
     def logic(self, insn, op, store=True):
         d, s = insn.operands
         size = d.size
-        r = self.tmpvar(UT[size], '(%s)(%s %s %s)' % (UT[size], self.read(insn, d), op, self.read(insn, s, size)))
+        b = self.tmpvar(UT[size], self.read(insn, s, size))
+        if store and self.atomic_mem(insn, d):
+            self.atomic_rmw(insn, d, size, 'o %s %s' % (op, b))
+            src = 'o_'
+        else:
+            src = self.read(insn, d)
+        r = self.tmpvar(UT[size], '(%s)(%s %s %s)' % (UT[size], src, op, b))
         self.out.extend(self.flag_code(self.need(insn), 'logic', None, None, r, size))
-        if store:
+        if store and src != 'o_':
             self.out.append(self.write(insn, d, r))
 
     def i_and(self, insn):
@@ -508,10 +582,15 @@ class FunctionTranslator(X87Mixin, SseMixin):
     def incdec(self, insn, op):
         d = insn.operands[0]
         size = d.size
-        a = self.tmpvar(UT[size], self.read(insn, d))
+        if self.atomic_mem(insn, d):
+            self.atomic_rmw(insn, d, size, 'o %s 1u' % op)
+            a = 'o_'
+        else:
+            a = self.tmpvar(UT[size], self.read(insn, d))
         r = self.tmpvar(UT[size], '(%s)(%s %s 1u)' % (UT[size], a, op))
         self.out.extend(self.flag_code(self.need(insn) & ~F.C, 'add' if op == '+' else 'sub', a, '1u', r, size))
-        self.out.append(self.write(insn, d, r))
+        if a != 'o_':
+            self.out.append(self.write(insn, d, r))
 
     def i_inc(self, insn):
         self.incdec(insn, '+')
@@ -523,15 +602,22 @@ class FunctionTranslator(X87Mixin, SseMixin):
         d = insn.operands[0]
         size = d.size
         need = self.need(insn)
-        b = self.tmpvar(UT[size], self.read(insn, d))
+        if self.atomic_mem(insn, d):
+            self.atomic_rmw(insn, d, size, '0u - o')
+            b = 'o_'
+        else:
+            b = self.tmpvar(UT[size], self.read(insn, d))
         r = self.tmpvar(UT[size], '(%s)(0u - %s)' % (UT[size], b))
         self.out.extend(self.flag_code(need & ~F.C, 'sub', '0u', b, r, size))
         if need & F.C:
             self.out.append('cf = %s != 0;' % b)
-        self.out.append(self.write(insn, d, r))
+        if b != 'o_':
+            self.out.append(self.write(insn, d, r))
 
     def i_not(self, insn):
         d = insn.operands[0]
+        if self.atomic_mem(insn, d):
+            return self.atomic_rmw(insn, d, d.size, '~o')
         self.out.append(self.write(insn, d, '~%s' % self.read(insn, d)))
 
     def i_mov(self, insn):
@@ -565,6 +651,18 @@ class FunctionTranslator(X87Mixin, SseMixin):
         if self.same_reg(insn):
             return
         d, s = insn.operands
+        mem = d if d.type == X.X86_OP_MEM else s if s.type == X.X86_OP_MEM else None
+        if mem is not None:
+            other = s if mem is d else d
+            size = mem.size
+            v = self.tmpvar(UT[size], self.read(insn, other, size))
+            a = self.addr(insn, mem)
+            if size > 1:
+                self.out.append('if ((%s & %du) != 0) { SYNC(); trap(c, %s, "unaligned locked access"); }' % (
+                    a, size - 1, h(insn.address)))
+            got = self.tmpvar(UT[size], 'atomic_xchg<%s>(M, %s, %s)' % (UT[size], a, v))
+            self.out.append(self.write(insn, other, got))
+            return
         t = self.tmpvar(UT[d.size], self.read(insn, d))
         self.out.append(self.write(insn, d, self.read(insn, s)))
         self.out.append(self.write(insn, s, t))
@@ -572,25 +670,48 @@ class FunctionTranslator(X87Mixin, SseMixin):
     def i_xadd(self, insn):
         d, s = insn.operands
         size = d.size
-        a = self.tmpvar(UT[size], self.read(insn, d))
         b = self.tmpvar(UT[size], self.read(insn, s))
+        if self.atomic_mem(insn, d):
+            self.atomic_rmw(insn, d, size, 'o + %s' % b)
+            a = 'o_'
+        else:
+            a = self.tmpvar(UT[size], self.read(insn, d))
         r = self.tmpvar(UT[size], '(%s)(%s + %s)' % (UT[size], a, b))
         self.out.extend(self.flag_code(self.need(insn), 'add', a, b, r, size))
         self.out.append(self.write(insn, s, a))
-        self.out.append(self.write(insn, d, r))
+        if a != 'o_':
+            self.out.append(self.write(insn, d, r))
 
     def i_cmpxchg(self, insn):
         d, s = insn.operands
         size = d.size
-        a = self.tmpvar(UT[size], {1: '(uint8_t)eax', 2: '(uint16_t)eax', 4: 'eax'}[size])
-        b = self.tmpvar(UT[size], self.read(insn, d))
+        acc = {1: '(uint8_t)eax', 2: '(uint16_t)eax', 4: 'eax'}[size]
+        load = {1: 'eax = (eax & 0xFFFFFF00u) | %s;', 2: 'eax = (eax & 0xFFFF0000u) | %s;', 4: 'eax = %s;'}[size]
+        if self.atomic_mem(insn, d):
+            a = self.addr(insn, d)
+            if size > 1:
+                self.out.append('if ((%s & %du) != 0) { SYNC(); trap(c, %s, "unaligned locked access"); }' % (
+                    a, size - 1, h(insn.address)))
+            self.out.append('%s exp_ = %s;' % (UT[size], acc))
+            self.out.append('atomic_cmpxchg<%s>(M, %s, exp_, %s);' % (UT[size], a, self.read(insn, s, size)))
+            b = 'exp_'
+        else:
+            b = self.tmpvar(UT[size], self.read(insn, d))
+        a = self.tmpvar(UT[size], acc)
         r = self.tmpvar(UT[size], '(%s)(%s - %s)' % (UT[size], a, b))
         self.out.extend(self.flag_code(self.need(insn) | F.Z, 'sub', a, b, r, size))
-        load = {1: 'eax = (eax & 0xFFFFFF00u) | %s;', 2: 'eax = (eax & 0xFFFF0000u) | %s;', 4: 'eax = %s;'}[size] % b
-        self.out.append('if (zf) { %s } else { %s }' % (self.write(insn, d, self.read(insn, s)), load))
+        if b == 'exp_':
+            self.out.append('if (!zf) { %s }' % (load % 'exp_'))
+        else:
+            self.out.append('if (zf) { %s } else { %s }' % (self.write(insn, d, self.read(insn, s)), load % b))
 
     def i_cmpxchg8b(self, insn):
         a = self.addr(insn, insn.operands[0])
+        if self.locked:
+            self.out.append('if ((%s & 7u) != 0) { SYNC(); trap(c, %s, "unaligned locked access"); }' % (a, h(insn.address)))
+            self.out.append('{ uint64_t exp_ = ((uint64_t)edx << 32) | eax; zf = atomic_cmpxchg<uint64_t>(M, %s, exp_, ((uint64_t)ecx << 32) | ebx); '
+                            'if (!zf) { eax = (uint32_t)exp_; edx = (uint32_t)(exp_ >> 32); } }' % a)
+            return
         self.out.append('{ uint64_t m_ = ld64(M, %s); if (m_ == (((uint64_t)edx << 32) | eax)) { st64(M, %s, ((uint64_t)ecx << 32) | ebx); zf = 1; } '
                         'else { eax = (uint32_t)m_; edx = (uint32_t)(m_ >> 32); zf = 0; } }' % (a, a))
 
@@ -613,10 +734,18 @@ class FunctionTranslator(X87Mixin, SseMixin):
     def i_nop(self, insn):
         pass
 
-    i_pause = i_nop
-    i_lfence = i_nop
-    i_mfence = i_nop
-    i_sfence = i_nop
+    def i_pause(self, insn):
+        # A spin-wait hint: the thread that owns what this loop waits for runs now.
+        self.out.append('guest_pause(c);')
+
+    def i_mfence(self, insn):
+        self.out.append('fence_full();')
+
+    def i_sfence(self, insn):
+        self.out.append('fence_store();')
+
+    def i_lfence(self, insn):
+        self.out.append('fence_load();')
     i_prefetchnta = i_nop
     i_prefetcht0 = i_nop
     i_prefetcht1 = i_nop
@@ -920,6 +1049,25 @@ class FunctionTranslator(X87Mixin, SseMixin):
             else:
                 loc = None
             where = d
+        if self.locked:
+            if d.type != X.X86_OP_MEM:
+                raise Unsupported('lock on a register')
+            addr = loc if loc else self.addr(insn, d)
+            width = 4 if loc else size
+            ut = UT[width]
+            new = {'bts': 'o | (1u << b_)', 'btr': 'o & ~(1u << b_)', 'btc': 'o ^ (1u << b_)'}.get(op)
+            s_ = ['uint32_t b_ = %s;' % bit]
+            if width > 1:
+                s_.append('if ((%s & %du) != 0) { SYNC(); trap(c, %s, "unaligned locked access"); }' % (
+                    addr, width - 1, h(insn.address)))
+            if new:
+                s_.append('%s o_ = atomic_rmw<%s>(M, %s, [&](%s o) { return (%s)(%s); });' % (ut, ut, addr, ut, ut, new))
+                s_.append('cf = (uint8_t)((o_ >> b_) & 1);')
+            else:
+                s_.append('cf = (uint8_t)((atomic_load<%s>(M, %s) >> b_) & 1);' % (ut, addr))
+            self.out.append('{ %s }' % ' '.join(s_))
+            self.undefined_flags(need & (F.P | F.A | F.S | F.O))
+            return
         if loc:
             v = 'ld32(M, l_)'
             s_ = ['uint32_t l_ = %s;' % loc, 'uint32_t b_ = %s; uint32_t v_ = %s;' % (bit, v)]
@@ -1110,6 +1258,42 @@ class FunctionTranslator(X87Mixin, SseMixin):
                         'if (ran_) { %s r_ = (%s)(a_ - b_); %s } }' % (step, ut, body, want, ut, ut, ' '.join(flags) or '(void)r_;'))
 
 
+# cdecl CRT routines replaced wholesale. The bodies are SSSE3 / SSE4.2
+# dispatch (and, for the copy routines, jump tables laid over the instruction
+# stream). Callers still enter f_<address>; that function forwards here.
+# One instruction replaced by native code: (entry statement, site statement).
+# The entry statement runs after PROLOGUE in the function that holds the site.
+SITE_OVERRIDES = {
+    2019: {
+        # The CRT's unary math dispatcher (_trandisp1) jumps through [ebx] into the
+        # handler for the fxam class and never comes back here. native_crt_unary
+        # does that work. The caller's return address is dropped and ebx is handed
+        # back unchanged; both reach the Cpu only through SYNC.
+        0xC45035: ('const uint32_t kept_ebx = ebx;',
+                   'SYNC(); native_crt_unary(c); ebx = kept_ebx; esp += 4; SYNC(); return;'),
+    },
+}
+
+OVERRIDES = {
+    2019: {
+        0xC1B790: 'native_memmove',
+        0xC1C2C0: 'native_memmove',
+        0xC1D7F0: 'native_memset',
+        0xC1FE60: 'native_strstr',
+        0xC24040: 'native_strchr',
+        0xC28B20: 'native_strrchr',
+    },
+    2017: {
+        0xC15F70: 'native_memmove',
+        0xC16AA0: 'native_memmove',
+        0xC17FD0: 'native_memset',
+        0xC1A640: 'native_strstr',
+        0xC1E830: 'native_strchr',
+        0xC23310: 'native_strrchr',
+    },
+}
+
+
 class Translator:
     def __init__(self, image, data, flags_live_at_exit=False):
         """`data` is discovery's functions.json content. flags_live_at_exit (tests
@@ -1135,6 +1319,32 @@ class Translator:
 STUB = 'void f_%08X(Cpu& c) { guest_unported(c, 0x%08Xu, "%s"); }'
 HEADER = '// Generated by tools/x86tr/translate.py from the player\'s executable. Do not edit.\n#include "recomp/guest.hpp"\n'
 
+# A function is emitted into the shard whose start is the greatest cut at or
+# below its entry. The cuts are frozen: recomputing them from a later
+# instruction count would move every later file when one function grew.
+# Chosen from both editions so a shard holds about 25,000 instructions, and
+# each of the eight large constructors is the only function in its shard.
+SHARD_STARTS = (
+    0x00401010, 0x0041DF00, 0x0043A870, 0x00457EE0, 0x00474310, 0x00495850, 0x004BEF30, 0x004E4DE0,
+    0x005048C0, 0x00521140, 0x0053F560, 0x0055C820, 0x005797E0, 0x00596220, 0x005B5C10, 0x005D5683,
+    0x005F06D0, 0x0060F1E0, 0x00627340, 0x0063FC10, 0x00660610, 0x0067E8B0, 0x006B1BC0, 0x006D41D0,
+    0x006F5F10, 0x00716AD0, 0x00731660, 0x00754AE0, 0x00773030, 0x00791910, 0x007AFDF0, 0x007CFE10,
+    0x007EF490, 0x00808A80, 0x00826450, 0x0084A370, 0x0086E870, 0x008873A0, 0x008AEC55, 0x008DA740,
+    0x008F4370, 0x009183F0, 0x00939100, 0x009605A0, 0x009831B0, 0x009B10F0, 0x009CB5E0, 0x009E3230,
+    0x00A07E50, 0x00A2DD80, 0x00A52100, 0x00A6D9F0, 0x00A8C260, 0x00AAE910, 0x00AC6540, 0x00AD89A0,
+    0x00AEBD30, 0x00AFFE50, 0x00B18A90, 0x00B2EC90, 0x00B45F00, 0x00B61630, 0x00B7AA30, 0x00B90F70,
+    0x00BADF70, 0x00BCA770, 0x00BE24A0, 0x00BFA37F, 0x00C10621, 0x00C26470, 0x00C41530, 0x00C5DE08,
+    0x00C77A03, 0x00CA4616, 0x00CC1090, 0x00CE2CA0, 0x00D06670, 0x00D1DD50, 0x00D1DD60, 0x00D239B0,
+    0x00DBCE90, 0x00DC58E0, 0x00E1EB00, 0x00E28700, 0x00E30880, 0x00E31180, 0x00EC7840, 0x00ED30B0,
+    0x00F294B0, 0x00F32A50, 0x00F34D20, 0x00F3E2C0, 0x00FD1B90, 0x00FE01F0, 0x01033800, 0x0103E320,
+    0x01041E60, 0x0104C960, 0x010DD460, 0x010EE890, 0x0113F0D0,
+)
+
+
+def shard_start(entry):
+    i = bisect.bisect_right(SHARD_STARTS, entry) - 1
+    return SHARD_STARTS[i if i >= 0 else 0]
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
@@ -1143,7 +1353,6 @@ def main():
     ap.add_argument('out')
     ap.add_argument('--all', action='store_true', help='translate unreachable functions too')
     ap.add_argument('--limit', type=int, default=0, help='translate only the first N selected functions (testing)')
-    ap.add_argument('--shard-insns', type=int, default=25000)
     args = ap.parse_args()
     t0 = time.time()
     with open(args.functions) as f:
@@ -1156,30 +1365,40 @@ def main():
 
     reasons = collections.Counter()
     samples = collections.defaultdict(list)
-    shards = []
-    cur, cur_refs, cur_defs, cur_n = [], set(), set(), 0
+    bodies = {}
+    refs_of = {}
     translated = failed = insns_done = 0
 
-    def flush():
-        nonlocal cur, cur_refs, cur_defs, cur_n
-        if not cur:
-            return
-        name = 'tr_%03d.cpp' % len(shards)
-        decls = ['void f_%08X(Cpu&);' % r for r in sorted(cur_refs)]
-        write_if_changed(os.path.join(args.out, name), HEADER + '\n'.join(decls) + '\n\n' + '\n\n'.join(cur) + '\n')
-        shards.append(name)
-        cur, cur_refs, cur_defs, cur_n = [], set(), set(), 0
+    def bucket(entry):
+        start = shard_start(entry)
+        if start not in bodies:
+            bodies[start] = []
+            refs_of[start] = set()
+        return start
 
     stubs = []
     trap_reasons = collections.Counter()
     trap_samples = collections.defaultdict(list)
+    trap_sites = []
     trapped_total = 0
+    overridden = []
+    edition_overrides = OVERRIDES.get(tr.img.edition, {})
     for k, entry in enumerate(selected):
+        start = bucket(entry)
+        native = edition_overrides.get(entry)
+        if native:
+            bodies[start].append('void f_%08X(Cpu& c) { %s(c); }' % (entry, native))
+            translated += 1
+            overridden.append((entry, native))
+            if k % 5000 == 0:
+                print('%d / %d functions, %.0fs' % (k, len(selected), time.time() - t0), flush=True)
+            continue
         try:
             text, refs, n, trapped = tr.translate(entry)
             for va, reason in trapped:
                 trap_reasons[reason] += 1
                 trapped_total += 1
+                trap_sites.append((va, reason))
                 if len(trap_samples[reason]) < 5:
                     trap_samples[reason].append('%08X' % va)
         except Unsupported as e:
@@ -1190,17 +1409,25 @@ def main():
             stubs.append(STUB % (entry, entry, ('unsupported: ' + reason).replace('"', "'")))
             failed += 1
             continue
-        cur.append(text)
-        cur_refs |= refs
-        cur_defs.add(entry)
-        cur_n += n
+        bodies[start].append(text)
+        refs_of[start] |= refs
         translated += 1
         insns_done += n
-        if cur_n >= args.shard_insns:
-            flush()
         if k % 5000 == 0:
             print('%d / %d functions, %.0fs' % (k, len(selected), time.time() - t0), flush=True)
-    flush()
+    shards = []
+    for start in sorted(bodies):
+        if not bodies[start]:
+            continue
+        name = 'tr_%08X.cpp' % start
+        decls = ['void f_%08X(Cpu&);' % r for r in sorted(refs_of[start])]
+        write_if_changed(os.path.join(args.out, name),
+                         HEADER + '\n'.join(decls) + '\n\n' + '\n\n'.join(bodies[start]) + '\n')
+        shards.append(name)
+    keep = set(shards)
+    for name in os.listdir(args.out):
+        if name.startswith('tr_') and name.endswith('.cpp') and name not in keep:
+            os.remove(os.path.join(args.out, name))
     for entry in sorted(tr.entries - chosen):
         stubs.append(STUB % (entry, entry, 'not reachable from any root'))
     write_if_changed(os.path.join(args.out, 'stubs.cpp'), HEADER + '\n'.join(stubs) + '\n')
@@ -1216,21 +1443,29 @@ def main():
         'selected': len(selected), 'translated': translated, 'unsupported': failed,
         'translated_instructions': insns_done, 'stubs': len(stubs), 'shards': shards,
         'reasons': [{'reason': r, 'functions': n, 'samples': samples[r]} for r, n in reasons.most_common()],
+        'overrides': [{'address': '%08X' % e, 'native': name} for e, name in overridden],
         'trapped_instructions': trapped_total,
         'trap_reasons': [{'reason': r, 'instructions': n, 'samples': trap_samples[r]} for r, n in trap_reasons.most_common()],
         'seconds': round(time.time() - t0, 1),
     }
+    allow_errors = trap_allow.check(tr.img.edition, trap_sites)
+    report['trap_allowlist'] = 'reviewed' if not allow_errors else 'mismatch'
     with open(os.path.join(args.out, 'coverage.json'), 'w') as f:
         json.dump(report, f, indent=1)
     with open(os.path.join(args.out, 'sources.txt'), 'w') as f:
         f.write('\n'.join(shards + ['stubs.cpp', 'entries.cpp']) + '\n')
-    print('translated %d / %d functions (%d instructions), %d unsupported, %d shards, %.0fs' % (
-        translated, len(selected), insns_done, failed, len(shards), time.time() - t0))
+    print('translated %d / %d functions (%d instructions), %d native overrides, %d unsupported, %d shards, %.0fs' % (
+        translated, len(selected), insns_done, len(overridden), failed, len(shards), time.time() - t0))
     for r, n in reasons.most_common(40):
         print('  %6d  %s  e.g. %s' % (n, r, ' '.join(samples[r][:3])))
-    print('%d instructions fail closed if reached:' % trapped_total)
+    print('%d instructions fail closed if reached, all on the reviewed allow-list:' % trapped_total)
     for r, n in trap_reasons.most_common(40):
         print('  %6d  %s  e.g. %s' % (n, r, ' '.join(trap_samples[r][:3])))
+    if allow_errors:
+        print('trap allow-list mismatch:', file=sys.stderr)
+        for line in allow_errors:
+            print('  ' + line, file=sys.stderr)
+        sys.exit(1)
 
 
 def write_if_changed(path, text):
