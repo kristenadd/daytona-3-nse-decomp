@@ -32,14 +32,18 @@ agreed to this).
 3. **CSB sound effects.** `SE.csb` cues play through the translated CRI Atom
    mixer into the game's 5.1 stream. **Verified** (see below).
 4. **Movies.** **Verified** (see below). Sofdec plays through the translated
-   CRI code. The two AVIs belong to the camera feature (OpenCV capture, off
-   by default) and stay fail-closed.
-5. **Frame rate.** Mostly done; two cases left. Metal encoding now runs on
-   a render thread and the translator emits faster code. The unthrottled race
-   frame went from 15.0 to 9.7 ms mean (PHASE3, "Frame-rate profile"). Paced,
-   370 of 383 one-second race intervals hold 58 to 60 fps. Left: the heaviest
-   scenes (2,300+ draws) are GPU-bound at 15 to 16 ms (54 to 57 fps), and
-   scene changes stall for a second at 21 to 28 ms with the GPU idle.
+   CRI code. Attract opens `screen demo.avi` through OpenCV after its first
+   loop; the open fails cleanly and the video is not shown (PHASE4, "Video").
+   Decoding it is not done.
+5. **Frame rate.** Mostly done; the target is now iOS and Vision Pro, so
+   lower is still better. Metal encodes on a render thread, the translator
+   inlines small functions and the cookie check, and clears fold into the
+   next pass (PHASE3, "Frame-rate profile"). Unthrottled, race frames are
+   about 10.5 ms mean, and the heaviest scenes (2,300+ draws) 15.7 ms, down
+   from 17.3, within 60 Hz. Those are CPU-bound: the engine's per-draw guest
+   code, about 6 us a draw. A heavy frame is about 7 ms of GPU time on this
+   Mac (`DCUSA_GPU_PASSES`). Left: per-draw guest cost, and one-second stalls
+   at scene changes (21 to 28 ms, GPU idle, not profiled).
 6. **Cabinet settings.** **Verified** for credits (see below). Operator
    settings go through `dcrun --shell-setting Section.Key=Value`, since the
    operator menu is the shell's, and in this release the game has no input path

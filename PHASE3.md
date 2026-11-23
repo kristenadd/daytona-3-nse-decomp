@@ -266,6 +266,50 @@ to 60 fps. The 13 that don't are two kinds:
 Both Phase 5 tests pass with the render thread (attract colour p95 0.471,
 median 0.216).
 
+**The heaviest scenes** (2,300 to 2,600 draws) were measured again, with an
+eye on iOS and Vision Pro, where the budget is far tighter than the Mac's
+60 Hz.
+
+- `DCUSA_GPU_PASSES=d<draws>` times every render and blit pass of a frame with
+  at least that many draws (Metal timestamp counters at stage boundaries) and
+  prints a table: target size and format, draws, distinct pixel shaders, the
+  most used one. `DCUSA_GPU_PASSES=<n>,<n>` picks frames by number, and
+  `DCUSA_GPU_PASSES_LOG=1` prints each frame's draw count.
+- Timed alone, a heavy frame is about 7 ms of GPU time. The main scene pass
+  (978 draws into 1920x1080 RGBA16F) is the largest at about 2.5 ms; the
+  bloom chain and the HUD follow. The "15 ms" in the `DCUSA_STATS` line sums
+  each command buffer's GPU start-to-end time, which overlaps between
+  consecutive frames; it overstates GPU load.
+- So the heavy scenes were CPU-bound: the guest's main thread ran 92% busy,
+  most of it the engine's draw submission (`0x6CFDB0` and its helpers), about
+  7 us per draw.
+
+Changes:
+
+- The translator inlines small functions (PHASE2 "Native overrides"): the
+  engine's reference-counted pointers, accessors and the like, 55 call sites
+  in `0x6CFDB0` alone. `InterlockedIncrement` / `Decrement` called through the
+  IAT are done in place.
+- `call_indirect` kept its rare error paths in the same function, so every
+  virtual call and import paid for a 288-byte frame, ten saved registers and a
+  stack-protector check. They are out of line now. `call_com` finds the
+  context methods with a switch instead of a chain of 30 compares.
+- Clears are deferred (`flush_clears` in metal.mm): a D3D clear becomes the
+  load action of the next pass that renders to the target, instead of an
+  empty pass that writes the whole surface out for the next pass to read
+  back. Anything else that reads the target first encodes the clear on its
+  own. A heavy frame went from 64 passes to 54. On this Mac the GPU time is
+  the same within noise (its bandwidth is ample); on a tile-based phone GPU
+  each full-screen clear saved is two full-surface memory transfers. The
+  depth-as-colour copy reuses its staging buffer instead of allocating one
+  each time.
+
+Unthrottled over seven minutes of attract (same build otherwise), race frames
+went from 11.4 to 10.5 ms mean, 90th percentile 14.7 to 13.4 ms, and the
+heavy intervals from 17.3 to 15.7 ms mean (worst 18.6 to 16.9). Those heavy
+seconds now fit in 16.7 ms on the Mac; for the phone and headset budgets the
+guest's per-draw cost is still the limit.
+
 `dcrun --content <folder>` mounts that install and stays in the frame loop.
 `DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
 `DCUSA_FRAME=<path>` writes present 1, 30, and every `DCUSA_EVERY`th as PPM.

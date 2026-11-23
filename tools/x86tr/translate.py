@@ -63,6 +63,10 @@ def h(v):
     return '0x%Xu' % (v & 0xFFFFFFFF)
 
 
+# Where an inlined body continues after its ret ('@' is the call site).
+RET_LABEL = 'R_@'
+
+
 class FunctionTranslator(X87Mixin, SseMixin):
     def __init__(self, tr, fn):
         self.tr = tr
@@ -74,6 +78,9 @@ class FunctionTranslator(X87Mixin, SseMixin):
         self.fused = {}
         self.locked = False
         self.site_overrides = SITE_OVERRIDES.get(getattr(tr.img, 'edition', None), {})
+        # Set when this function's body is being inlined into a caller
+        # (Translator.inline_body): ret and leaving jumps continue at RET_LABEL.
+        self.inlined = False
 
     # ---------------- operands ----------------
     def rn(self, insn, r):
@@ -237,6 +244,8 @@ class FunctionTranslator(X87Mixin, SseMixin):
             if target <= self.order[self.cur_idx]:
                 return 'GUEST_PREEMPT(); goto L_%08X;' % target
             return 'goto L_%08X;' % target
+        if self.inlined:  # a tail jump: the target's ret is ours
+            return 'SYNC(); %s; RELOAD(); goto %s;' % (self.call_expr(target), RET_LABEL)
         return 'SYNC(); %s; return;' % self.call_expr(target)
 
     # ---------------- driver ----------------
@@ -275,6 +284,16 @@ class FunctionTranslator(X87Mixin, SseMixin):
                 if idx + 1 >= len(self.order) or self.order[idx + 1] != nxt:
                     self.out.append(self.goto_or_leave(nxt))
             blocks.append((va, insn, self.out))
+        if self.inlined:
+            # The body alone, labels made unique per call site ('@').
+            lines = [] if self.order[0] == self.entry else ['goto L_%08X_@;' % self.entry]
+            for va, insn, stmts in blocks:
+                if va in self.targets:
+                    lines.append('L_%08X_@:;' % va)
+                text = ' '.join(stmts)
+                if text:
+                    lines.append('{ %s }' % text)
+            return [re.sub(r'\bL_([0-9A-F]{8})\b(?!_@)', r'L_\1_@', l) for l in lines]
         cuts = self.split_points()
         name = 'f_%08X' % self.entry
         lines = ['static void %s_p%d(Cpu& c);' % (name, p) for p in range(1, len(cuts) + 1)]
@@ -454,6 +473,7 @@ class FunctionTranslator(X87Mixin, SseMixin):
                 if li != live_in[va]:
                     live_in[va] = li
                     changed = True
+        self.live_in = live_in
         self.live_out = {}
         for va in self.order:
             out = self.exit_live[va]
@@ -1197,7 +1217,14 @@ class FunctionTranslator(X87Mixin, SseMixin):
             cookie = COOKIE_CHECKS.get(getattr(self.tr.img, 'edition', None), {}).get(t)
             if cookie and self.tr.img.bytes(t, 6) != b'\x3b\x0d' + cookie[0].to_bytes(4, 'little'):
                 raise ValueError('COOKIE_CHECKS: %08X is not cmp ecx, [%08X]' % (t, cookie[0]))
-            if cookie and not self.need(insn):
+            body = None if self.inlined or cookie or t == self.entry else self.tr.inline_body(t)
+            if body is not None:
+                lines, refs = body
+                site = '%08X' % insn.address
+                self.refs |= refs
+                s.append(' '.join(l.replace('@', site) for l in lines))
+                s.append('%s:;' % RET_LABEL.replace('@', site))
+            elif cookie and not self.need(insn):
                 # __security_check_cookie inline: the common case touches no
                 # register, so the call's SYNC / RELOAD (and the callee's own)
                 # are skipped. The flags it sets are dead here; the return
@@ -1206,6 +1233,8 @@ class FunctionTranslator(X87Mixin, SseMixin):
                     h(cookie[0]), self.call_expr(t)))
             else:
                 s.append('SYNC(); %s; RELOAD();' % self.call_expr(t))
+        elif self.inline_import(insn, op, ret, s):
+            pass
         else:
             s.append('{ uint32_t t_ = %s; esp -= 4; st32(M, esp, %s); SYNC(); call_indirect(c, t_); RELOAD(); }' % (
                 self.read(insn, op, 4), h(ret)))
@@ -1213,8 +1242,30 @@ class FunctionTranslator(X87Mixin, SseMixin):
             s.append('SYNC(); trap(c, %s, "returned from a call that never returns");' % h(insn.address))
         self.out.extend(s)
 
+    # kernel32 imports called through the IAT that are done in place: the same
+    # work as the host handler (win32.cpp), without leaving translated code.
+    # Each pops its stdcall argument; only eax changes.
+    INLINE_IMPORTS = {
+        'InterlockedIncrement': 'eax = atomic_rmw<uint32_t>(M, p_, [](uint32_t v) { return v + 1u; }) + 1u;',
+        'InterlockedDecrement': 'eax = atomic_rmw<uint32_t>(M, p_, [](uint32_t v) { return v - 1u; }) - 1u;',
+    }
+
+    def inline_import(self, insn, op, ret, s):
+        if op.type != X.X86_OP_MEM or op.mem.base or op.mem.index or op.mem.segment:
+            return False
+        imp = self.tr.imports.get(op.mem.disp & 0xFFFFFFFF)
+        if imp is None or imp[0].lower() != 'kernel32.dll' or imp[1] not in self.INLINE_IMPORTS:
+            return False
+        # The return address goes where the call would put it, below the argument.
+        s.append('{ uint32_t p_ = ld32(M, esp); st32(M, esp - 4u, %s); esp += 4u; %s }' % (
+            h(ret), self.INLINE_IMPORTS[imp[1]]))
+        return True
+
     def i_ret(self, insn):
         n = insn.operands[0].imm & 0xFFFF if insn.operands else 0
+        if self.inlined:
+            self.out.append('esp += %du; goto %s;' % (4 + n, RET_LABEL))
+            return
         keep_flags = self.tr.flags_live_at_exit or self.entry in self.tr.flags_returned
         self.out.append('esp += %du; %s; return;' % (4 + n, 'SYNC()' if keep_flags else 'SYNC_R()'))
 
@@ -1352,12 +1403,55 @@ class Translator:
         self.data = data
         self.flags_live_at_exit = flags_live_at_exit
         self.flags_returned = set()  # see find_flag_returning
+        self.inline_cache = {}
+        self.imports = image.imports()
         self.functions = {fn['entry']: fn for fn in data['functions']}
         self.entries = set(self.functions)
         self.walker = Walker(image)
         self.walker.function_starts.update(self.entries)
         self.walker.noreturn.update(fn['entry'] for fn in data['functions'] if fn.get('noreturn'))
         self.walker.noreturn.update(data.get('noreturn_imports', []))
+
+    INLINE_MAX = 30
+
+    def inline_body(self, entry):
+        """The body of `entry` to inline at a direct call, or None.
+
+        A call writes every register back to the Cpu and reads them again, and
+        so does the callee; for the engine's small helpers (reference-counted
+        pointers, accessors) that was most of their cost. Inlined: small
+        functions that read no flags on entry, return none, have no indirect
+        jump and no native override. The return address is still pushed and
+        popped, so the guest stack is the same."""
+        if entry in self.inline_cache:
+            return self.inline_cache[entry]
+        self.inline_cache[entry] = None
+        edition = getattr(self.img, 'edition', None)
+        if (entry not in self.functions or entry in self.flags_returned or self.flags_live_at_exit
+                or entry in OVERRIDES.get(edition, {}) or entry in COOKIE_CHECKS.get(edition, {})
+                or self.functions[entry].get('noreturn')):
+            return None
+        fn = self.walker.walk(entry)
+        if (not fn.insns or len(fn.insns) > self.INLINE_MAX or fn.jump_tables or fn.indirect_jumps or fn.undecodable
+                or any(va in SITE_OVERRIDES.get(edition, {}) for va in fn.insns)):
+            return None
+        mnems = [i.mnem for i in fn.insns.values()]
+        if 'ret' not in mnems:
+            return None
+        ft = FunctionTranslator(self, fn)
+        ft.inlined = True
+        try:
+            ft.decode()
+            if any(i.mnemonic.split()[-1] == 'jmp' and i.operands and i.operands[0].type != X.X86_OP_IMM
+                   for i in ft.insns.values()):
+                return None
+            lines = ft.translate()
+        except Unsupported:
+            return None
+        if ft.trapped or ft.live_in.get(entry, 0) & F.ALL:
+            return None
+        self.inline_cache[entry] = (lines, ft.refs)
+        return self.inline_cache[entry]
 
     def translate(self, entry):
         fn = self.walker.walk(entry)

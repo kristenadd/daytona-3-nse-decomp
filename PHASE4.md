@@ -378,6 +378,16 @@ runs only with capture enabled (`m_bEnableCapture`). It is off by default, as on
 the cabinet the capture came from, whose "YOU" box is black. `AVIFIL32` and
 `MSVFW32` stay fail-closed. The camera feature is out of scope (PHASE0).
 
+Correction: attract also opens `screen demo.avi`, after its first full loop
+(about present 40,000 at 60 Hz). OpenCV first asks for
+`opencv_ffmpeg2410.dll`, which the install does not ship: `LoadLibraryA` now
+returns NULL with `ERROR_MOD_NOT_FOUND` for a DLL that is not there (one that
+is there still fails closed). OpenCV then falls back to Video for Windows:
+`AVIFileInit` succeeds and `AVIFileOpenA` fails with `AVIERR_FILEOPEN`, so the
+video is not shown and the game carries on. Before this, every run stopped
+there. Decoding the AVI (Microsoft Video 1) is still not done; the other
+`AVIFIL32` entries stay fail-closed.
+
 ### 6. Left fail-closed on purpose
 
 - Networking. `connect` already returns success and `select` already times out.

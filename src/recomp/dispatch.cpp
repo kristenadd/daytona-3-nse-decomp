@@ -43,54 +43,69 @@ GuestFn find_entry(std::uint32_t target) {
 
 namespace {
 
-GuestFn find_entry_cached(std::uint32_t target) {
+GuestFn find_entry_slow(std::uint32_t target);
+
+// Inlined into call_indirect: a hit is a compare and a load.
+inline GuestFn find_entry_cached(std::uint32_t target) {
     CachedEntry& slot = g_entry_cache[(target ^ (target >> 14)) & (kEntryCacheSize - 1)];
     if (slot.address == target && slot.fn != nullptr) return slot.fn;
+    return find_entry_slow(target);
+}
+
+[[gnu::noinline]] GuestFn find_entry_slow(std::uint32_t target) {
     GuestFn fn = find_entry(target);
-    if (fn != nullptr) slot = {target, fn};
+    if (fn != nullptr) g_entry_cache[(target ^ (target >> 14)) & (kEntryCacheSize - 1)] = {target, fn};
     return fn;
+}
+
+// The rare paths, out of line: call_indirect runs for every virtual call and
+// import, and with these inside it every call paid for their stack frame.
+[[gnu::noinline, gnu::cold]] void import_unbound(Cpu& c, std::uint32_t target) {
+    const std::uint32_t k = (target - ImportBase) / 16;
+    if ((target - ImportBase) % 16 == 0 && k < g_imports.size()) {
+        const ImportSlot& slot = g_imports[k];
+        // The return address the guest pushed, and the thread, locate the caller.
+        char what[160];
+        std::snprintf(what, sizeof what, "%s (called from %08X, thread %u)", slot.name ? slot.name : "import",
+                      ld32(c.mem, c.r[Cpu::ESP]), c.fs_base ? ld32(c.mem, c.fs_base + 0x24) : 0u);
+        if (std::getenv("DCUSA_STATS") != nullptr) {
+            // Code addresses on the guest stack: an approximate call chain.
+            std::fprintf(stderr, "guest stack:");
+            int shown = 0;
+            const std::uint32_t top = c.fs_base ? ld32(c.mem, c.fs_base + 4) : c.r[Cpu::ESP];
+            for (std::uint32_t p = c.r[Cpu::ESP]; p + 4 <= top && p < c.r[Cpu::ESP] + 0x4000u && shown < 24; p += 4) {
+                const std::uint32_t v = ld32(c.mem, p);
+                if (v >= 0x401000u && v < 0xD00000u) {
+                    std::fprintf(stderr, " %08X", v);
+                    ++shown;
+                }
+            }
+            std::fprintf(stderr, "\n");
+        }
+        fail_closed(Unported::Import, slot.iat, what);
+    }
+    fail_closed(Unported::Import, target, "import slot without a handler");
+}
+
+// 0xC5030C is the fpatan tail of atan2. The binary dispatcher jumps there,
+// and that address is not a translated function entry. st(0) is x, st(1) is y.
+[[gnu::noinline]] void fpatan_tail(Cpu& c) {
+    const double x = c.fpu.at(0);
+    const double y = c.fpu.at(1);
+    c.fpu.pop();
+    c.fpu.at(0) = std::atan2(y, x);
 }
 
 }  // namespace
 
 void call_indirect(Cpu& c, std::uint32_t target) {
     if (target >= ImportBase) {
-        std::uint32_t k = (target - ImportBase) / 16;
-        if ((target - ImportBase) % 16 == 0 && k < g_imports.size()) {
-            const ImportSlot& slot = g_imports[k];
-            if (slot.handler) return slot.handler(c);
-            // The return address the guest pushed, and the thread, locate the caller.
-            char what[160];
-            std::snprintf(what, sizeof what, "%s (called from %08X, thread %u)", slot.name ? slot.name : "import",
-                          ld32(c.mem, c.r[Cpu::ESP]), c.fs_base ? ld32(c.mem, c.fs_base + 0x24) : 0u);
-            if (std::getenv("DCUSA_STATS") != nullptr) {
-                // Code addresses on the guest stack: an approximate call chain.
-                std::fprintf(stderr, "guest stack:");
-                int shown = 0;
-                const std::uint32_t top = c.fs_base ? ld32(c.mem, c.fs_base + 4) : c.r[Cpu::ESP];
-                for (std::uint32_t p = c.r[Cpu::ESP]; p + 4 <= top && p < c.r[Cpu::ESP] + 0x4000u && shown < 24; p += 4) {
-                    const std::uint32_t v = ld32(c.mem, p);
-                    if (v >= 0x401000u && v < 0xD00000u) {
-                        std::fprintf(stderr, " %08X", v);
-                        ++shown;
-                    }
-                }
-                std::fprintf(stderr, "\n");
-            }
-            fail_closed(Unported::Import, slot.iat, what);
-        }
-        fail_closed(Unported::Import, target, "import slot without a handler");
+        const std::uint32_t k = (target - ImportBase) / 16;
+        if ((target - ImportBase) % 16 == 0 && k < g_imports.size() && g_imports[k].handler) return g_imports[k].handler(c);
+        return import_unbound(c, target);
     }
-    if (target >= kComCall && target < ImportBase) return call_com(c, target);
-    // 0xC5030C is the fpatan tail of atan2. The binary dispatcher jumps there,
-    // and that address is not a translated function entry. st(0) is x, st(1) is y.
-    if (target == 0x00C5030Cu) {
-        const double x = c.fpu.at(0);
-        const double y = c.fpu.at(1);
-        c.fpu.pop();
-        c.fpu.at(0) = std::atan2(y, x);
-        return;
-    }
+    if (target >= kComCall) return call_com(c, target);
+    if (target == 0x00C5030Cu) return fpatan_tail(c);
     if (GuestFn fn = find_entry_cached(target)) return fn(c);
     fail_closed(Unported::Function, target, "indirect call to an address with no translated function");
 }

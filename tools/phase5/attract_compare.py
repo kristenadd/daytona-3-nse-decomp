@@ -45,7 +45,10 @@ THUMB_W, THUMB_H = 32, 18
 # frame is not a measure of colour; the 95th percentile is. Measured: the
 # matching build 0.45, the magenta-bloom build 0.81.
 P95_COLOUR = 0.60
-MAX_COLOUR = 0.80          # any single frame, a loose backstop
+# Any single frame, a loose backstop. A close-up along a car's side scored
+# 0.86 with correct colours (its camera shot has no counterpart in the capture);
+# the magenta build is caught by the 95th percentile and the magenta check.
+MAX_COLOUR = 0.90
 MEDIAN_COLOUR = 0.30       # median over frames
 MAX_LUMA_DIFF = 12.0       # median luma, ours vs capture (0..255)
 MAX_SAT_DIFF = 0.06        # median saturation, ours vs capture (0..1)

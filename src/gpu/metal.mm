@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <atomic>
 #include <deque>
@@ -35,6 +36,14 @@ struct Texture {
     // a shader resource view does not start at level 0 or stops early.
     id<MTLTexture> views_of = nil;
     std::unordered_map<std::uint32_t, id<MTLTexture>> views;
+    // Clears not encoded yet (deferred_clears): one bit per colour mip, and
+    // the depth / stencil clear flags (1 depth, 2 stencil).
+    std::uint32_t clear_mips = 0;
+    float clear_rgba[16][4] = {};
+    std::uint32_t clear_ds = 0;
+    float clear_depth = 0;
+    std::uint8_t clear_stencil = 0;
+    id<MTLBuffer> depth_staging = nil;  // depth_as_color's, reused
 };
 
 struct Program {
@@ -461,9 +470,207 @@ id<MTLCommandBuffer> command_buffer() {
     return d.cmd;
 }
 
+// DCUSA_GPU_PASSES=<n>[,<n>...]: GPU time per pass for those frames (counting
+// command buffers that drew anything; DCUSA_GPU_PASSES_LOG=1 prints each one's
+// draw count). DCUSA_GPU_PASSES=d<draws>: frames with at least that many draws
+// that follow one that had them, at most one in 300. Every render and blit pass of the frame gets
+// a timestamp at its start and end, printed as a table once the GPU has run it.
+// Passes overlap on the GPU (one's vertex work runs during the last one's
+// fragment work), so the column does not sum to the frame.
+struct PassProfile {
+    std::vector<unsigned> frames;  // sorted
+    unsigned frame = 0, frame_draws = 0, min_draws = 0, last_print = 0;
+    bool on = false, active = false;
+    id<MTLCounterSampleBuffer> samples = nil;
+    struct Row { std::string label; unsigned draws = 0; std::unordered_map<std::uint64_t, unsigned> ps; };
+    std::vector<Row> rows;
+    int open = -1;  // the row of the open render pass
+} g_pp;
+constexpr unsigned kProfilePasses = 2048;
+
+void profile_init() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    const char* v = std::getenv("DCUSA_GPU_PASSES");
+    if (v == nullptr) return;
+    id<MTLDevice> dev = g_dev->dev;
+    if (![dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+        std::fprintf(stderr, "metal: no stage-boundary counters; DCUSA_GPU_PASSES ignored\n");
+        return;
+    }
+    for (id<MTLCounterSet> set in dev.counterSets) {
+        if (![set.name isEqualToString:MTLCommonCounterSetTimestamp]) continue;
+        MTLCounterSampleBufferDescriptor* sd = [MTLCounterSampleBufferDescriptor new];
+        sd.counterSet = set;
+        sd.storageMode = MTLStorageModeShared;
+        sd.sampleCount = 2 * kProfilePasses;
+        NSError* err = nil;
+        g_pp.samples = [dev newCounterSampleBufferWithDescriptor:sd error:&err];
+    }
+    if (g_pp.samples == nil) {
+        std::fprintf(stderr, "metal: no timestamp counter set; DCUSA_GPU_PASSES ignored\n");
+        return;
+    }
+    if (*v == 'd') g_pp.min_draws = static_cast<unsigned>(std::atoi(v + 1));
+    for (const char* p = v; *p && *v != 'd';) {
+        g_pp.frames.push_back(static_cast<unsigned>(std::strtoul(p, const_cast<char**>(&p), 10)));
+        while (*p == ',' || *p == ' ') ++p;
+    }
+    std::sort(g_pp.frames.begin(), g_pp.frames.end());
+    g_pp.on = true;
+    g_pp.active = !g_pp.frames.empty() && g_pp.frames.front() == 1;
+}
+
+// Puts timestamps on a render pass of the profiled frame.
+void profile_pass(MTLRenderPassDescriptor* pass, std::string label) {
+    g_pp.open = -1;
+    if (!g_pp.active || g_pp.rows.size() >= kProfilePasses) return;
+    const NSUInteger i = g_pp.rows.size();
+    pass.sampleBufferAttachments[0].sampleBuffer = g_pp.samples;
+    pass.sampleBufferAttachments[0].startOfVertexSampleIndex = 2 * i;
+    pass.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+    pass.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+    pass.sampleBufferAttachments[0].endOfFragmentSampleIndex = 2 * i + 1;
+    g_pp.rows.push_back({std::move(label)});
+    g_pp.open = static_cast<int>(i);
+}
+
+void profile_draw(std::uint64_t ps) {
+    ++g_pp.frame_draws;
+    if (g_pp.open < 0) return;
+    PassProfile::Row& r = g_pp.rows[g_pp.open];
+    ++r.draws;
+    ++r.ps[ps];
+}
+
+id<MTLBlitCommandEncoder> blit_encoder(const char* label) {
+    g_pp.open = -1;
+    if (!g_pp.active || g_pp.rows.size() >= kProfilePasses) return [command_buffer() blitCommandEncoder];
+    const NSUInteger i = g_pp.rows.size();
+    MTLBlitPassDescriptor* pass = [MTLBlitPassDescriptor blitPassDescriptor];
+    pass.sampleBufferAttachments[0].sampleBuffer = g_pp.samples;
+    pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = 2 * i;
+    pass.sampleBufferAttachments[0].endOfEncoderSampleIndex = 2 * i + 1;
+    g_pp.rows.push_back({label});
+    return [command_buffer() blitCommandEncoderWithDescriptor:pass];
+}
+
+std::string target_label(const char* kind, Texture* t, std::uint32_t mip) {
+    char b[96];
+    if (t == nullptr) return kind;
+    std::snprintf(b, sizeof b, "%s %ux%u fmt %u", kind, std::max(1u, t->desc.width >> mip), std::max(1u, t->desc.height >> mip),
+                  t->desc.format);
+    return b;
+}
+
+// After the profiled frame's commit: waits for it and prints the table. Then
+// decides whether the next frame is profiled.
+void profile_submitted(id<MTLCommandBuffer> cmd) {
+    if (!g_pp.on || g_pp.frame_draws == 0) return;
+    ++g_pp.frame;
+    if (std::getenv("DCUSA_GPU_PASSES_LOG")) std::fprintf(stderr, "gpu frame %u draws %u\n", g_pp.frame, g_pp.frame_draws);
+    if (g_pp.active && g_pp.min_draws && g_pp.frame_draws < g_pp.min_draws) g_pp.active = false;
+    if (g_pp.active) {
+        g_pp.last_print = g_pp.frame;
+        [cmd waitUntilCompleted];
+        const NSUInteger n = g_pp.rows.size();
+        NSData* data = [g_pp.samples resolveCounterRange:NSMakeRange(0, 2 * n)];
+        const auto* ts = data ? static_cast<const MTLCounterResultTimestamp*>(data.bytes) : nullptr;
+        std::uint64_t lo = ~0ull, hi = 0;
+        for (NSUInteger k = 0; ts && k < 2 * n; ++k) {
+            const std::uint64_t t = ts[k].timestamp;
+            if (t == MTLCounterErrorValue || t == 0) continue;
+            lo = std::min(lo, t);
+            hi = std::max(hi, t);
+        }
+        // Timestamps are GPU ticks; the command buffer's span gives the scale.
+        const double span = cmd.GPUEndTime - cmd.GPUStartTime;
+        const double us = hi > lo ? span * 1e6 / static_cast<double>(hi - lo) : 0;
+        std::fprintf(stderr, "gpu passes: frame %u, %lu passes, %u draws, command buffer %.2f ms\n", g_pp.frame,
+                     static_cast<unsigned long>(n), g_pp.frame_draws, span * 1e3);
+        for (NSUInteger k = 0; ts && k < n; ++k) {
+            const std::uint64_t a = ts[2 * k].timestamp, b = ts[2 * k + 1].timestamp;
+            const bool ok = a != MTLCounterErrorValue && b != MTLCounterErrorValue && b >= a && a != 0;
+            const PassProfile::Row& r = g_pp.rows[k];
+            std::uint64_t top = 0;
+            unsigned top_n = 0;
+            for (const auto& [key, c] : r.ps)
+                if (c > top_n) top = key, top_n = c;
+            std::fprintf(stderr, "  %4lu %8.1f us  start %8.1f  %-34s draws %4u ps %zu", static_cast<unsigned long>(k),
+                         ok ? (b - a) * us : -1.0, a > lo && a != MTLCounterErrorValue ? (a - lo) * us : 0.0,
+                         r.label.c_str(), r.draws, r.ps.size());
+            if (top_n) std::fprintf(stderr, " top %016llx x%u", static_cast<unsigned long long>(top), top_n);
+            std::fprintf(stderr, "\n");
+        }
+        g_pp.rows.clear();
+    }
+    g_pp.rows.clear();
+    g_pp.active = g_pp.min_draws ? g_pp.frame_draws >= g_pp.min_draws && (g_pp.last_print == 0 || g_pp.frame - g_pp.last_print >= 300)
+                                 : std::binary_search(g_pp.frames.begin(), g_pp.frames.end(), g_pp.frame + 1);
+    g_pp.frame_draws = 0;
+    g_pp.open = -1;
+}
+
 Texture* texture(std::uint32_t key) {
     auto it = g_dev->textures.find(key);
     return it == g_dev->textures.end() || it->second.tex == nil ? nullptr : &it->second;
+}
+
+// Deferred clears. A D3D clear encoded as its own pass makes a tile-based GPU
+// write the whole surface out, and the next pass read it back in. Instead the
+// clear waits on the texture and becomes the load action of the next pass that
+// renders to it (begin_pass). Anything else that reads the texture first
+// encodes it as a pass of its own here.
+void flush_clears(Texture& t) {
+    if (t.clear_mips == 0 && t.clear_ds == 0) return;
+    end_pass();
+    for (std::uint32_t mip = 0; mip < 16; ++mip) {
+        if (!(t.clear_mips & (1u << mip))) continue;
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = t.tex;
+        pass.colorAttachments[0].level = mip;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        const float* c = t.clear_rgba[mip];
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(c[0], c[1], c[2], c[3]);
+        profile_pass(pass, target_label("clear", &t, mip));
+        [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+    }
+    if (t.clear_ds) {
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.depthAttachment.texture = t.tex;
+        pass.depthAttachment.loadAction = (t.clear_ds & 1u) ? MTLLoadActionClear : MTLLoadActionLoad;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+        pass.depthAttachment.clearDepth = t.clear_depth;
+        if (has_stencil(t.format)) {
+            pass.stencilAttachment.texture = t.tex;
+            pass.stencilAttachment.loadAction = (t.clear_ds & 2u) ? MTLLoadActionClear : MTLLoadActionLoad;
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.clearStencil = t.clear_stencil;
+        }
+        profile_pass(pass, target_label("clear depth", &t, 0));
+        [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+    }
+    t.clear_mips = 0;
+    t.clear_ds = 0;
+}
+
+// The texture behind `key`, with any clear it is owed encoded.
+Texture* used(std::uint32_t key) {
+    Texture* t = texture(key);
+    if (t != nullptr) flush_clears(*t);
+    return t;
+}
+
+// The open pass renders to `key`.
+bool attached(std::uint32_t key) {
+    const Device& d = *g_dev;
+    if (d.enc == nil) return false;
+    if (d.enc_dsv == key) return true;
+    for (std::uint32_t r : d.enc_rtv)
+        if (r == key) return true;
+    return false;
 }
 
 id<MTLTexture> new_texture(const TextureDesc& desc, MTLPixelFormat format, bool depth, std::uint32_t mips) {
@@ -512,25 +719,51 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
     for (unsigned i = 0; i < kTargets; ++i) {
         Texture* t = rtv[i] ? texture(rtv[i]) : nullptr;
         if (t == nullptr || t->depth) continue;
+        const NSUInteger level = std::min<NSUInteger>(mip[i], t->tex.mipmapLevelCount - 1);
         pass.colorAttachments[i].texture = t->tex;
-        pass.colorAttachments[i].level = std::min<NSUInteger>(mip[i], t->tex.mipmapLevelCount - 1);
+        pass.colorAttachments[i].level = level;
         pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
         pass.colorAttachments[i].storeAction = MTLStoreActionStore;
+        if (level < 16 && (t->clear_mips & (1u << level))) {
+            const float* c = t->clear_rgba[level];
+            pass.colorAttachments[i].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[i].clearColor = MTLClearColorMake(c[0], c[1], c[2], c[3]);
+            t->clear_mips &= ~(1u << level);
+        }
+        if (t->clear_mips) flush_clears(*t);  // other mips: not this pass's
         any = true;
     }
     if (Texture* t = dsv ? texture(dsv) : nullptr; t != nullptr && t->depth) {
         ++t->written;
         pass.depthAttachment.texture = t->tex;
-        pass.depthAttachment.loadAction = MTLLoadActionLoad;
+        pass.depthAttachment.loadAction = (t->clear_ds & 1u) ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.depthAttachment.storeAction = MTLStoreActionStore;
+        pass.depthAttachment.clearDepth = t->clear_depth;
         if (has_stencil(t->format)) {
             pass.stencilAttachment.texture = t->tex;
-            pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+            pass.stencilAttachment.loadAction = (t->clear_ds & 2u) ? MTLLoadActionClear : MTLLoadActionLoad;
             pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.clearStencil = t->clear_stencil;
         }
+        t->clear_ds = 0;
         any = true;
     }
     if (!any) return false;
+    if (g_pp.active) {
+        Texture* t0 = nullptr;
+        unsigned n = 0;
+        for (unsigned i = 0; i < kTargets; ++i)
+            if (Texture* t = rtv[i] ? texture(rtv[i]) : nullptr; t != nullptr && !t->depth) {
+                if (t0 == nullptr) t0 = t;
+                ++n;
+            }
+        std::string label = t0 ? target_label("pass", t0, mip[0]) : std::string("pass depth-only");
+        if (n > 1) label += " +" + std::to_string(n - 1);
+        if (dsv) label += " ds";
+        profile_pass(pass, label);
+    } else {
+        g_pp.open = -1;
+    }
     d.enc = [command_buffer() renderCommandEncoderWithDescriptor:pass];
     d.bound = Device::Bound{};
     std::memcpy(d.enc_rtv, rtv, sizeof d.enc_rtv);
@@ -724,6 +957,7 @@ Texture* dt_bound(const DrawState& s) {
 // The R32Float copy of depth texture `t`, brought up to date. Ends the open pass.
 id<MTLTexture> depth_as_color(Texture& t) {
     Device& d = *g_dev;
+    flush_clears(t);
     if (t.as_color != nil && t.copied == t.written) return t.as_color;
     const NSUInteger w = t.desc.width, h = t.desc.height;
     if (t.as_color == nil) {
@@ -736,8 +970,10 @@ id<MTLTexture> depth_as_color(Texture& t) {
         t.as_color = [d.dev newTextureWithDescriptor:td];
     }
     end_pass();
-    id<MTLBuffer> staging = [d.dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModePrivate];
-    id<MTLBlitCommandEncoder> blit = [command_buffer() blitCommandEncoder];
+    if (t.depth_staging == nil)
+        t.depth_staging = [d.dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModePrivate];
+    id<MTLBuffer> staging = t.depth_staging;
+    id<MTLBlitCommandEncoder> blit = blit_encoder("depth copy");
     [blit copyFromTexture:t.tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
                sourceSize:MTLSizeMake(w, h, 1) toBuffer:staging destinationOffset:0 destinationBytesPerRow:w * 4
     destinationBytesPerImage:w * h * 4 options:has_stencil(t.format) ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
@@ -780,8 +1016,8 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
         const std::uint32_t ids[2] = {s.vs_srv[i], s.ps_srv[i]};
         const StageUse* uses[2] = {&pl->vs, &pl->ps};
         for (int st = 0; st < 2; ++st) {
-            Texture* t = ids[st] ? texture(ids[st]) : nullptr;
-            if (t != nullptr && t->depth && (uses[st]->textures & bit) && !(uses[st]->depth & bit)) {
+            Texture* t = ids[st] && (uses[st]->textures & bit) ? used(ids[st]) : nullptr;
+            if (t != nullptr && t->depth && !(uses[st]->depth & bit)) {
                 if (ids[st] == s.dsv) problem("depth texture bound as target and read as colour");
                 else color_of_depth[st][i] = depth_as_color(*t);
             }
@@ -929,6 +1165,7 @@ bool enabled() {
     g_dev = new Device;
     g_dev->dev = dev;
     g_dev->queue = [dev newCommandQueue];
+    profile_init();
     g_dev->shader_dir = dir;
     if (verbose())
         std::fprintf(stderr, "metal: %s, BCn %s\n", dev.name.UTF8String,
@@ -996,6 +1233,7 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
     auto it = g_dev->textures.find(key);
     if (it == g_dev->textures.end() || it->second.tex == nil || it->second.depth || bytes == nullptr) return;
     Texture& t = it->second;
+    flush_clears(t);
     const bool bc = t.desc.format >= 70 && t.desc.format <= 99 && t.desc.format != 87 && t.desc.format != 88 &&
                     t.desc.format != 90 && t.desc.format != 91;
     const std::uint32_t rows = bc ? (t.desc.height + 3) / 4 : t.desc.height;
@@ -1004,7 +1242,7 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
     if (t.tex.storageMode == MTLStorageModePrivate) {
         id<MTLBuffer> staging = [g_dev->dev newBufferWithBytes:bytes length:size options:MTLResourceStorageModeShared];
         end_pass();
-        id<MTLBlitCommandEncoder> blit = [command_buffer() blitCommandEncoder];
+        id<MTLBlitCommandEncoder> blit = blit_encoder("texture upload");
         [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:row_pitch sourceBytesPerImage:row_pitch * rows
                   sourceSize:MTLSizeMake(t.desc.width, t.desc.height, 1) toTexture:t.tex destinationSlice:0
             destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
@@ -1021,10 +1259,10 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
 
 void generate_mips(std::uint32_t key) {
     if (!enabled()) return;
-    Texture* t = texture(key);
+    Texture* t = used(key);
     if (t == nullptr || t->tex.mipmapLevelCount < 2) return;
     end_pass();
-    id<MTLBlitCommandEncoder> blit = [command_buffer() blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = blit_encoder("generate mips");
     [blit generateMipmapsForTexture:t->tex];
     [blit endEncoding];
 }
@@ -1085,14 +1323,11 @@ void clear_target(std::uint32_t key, std::uint32_t mip, const float rgba[4]) {
     Texture* t = texture(key);
     if (g_trace) std::fprintf(stderr, "clear %06x %g %g %g %g\n", key, rgba[0], rgba[1], rgba[2], rgba[3]);
     if (t == nullptr || t->depth) return;
-    end_pass();
-    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = t->tex;
-    pass.colorAttachments[0].level = std::min<NSUInteger>(mip, t->tex.mipmapLevelCount - 1);
-    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]);
-    [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+    if (attached(key)) end_pass();  // draws already encoded on it come first
+    const std::uint32_t level = std::min<std::uint32_t>(mip, static_cast<std::uint32_t>(t->tex.mipmapLevelCount) - 1);
+    if (level >= 16) return;
+    t->clear_mips |= 1u << level;
+    std::memcpy(t->clear_rgba[level], rgba, sizeof t->clear_rgba[level]);
     ++g_dev->stats.clears;
 }
 
@@ -1100,20 +1335,11 @@ void clear_depth(std::uint32_t key, float depth, std::uint8_t stencil, std::uint
     if (!enabled()) return;
     Texture* t = texture(key);
     if (t == nullptr || !t->depth) return;
-    end_pass();
-    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    if (attached(key)) end_pass();
     ++t->written;
-    pass.depthAttachment.texture = t->tex;
-    pass.depthAttachment.loadAction = (flags & 1u) ? MTLLoadActionClear : MTLLoadActionLoad;
-    pass.depthAttachment.storeAction = MTLStoreActionStore;
-    pass.depthAttachment.clearDepth = depth;
-    if (has_stencil(t->format)) {
-        pass.stencilAttachment.texture = t->tex;
-        pass.stencilAttachment.loadAction = (flags & 2u) ? MTLLoadActionClear : MTLLoadActionLoad;
-        pass.stencilAttachment.storeAction = MTLStoreActionStore;
-        pass.stencilAttachment.clearStencil = stencil;
-    }
-    [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+    if (flags & 1u) t->clear_depth = depth;
+    if (flags & 2u) t->clear_stencil = stencil;
+    t->clear_ds |= flags & 3u;
     ++g_dev->stats.clears;
 }
 
@@ -1140,6 +1366,7 @@ void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, 
     [e drawIndexedPrimitives:prim indexCount:count indexType:wide ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
                  indexBuffer:ib->second.buf indexBufferOffset:ib->second.off + offset instanceCount:1 baseVertex:base baseInstance:0];
     ++g_dev->stats.draws;
+    profile_draw(s.ps);
 }
 
 void draw(const DrawState& s, std::uint32_t count, std::uint32_t start) {
@@ -1153,6 +1380,7 @@ void draw(const DrawState& s, std::uint32_t count, std::uint32_t start) {
     trace_draw(s, "plain", count, "drawn");
     [e drawPrimitives:prim vertexStart:start vertexCount:count];
     ++g_dev->stats.draws;
+    profile_draw(s.ps);
 }
 
 namespace {
@@ -1221,7 +1449,7 @@ void set_layer(void* layer) {
 
 void show(std::uint32_t key) {
     if (!enabled() || g_layer == nil) return;
-    Texture* t = texture(key);
+    Texture* t = used(key);
     if (t == nullptr || t->tex == nil || t->depth || !make_show_pipeline()) return;
     end_pass();
     // Follow the window: the drawable is the layer's size in pixels.
@@ -1270,6 +1498,7 @@ void submit() {
     if (d.cmd == nil) return;
     time_gpu(d.cmd);
     [d.cmd commit];
+    profile_submitted(d.cmd);
     d.in_flight.emplace_back(d.cmd, std::move(d.retired));
     d.retired.clear();
     d.cmd = nil;
@@ -1288,7 +1517,7 @@ void submit() {
 
 bool read_rgba8(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height) {
     if (!enabled()) return false;
-    Texture* t = texture(key);
+    Texture* t = used(key);
     if (t == nullptr || (t->format != MTLPixelFormatRGBA8Unorm && t->format != MTLPixelFormatBGRA8Unorm &&
                          t->format != MTLPixelFormatRGBA8Unorm_sRGB && t->format != MTLPixelFormatBGRA8Unorm_sRGB))
         return false;
@@ -1320,6 +1549,7 @@ void set_trace(bool on) { g_trace = on; }
 
 void scan_targets() {
     if (!enabled()) return;
+    for (auto& entry : g_dev->textures) flush_clears(entry.second);
     end_pass();
     if (g_dev->cmd != nil) {
         [g_dev->cmd commit];

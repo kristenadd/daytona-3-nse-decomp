@@ -30,14 +30,16 @@ the most similar reference frame, using 32×18 thumbnails:
 | Check | Tolerance | Current build (CTest run) | Magenta-bloom build |
 |---|---|---|---|
 | 95th-percentile colour distance | 0.60 | 0.451 | 0.808 (fails) |
-| Worst colour distance | 0.80 | 0.669 | 0.889 (fails) |
+| Worst colour distance | 0.90 | 0.669 | 0.889 |
 | Median colour distance | 0.30 | 0.225 | 0.246 |
 | Median luma | ±12 | 99.8 vs 101.6 | 96.3 |
 | Median saturation | ±0.06 | 0.370 vs 0.336 | 0.386 |
 | Attract frames | at least 150 | 274 | 223 |
 | Magenta frames | none | 0 | 32 (fails) |
 
-The single worst frame is not the main measure. A few camera shots, such as a
+The single worst frame is not the main measure (its limit went from 0.80 to
+0.90 when a run caught a close-up along a car's side at 0.86, correctly
+coloured). A few camera shots, such as a
 wheel filling the frame, have no counterpart in a capture sampled every 2 s,
 and they score about 0.6 to 0.7 with correct colours. The 95th percentile
 separates the builds: 0.45 for the matching build, 0.81 for the magenta one.

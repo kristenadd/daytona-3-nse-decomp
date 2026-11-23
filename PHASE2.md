@@ -446,6 +446,19 @@ candidate.
 
 Together the first two took about 7% off a race frame.
 
+- Small functions are inlined at direct calls (`Translator.inline_body`): at
+  most 30 instructions, no flags read on entry or returned, no indirect jump,
+  no override or site override, and not the caller itself. Inside the body
+  `ret` becomes `esp += n; goto R_<site>` and a tail jump becomes a call
+  followed by that goto. The return address is still pushed, so the guest
+  stack is the same. Labels get the call site as a suffix. Inlining is one
+  level deep and off in the semantics tests (`flags_live_at_exit`).
+- `call dword ptr [IAT]` to kernel32 `InterlockedIncrement` / `Decrement` is
+  done in place (`INLINE_IMPORTS`): the same atomic as the host handler, the
+  argument popped, only eax changed.
+
+These two took about 8% off a race frame.
+
 ### 7. Static initializers
 
 The restricted evaluator is dropped. Initializers run translated, through the CRT's own walk.

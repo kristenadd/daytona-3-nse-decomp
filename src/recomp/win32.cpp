@@ -1883,6 +1883,39 @@ void GetModuleHandleA(Cpu& c) {
 
 void GetModuleFileNameA(Cpu& c) { ret_stdcall(c, module_file_name(c, false), 12); }
 
+// No DLL is loaded at run time. A name with no file behind it (in the game's
+// folder, or the path given) fails as on Windows: NULL and ERROR_MOD_NOT_FOUND.
+// OpenCV asks for opencv_ffmpeg2410.dll, which the install does not ship, after
+// the first attract loop and goes on without it. A DLL that does exist fails
+// closed: its code is not translated.
+// Video for Windows, as OpenCV's file capture uses it (after the first attract
+// loop it opens one of the AVIs in rom\\movie). The AVIs are not decoded here:
+// the open fails, OpenCV's capture reports it could not open, and the game
+// goes on without that video. Every other AVIFIL32 entry stays fail-closed, so
+// nothing past a failed open is reached silently.
+void AVIFileInit(Cpu& c) { ret_stdcall(c, 0, 0); }
+void AVIFileOpenA(Cpu& c) {
+    if (arg(c, 0) != 0) st32(c.mem, arg(c, 0), 0);  // *ppfile = NULL
+    if (std::getenv("DCUSA_STATS") != nullptr && arg(c, 1) != 0)
+        std::fprintf(stderr, "AVIFileOpenA %s: not opened\n", guest_ascii(c.mem, arg(c, 1), false).c_str());
+    ret_stdcall(c, 0x80044067u, 16);  // AVIERR_FILEOPEN
+}
+
+void LoadLibraryA(Cpu& c) {
+    const std::string name = arg(c, 0) ? guest_ascii(c.mem, arg(c, 0), false) : std::string();
+    std::string path = name;
+    if (name.find_first_of("\\/:") == std::string::npos) {
+        const std::string module = guest_module_path(kExeName);
+        const std::size_t slash = module.find_last_of('\\');
+        path = slash == std::string::npos ? name : module.substr(0, slash + 1) + name;
+    }
+    GuestFileInfo info;
+    if (!name.empty() && guest_stat(path, &info) == 0 && info.exists)
+        fail_closed(Unported::Import, 0, "LoadLibraryA of a DLL that exists: " + name);
+    set_error(c, 126u);
+    ret_stdcall(c, 0, 4);
+}
+
 // An empty environment: one UTF-16 null. The CRT's converter asks for the size
 // of that single character and then copies it.
 void GetEnvironmentStringsW(Cpu& c) {
@@ -2584,6 +2617,9 @@ constexpr Handler kHandlers[] = {
     {"WS2_32.dll!#15", ws_ntohs},
     {"WS2_32.dll!#8", ws_htonl},
     {"KERNEL32.dll!GetModuleHandleA", GetModuleHandleA},
+    {"KERNEL32.dll!LoadLibraryA", LoadLibraryA},
+    {"AVIFIL32.dll!AVIFileInit", AVIFileInit},
+    {"AVIFIL32.dll!AVIFileOpenA", AVIFileOpenA},
     {"KERNEL32.dll!GetModuleHandleExW", GetModuleHandleExW},
     {"KERNEL32.dll!GetModuleFileNameA", GetModuleFileNameA},
     {"KERNEL32.dll!GetModuleFileNameW", GetModuleFileNameW},
