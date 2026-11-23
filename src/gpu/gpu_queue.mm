@@ -28,7 +28,7 @@ namespace dcusa::gpu {
 namespace {
 
 enum class Op : std::uint8_t {
-    CreateTexture, UploadTexture, GenerateMips, UploadBuffer, CreateSampler, Destroy, ClearTarget, ClearDepth,
+    CreateTexture, UploadTexture, UploadTextureSub, GenerateMips, UploadBuffer, CreateSampler, Destroy, ClearTarget, ClearDepth,
     DrawIndexed, Draw, Submit, SetLayer, Show, SetTrace,
 };
 
@@ -74,11 +74,14 @@ void replay(const Batch& b) {
             switch (c.op) {
             case Op::CreateTexture: direct::create_texture(c.id, b.textures[c.index]); break;
             case Op::UploadTexture: direct::upload_texture(c.id, b.bytes.data() + c.index, c.size, c.a); break;
+            case Op::UploadTextureSub:
+                direct::upload_texture_sub(c.id, c.b, static_cast<std::uint32_t>(c.base), b.bytes.data() + c.index, c.size, c.a);
+                break;
             case Op::GenerateMips: direct::generate_mips(c.id); break;
             case Op::UploadBuffer: direct::upload_buffer(c.id, b.bytes.data() + c.index, c.size); break;
             case Op::CreateSampler: direct::create_sampler(c.id, b.samplers[c.index]); break;
             case Op::Destroy: direct::destroy(c.id); break;
-            case Op::ClearTarget: direct::clear_target(c.id, c.a, c.f); break;
+            case Op::ClearTarget: direct::clear_target(c.id, c.a, c.b, c.f); break;
             case Op::ClearDepth: direct::clear_depth(c.id, c.f[0], static_cast<std::uint8_t>(c.b), c.a); break;
             case Op::DrawIndexed: direct::draw_indexed(b.states[c.index], c.a, c.b, c.base); break;
             case Op::Draw: direct::draw(b.states[c.index], c.a, c.b); break;
@@ -186,6 +189,20 @@ void upload_texture(std::uint32_t id, const std::uint8_t* bytes, std::size_t siz
     c.a = row_pitch;
 }
 
+void upload_texture_sub(std::uint32_t id, std::uint32_t slice, std::uint32_t mip, const std::uint8_t* bytes, std::size_t size,
+                        std::uint32_t row_pitch) {
+    if (!threaded()) return direct::upload_texture_sub(id, slice, mip, bytes, size, row_pitch);
+    if (bytes == nullptr || size == 0) return;
+    const std::size_t at = Q().filling->keep_bytes(bytes, size);
+    Cmd& c = record(Op::UploadTextureSub);
+    c.id = id;
+    c.index = at;
+    c.size = size;
+    c.a = row_pitch;
+    c.b = slice;
+    c.base = static_cast<std::int32_t>(mip);
+}
+
 void generate_mips(std::uint32_t id) {
     if (!threaded()) return direct::generate_mips(id);
     record(Op::GenerateMips).id = id;
@@ -215,11 +232,12 @@ void destroy(std::uint32_t id) {
     record(Op::Destroy).id = id;
 }
 
-void clear_target(std::uint32_t texture, std::uint32_t mip, const float rgba[4]) {
-    if (!threaded()) return direct::clear_target(texture, mip, rgba);
+void clear_target(std::uint32_t texture, std::uint32_t mip, std::uint32_t slice, const float rgba[4]) {
+    if (!threaded()) return direct::clear_target(texture, mip, slice, rgba);
     Cmd& c = record(Op::ClearTarget);
     c.id = texture;
     c.a = mip;
+    c.b = slice;
     std::memcpy(c.f, rgba, sizeof c.f);
 }
 

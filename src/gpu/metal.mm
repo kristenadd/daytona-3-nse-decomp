@@ -29,6 +29,7 @@ struct Texture {
     TextureDesc desc;
     MTLPixelFormat format = MTLPixelFormatInvalid;
     bool depth = false;
+    bool cube = false;  // a cube map (D3D11_RESOURCE_MISC_TEXTURECUBE): six faces per element
     // A depth texture the shaders read as Texture2D: an R32Float copy, taken
     // again after each pass or clear that may have changed the depth.
     std::uint64_t written = 0, copied = ~0ull;
@@ -64,6 +65,7 @@ struct StageUse {
     std::uint32_t buffers = 0;   // bit per constant buffer index
     std::uint32_t textures = 0;  // bit per texture index
     std::uint32_t depth = 0;     // of those, the depth2d ones
+    std::uint32_t cube = 0;      // and the texturecube ones
     std::uint32_t samplers = 0;
     // Bytes the function reads from each constant buffer.
     std::uint32_t buffer_size[kBuffers] = {};
@@ -102,6 +104,7 @@ struct Device {
         void* samp[2][kSlots] = {};
     } bound;
     std::uint8_t enc_mip[kTargets]{};
+    std::uint8_t enc_slice[kTargets]{};
     std::uint32_t enc_dsv = 0;
     std::string shader_dir;
     std::unordered_map<std::uint32_t, Texture> textures;
@@ -122,7 +125,7 @@ struct Device {
     std::unordered_map<std::uint64_t, Program> programs;
     std::unordered_map<std::string, Pipeline> pipelines;
     id<MTLBuffer> zero_buffer = nil;
-    id<MTLTexture> zero_texture = nil, zero_depth = nil;
+    id<MTLTexture> zero_texture = nil, zero_depth = nil, zero_cube = nil;
     id<MTLSamplerState> default_sampler = nil;
     std::unordered_map<std::uint32_t, id<MTLDepthStencilState>> depth_states;
     std::unordered_map<std::string, bool> reported;
@@ -675,11 +678,19 @@ bool attached(std::uint32_t key) {
     return false;
 }
 
+bool is_cube(const TextureDesc& desc) {
+    return (desc.misc & 0x4u) != 0 && desc.array >= 6 && desc.array % 6 == 0 && desc.width == desc.height;
+}
+
 id<MTLTexture> new_texture(const TextureDesc& desc, MTLPixelFormat format, bool depth, std::uint32_t mips) {
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
                                                                                  width:desc.width
                                                                                 height:desc.height
                                                                              mipmapped:NO];
+    if (is_cube(desc)) {
+        td.textureType = desc.array == 6 ? MTLTextureTypeCube : MTLTextureTypeCubeArray;
+        td.arrayLength = desc.array / 6;
+    }
     td.mipmapLevelCount = mips;
     MTLTextureUsage usage = MTLTextureUsageShaderRead;
     if ((desc.bind & 0x60u) != 0 || depth) usage |= MTLTextureUsageRenderTarget;
@@ -704,16 +715,19 @@ id<MTLTexture> mip_view(Texture& t, std::uint32_t first, std::uint32_t count) {
     }
     const std::uint32_t key = first << 8 | static_cast<std::uint32_t>(n);
     if (auto it = t.views.find(key); it != t.views.end()) return it->second;
+    const NSUInteger slices = t.tex.arrayLength * (t.cube ? 6 : 1);
     id<MTLTexture> v = [t.tex newTextureViewWithPixelFormat:t.tex.pixelFormat textureType:t.tex.textureType
-                                                     levels:NSMakeRange(first, n) slices:NSMakeRange(0, t.tex.arrayLength)];
+                                                     levels:NSMakeRange(first, n) slices:NSMakeRange(0, slices)];
     t.views[key] = v;
     return v;
 }
 
-bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTargets], std::uint32_t dsv) {
+bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTargets], const std::uint8_t slice[kTargets],
+                std::uint32_t dsv) {
     Device& d = *g_dev;
     if (d.enc != nil && std::memcmp(d.enc_rtv, rtv, sizeof d.enc_rtv) == 0 &&
-        std::memcmp(d.enc_mip, mip, sizeof d.enc_mip) == 0 && d.enc_dsv == dsv)
+        std::memcmp(d.enc_mip, mip, sizeof d.enc_mip) == 0 && std::memcmp(d.enc_slice, slice, sizeof d.enc_slice) == 0 &&
+        d.enc_dsv == dsv)
         return true;
     end_pass();
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -724,9 +738,10 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         const NSUInteger level = std::min<NSUInteger>(mip[i], t->tex.mipmapLevelCount - 1);
         pass.colorAttachments[i].texture = t->tex;
         pass.colorAttachments[i].level = level;
+        pass.colorAttachments[i].slice = t->cube ? std::min<NSUInteger>(slice[i], 6 * t->tex.arrayLength - 1) : 0;
         pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
         pass.colorAttachments[i].storeAction = MTLStoreActionStore;
-        if (level < 16 && (t->clear_mips & (1u << level))) {
+        if (level < 16 && slice[i] == 0 && (t->clear_mips & (1u << level))) {
             const float* c = t->clear_rgba[level];
             pass.colorAttachments[i].loadAction = MTLLoadActionClear;
             pass.colorAttachments[i].clearColor = MTLClearColorMake(c[0], c[1], c[2], c[3]);
@@ -770,6 +785,7 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
     d.bound = Device::Bound{};
     std::memcpy(d.enc_rtv, rtv, sizeof d.enc_rtv);
     std::memcpy(d.enc_mip, mip, sizeof d.enc_mip);
+    std::memcpy(d.enc_slice, slice, sizeof d.enc_slice);
     d.enc_dsv = dsv;
     return true;
 }
@@ -784,7 +800,9 @@ void note_use(NSArray<id<MTLBinding>>* bindings, StageUse* use) {
         }
         if (b.type == MTLBindingTypeTexture) {
             use->textures |= bit;
-            if (static_cast<id<MTLTextureBinding>>(b).isDepthTexture) use->depth |= bit;
+            const id<MTLTextureBinding> tb = static_cast<id<MTLTextureBinding>>(b);
+            if (tb.isDepthTexture) use->depth |= bit;
+            if (tb.textureType == MTLTextureTypeCube || tb.textureType == MTLTextureTypeCubeArray) use->cube |= bit;
         }
         if (b.type == MTLBindingTypeSampler) use->samplers |= bit;
     }
@@ -925,6 +943,13 @@ void stand_ins() {
     pass.depthAttachment.storeAction = MTLStoreActionStore;
     pass.depthAttachment.clearDepth = 0;
     [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+    MTLTextureDescriptor* cd = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                     size:1
+                                                                                mipmapped:NO];
+    d.zero_cube = [d.dev newTextureWithDescriptor:cd];
+    for (NSUInteger face = 0; face < 6; ++face)
+        [d.zero_cube replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:face withBytes:&zero bytesPerRow:4
+                     bytesPerImage:4];
     d.default_sampler = [d.dev newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]];
 }
 
@@ -1026,7 +1051,7 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
             }
         }
     }
-    if (!begin_pass(s.rtv, s.rtv_mip, s.dsv)) {
+    if (!begin_pass(s.rtv, s.rtv_mip, s.rtv_slice, s.dsv)) {
         problem("draw with no Metal render target");
         return nil;
     }
@@ -1117,11 +1142,12 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
                     std::uint32_t first_mip, std::uint32_t count) -> id<MTLTexture> {
         if (converted != nil) return converted;
         const bool want_depth = (use.depth & bit) != 0;
+        const bool want_cube = (use.cube & bit) != 0;
         Texture* t = id_ ? texture(id_) : nullptr;
-        if (t != nullptr && t->depth == want_depth) return mip_view(*t, first_mip, count);
-        if (t != nullptr) problem(std::string("texture kind mismatch: ") + (t->depth ? "depth" : "colour") +
-                                  " bound where the shader reads " + (want_depth ? "depth" : "colour"));
-        return want_depth ? d.zero_depth : d.zero_texture;
+        if (t != nullptr && t->depth == want_depth && t->cube == want_cube) return mip_view(*t, first_mip, count);
+        if (t != nullptr) problem(std::string("texture kind mismatch: ") + (t->depth ? "depth" : t->cube ? "cube" : "colour") +
+                                  " bound where the shader reads " + (want_depth ? "depth" : want_cube ? "cube" : "colour"));
+        return want_depth ? d.zero_depth : want_cube ? d.zero_cube : d.zero_texture;
     };
     const std::uint32_t* srvs[2] = {s.vs_srv, s.ps_srv};
     const std::uint8_t* mips[2] = {s.vs_srv_mip, s.ps_srv_mip};
@@ -1180,6 +1206,9 @@ bool enabled() {
 // order the guest called them.
 namespace direct {
 
+void upload_texture_sub(std::uint32_t key, std::uint32_t slice, std::uint32_t mip, const std::uint8_t* bytes, std::size_t size,
+                        std::uint32_t row_pitch);
+
 void create_texture(std::uint32_t key, const TextureDesc& desc) {
     if (!enabled()) return;
     bool depth = false;
@@ -1188,6 +1217,7 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
     t.desc = desc;
     t.format = format;
     t.depth = depth;
+    t.cube = is_cube(desc) && !depth;
     if (format == MTLPixelFormatInvalid || desc.width == 0 || desc.height == 0) {
         problem("texture format " + std::to_string(desc.format) + " not mapped");
         g_dev->textures[key] = t;
@@ -1199,10 +1229,11 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
     // while reading the one above it.
     const bool chain = desc.mips != 1 && ((desc.misc & 1u) != 0 || (desc.bind & 0x20u) != 0);
     std::uint32_t levels = 1;
-    if (chain) {
-        for (std::uint32_t w = std::max(desc.width, desc.height); w > 1; w >>= 1) ++levels;
-        if (desc.mips > 1) levels = std::min(levels, desc.mips);
-    }
+    std::uint32_t full = 1;
+    for (std::uint32_t w = std::max(desc.width, desc.height); w > 1; w >>= 1) ++full;
+    if (chain) levels = desc.mips > 1 ? std::min(full, desc.mips) : full;
+    // A cube map's faces and levels all arrive from the guest (upload_texture_sub).
+    if (t.cube && desc.mips != 1) levels = desc.mips == 0 ? full : std::min(full, desc.mips);
     t.tex = new_texture(desc, format, depth, levels);
     ++g_dev->stats.textures;
     g_dev->textures[key] = t;
@@ -1228,6 +1259,11 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
             pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
         }
         [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+        // A cube map's other faces (slice 0 was cleared above).
+        for (NSUInteger face = 1; !depth && t.cube && face < 6 * t.tex.arrayLength; ++face) {
+            pass.colorAttachments[0].slice = face;
+            [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+        }
     }
 }
 
@@ -1236,6 +1272,7 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
     auto it = g_dev->textures.find(key);
     if (it == g_dev->textures.end() || it->second.tex == nil || it->second.depth || bytes == nullptr) return;
     Texture& t = it->second;
+    if (t.cube) return upload_texture_sub(key, 0, 0, bytes, size, row_pitch);  // face 0, level 0
     flush_clears(t);
     const bool bc = t.desc.format >= 70 && t.desc.format <= 99 && t.desc.format != 87 && t.desc.format != 88 &&
                     t.desc.format != 90 && t.desc.format != 91;
@@ -1256,6 +1293,34 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
             t.tex = new_texture(t.desc, t.format, false, static_cast<std::uint32_t>(t.tex.mipmapLevelCount));
         [t.tex replaceRegion:MTLRegionMake2D(0, 0, t.desc.width, t.desc.height) mipmapLevel:0 withBytes:bytes
                  bytesPerRow:row_pitch];
+    }
+    ++g_dev->stats.uploads;
+}
+
+void upload_texture_sub(std::uint32_t key, std::uint32_t slice, std::uint32_t mip, const std::uint8_t* bytes, std::size_t size,
+                        std::uint32_t row_pitch) {
+    if (!enabled()) return;
+    Texture* t = texture(key);
+    if (t == nullptr || t->depth || bytes == nullptr || mip >= t->tex.mipmapLevelCount) return;
+    const NSUInteger slices = t->tex.arrayLength * (t->cube ? 6 : 1);
+    if (slice >= slices) return;
+    flush_clears(*t);
+    const std::uint32_t w = std::max(1u, t->desc.width >> mip), h = std::max(1u, t->desc.height >> mip);
+    const bool bc = t->desc.format >= 70 && t->desc.format <= 99 && t->desc.format != 87 && t->desc.format != 88 &&
+                    t->desc.format != 90 && t->desc.format != 91;
+    const std::uint32_t rows = bc ? (h + 3) / 4 : h;
+    if (row_pitch == 0 || static_cast<std::size_t>(row_pitch) * rows > size) return;
+    if (t->tex.storageMode == MTLStorageModePrivate) {
+        id<MTLBuffer> staging = [g_dev->dev newBufferWithBytes:bytes length:size options:MTLResourceStorageModeShared];
+        end_pass();
+        id<MTLBlitCommandEncoder> blit = blit_encoder("texture upload");
+        [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:row_pitch sourceBytesPerImage:row_pitch * rows
+                  sourceSize:MTLSizeMake(w, h, 1) toTexture:t->tex destinationSlice:slice destinationLevel:mip
+           destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+    } else {
+        [t->tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:mip slice:slice withBytes:bytes bytesPerRow:row_pitch
+                bytesPerImage:static_cast<NSUInteger>(row_pitch) * rows];
     }
     ++g_dev->stats.uploads;
 }
@@ -1321,13 +1386,28 @@ void destroy(std::uint32_t key) {
     g_dev->samplers.erase(key);
 }
 
-void clear_target(std::uint32_t key, std::uint32_t mip, const float rgba[4]) {
+void clear_target(std::uint32_t key, std::uint32_t mip, std::uint32_t slice, const float rgba[4]) {
     if (!enabled()) return;
     Texture* t = texture(key);
     if (g_trace) std::fprintf(stderr, "clear %06x %g %g %g %g\n", key, rgba[0], rgba[1], rgba[2], rgba[3]);
     if (t == nullptr || t->depth) return;
     if (attached(key)) end_pass();  // draws already encoded on it come first
     const std::uint32_t level = std::min<std::uint32_t>(mip, static_cast<std::uint32_t>(t->tex.mipmapLevelCount) - 1);
+    if (t->cube && slice != 0) {
+        // A face other than the first is cleared at once (deferred clears track slice 0 only).
+        flush_clears(*t);
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = t->tex;
+        pass.colorAttachments[0].level = level;
+        pass.colorAttachments[0].slice = std::min<NSUInteger>(slice, 6 * t->tex.arrayLength - 1);
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]);
+        profile_pass(pass, target_label("clear", t, mip));
+        [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+        ++g_dev->stats.clears;
+        return;
+    }
     if (level >= 16) return;
     t->clear_mips |= 1u << level;
     std::memcpy(t->clear_rgba[level], rgba, sizeof t->clear_rgba[level]);

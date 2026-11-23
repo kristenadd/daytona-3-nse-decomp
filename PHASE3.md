@@ -214,6 +214,22 @@ machine's saved times. The "YOU" box on the live camera card is black there
 A 10-minute attract run now completes without a fail-closed stop. Boot reaches
 attract in about 7,500 presents (125 s at 60 Hz).
 
+**Cube maps.** The Metal backend made every texture 2D, so the game's cube
+maps were not cubes: the car reflection map (`e0146ec0`, 256x256, eight
+levels, rendered one face per frame through render target views whose
+`FirstArraySlice` was dropped) collected all six faces in one slice, the 14
+static environment maps (BC6H, seven levels) got only face 0, level 0, and
+the 213 shaders that sample `texturecube` (`g_EnvMap`, `g_EnvMapUser`) were
+handed a 2D texture. Cars changed shading from frame to frame. Now a texture
+with `MISC_TEXTURECUBE` and a multiple of six slices is an `MTLTextureTypeCube`
+(or cube array) with all its levels; initial data is uploaded per
+subresource (`upload_texture_sub`); a `TEXTURE2DARRAY` render target view
+keeps its first slice (view +20, `DrawState::rtv_slice`) for draws and clears;
+mip views keep all six faces; and an empty `texturecube` slot gets a 1x1 zero
+cube. Other 2D textures are unchanged (still only level 0 uploaded).
+`DCUSA_FRAME_RANGE=<a>-<b>` writes every present in a range, and
+`DCUSA_METAL_TRACE_FRAMES=<k>` traces k frames, which is how it was found.
+
 **Frame-rate profile.** `DCUSA_STATS` now prints, per report interval, the
 wall time per frame, the GPU time per frame (from each command buffer's
 `GPUStartTime` / `GPUEndTime`), and draws per frame. The GPU never limits the

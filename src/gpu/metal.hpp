@@ -26,11 +26,15 @@ struct TextureDesc {
     std::uint32_t width = 0, height = 0, mips = 1, array = 1;
     std::uint32_t format = 0;  // DXGI_FORMAT
     std::uint32_t bind = 0;    // D3D11_BIND_*: 0x8 shader resource, 0x20 render target, 0x40 depth stencil
-    std::uint32_t misc = 0;    // D3D11_RESOURCE_MISC_*: 0x1 generate mips
+    std::uint32_t misc = 0;    // D3D11_RESOURCE_MISC_*: 0x1 generate mips, 0x4 texture cube
 };
 void create_texture(std::uint32_t id, const TextureDesc& desc);
 // Mip 0 of slice 0, rows `row_pitch` bytes apart (block rows for BCn).
 void upload_texture(std::uint32_t id, const std::uint8_t* bytes, std::size_t size, std::uint32_t row_pitch);
+// One subresource of an array or cube texture: `slice` (the face of a cube),
+// mip level `mip`, rows `row_pitch` bytes apart.
+void upload_texture_sub(std::uint32_t id, std::uint32_t slice, std::uint32_t mip, const std::uint8_t* bytes, std::size_t size,
+                        std::uint32_t row_pitch);
 void generate_mips(std::uint32_t id);
 
 void upload_buffer(std::uint32_t id, const std::uint8_t* bytes, std::size_t size);
@@ -81,6 +85,7 @@ struct DrawState {
     std::uint32_t vs_samp[kSlots]{}, ps_samp[kSlots]{};
     std::uint32_t rtv[kTargets]{};  // render target textures
     std::uint8_t rtv_mip[kTargets]{};  // the level each render target view writes
+    std::uint8_t rtv_slice[kTargets]{};  // and the array slice (a cube map's face)
     std::uint32_t dsv = 0;          // depth texture
     float viewport[6] = {0, 0, 1920, 1080, 0, 1};
     int scissor[4] = {0, 0, 1920, 1080};
@@ -93,7 +98,7 @@ struct DrawState {
 // The guest object went away: drop its texture, buffer or sampler.
 void destroy(std::uint32_t id);
 
-void clear_target(std::uint32_t texture, std::uint32_t mip, const float rgba[4]);
+void clear_target(std::uint32_t texture, std::uint32_t mip, std::uint32_t slice, const float rgba[4]);
 void clear_depth(std::uint32_t texture, float depth, std::uint8_t stencil, std::uint32_t flags);
 void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, std::int32_t base);
 void draw(const DrawState& s, std::uint32_t count, std::uint32_t start);

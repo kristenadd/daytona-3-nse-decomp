@@ -1247,6 +1247,8 @@ void create_rtv(Cpu& c) {
     if (desc != 0) {
         const std::uint32_t dim = ld32(c.mem, desc + 4);
         if (dim == 4 || dim == 5) st32(c.mem, obj + 16, ld32(c.mem, desc + 8));
+        // TEXTURE2DARRAY: FirstArraySlice, kept at +20 (a cube map's face).
+        if (dim == 5) st32(c.mem, obj + 20, ld32(c.mem, desc + 12));
     }
     add_ref(c.mem, arg(c, 1));  // a view keeps its resource alive
     if (out != 0) st32(c.mem, out, obj);
@@ -1475,9 +1477,27 @@ void create_texture(Cpu& c) {
         gpu::create_texture(obj, td);
     }
     const std::uint32_t initial = arg(c, 2);
+    const std::uint32_t mips = std::max(1u, ld32(c.mem, desc + 8)), slices = std::max(1u, ld32(c.mem, desc + 12));
     if (initial != 0) {
         copy_from_guest(obj, c.mem, ld32(c.mem, initial), ld32(c.mem, initial + 4));
-        sync_gpu(c.mem, obj);
+        if (slices == 1) {
+            sync_gpu(c.mem, obj);
+        } else if (gpu::enabled()) {
+            // An array or cube texture: every subresource, D3D11_SUBRESOURCE_DATA
+            // {pSysMem, SysMemPitch, SysMemSlicePitch} in the order mip + slice * mips.
+            const std::uint32_t w = ld32(c.mem, desc), h = ld32(c.mem, desc + 4), format = ld32(c.mem, desc + 16);
+            for (std::uint32_t slice = 0; slice < slices; ++slice) {
+                for (std::uint32_t mip = 0; mip < mips; ++mip) {
+                    const std::uint32_t sub = initial + 12u * (mip + slice * mips);
+                    std::uint32_t row = 0;
+                    const std::uint32_t bytes = texture_bytes(std::max(1u, w >> mip), std::max(1u, h >> mip), format, &row);
+                    const std::uint32_t pitch = ld32(c.mem, sub + 4) != 0 ? ld32(c.mem, sub + 4) : row;
+                    const std::uint32_t rows = row != 0 ? bytes / row : 0;
+                    if (ld32(c.mem, sub) != 0 && bytes != 0)
+                        gpu::upload_texture_sub(obj, slice, mip, c.mem + ld32(c.mem, sub), static_cast<std::size_t>(pitch) * rows, pitch);
+                }
+            }
+        }
     }
     if (out != 0) st32(c.mem, out, obj);
     ret_stdcall(c, kSOk, 16);
@@ -1790,8 +1810,14 @@ void present(Cpu& c) {
         if (const char* scan = std::getenv("DCUSA_METAL_SCAN"); scan != nullptr && std::atoi(scan) == presents)
             gpu::scan_targets();
         // DCUSA_METAL_TRACE=<n>: one line per draw of the frame that present n ends.
-        if (const char* trace = std::getenv("DCUSA_METAL_TRACE"))
-            gpu::set_trace(std::atoi(trace) == presents + 1);
+        // DCUSA_METAL_TRACE_FRAMES=<k>: k consecutive frames from there.
+        if (const char* trace = std::getenv("DCUSA_METAL_TRACE")) {
+            static const int frames = std::getenv("DCUSA_METAL_TRACE_FRAMES") ? std::atoi(std::getenv("DCUSA_METAL_TRACE_FRAMES")) : 1;
+            const int first = std::atoi(trace), next = presents + 1;
+            const bool on = next >= first && next < first + frames;
+            if (on) std::fprintf(stderr, "trace frame %d\n", next);
+            gpu::set_trace(on);
+        }
         // Reading the frame back waits for the GPU, so only the frames that are
         // written out or reported pay for it (DCUSA_READBACK=1: every frame).
         static const bool every_frame = std::getenv("DCUSA_READBACK") != nullptr;
@@ -1800,6 +1826,15 @@ void present(Cpu& c) {
             const char* e = std::getenv("DCUSA_EVERY");
             return e ? std::atoi(e) : 0;
         }();
+        // DCUSA_FRAME_RANGE=<a>-<b>: write every present from a to b (frame-to-frame changes).
+        static const std::pair<int, int> range = [] {
+            const char* v = std::getenv("DCUSA_FRAME_RANGE");
+            int a = 0, b = -1;
+            if (v != nullptr && std::sscanf(v, "%d-%d", &a, &b) != 2) b = -1;
+            return std::make_pair(a, b);
+        }();
+        const bool in_range = presents >= range.first && presents <= range.second;
+        if (in_range) g_frames_after_hitch = std::max(g_frames_after_hitch, 1);
         const bool wanted = every_frame || g_frames_after_hitch > 0 || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
         gpu::show(pipe.backbuffer);  // into the window, when there is one
         std::uint32_t w = 0, h = 0;
@@ -1926,6 +1961,7 @@ void om_set_targets(Cpu& c) {
         const std::uint32_t view = views != 0 && i < count ? ld32(c.mem, views + 4 * i) : 0u;
         gs.rtv[i] = view != 0 ? ld32(c.mem, view + 12) : 0u;
         gs.rtv_mip[i] = static_cast<std::uint8_t>(view != 0 ? ld32(c.mem, view + 16) : 0u);
+        gs.rtv_slice[i] = static_cast<std::uint8_t>(view != 0 ? ld32(c.mem, view + 20) : 0u);
     }
     gs.dsv = dsv != 0 ? ld32(c.mem, dsv + 12) : 0u;
     if (count != 0 && views != 0) {
@@ -1973,7 +2009,7 @@ void clear_rtv(Cpu& c) {
     if (view != 0 && color != 0 && gpu::enabled()) {
         float rgba[4];
         std::memcpy(rgba, c.mem + color, 16);
-        gpu::clear_target(ld32(c.mem, view + 12), ld32(c.mem, view + 16), rgba);
+        gpu::clear_target(ld32(c.mem, view + 12), ld32(c.mem, view + 16), ld32(c.mem, view + 20), rgba);
     }
     if (view != 0 && color != 0 && !gpu::enabled()) {
         const std::uint32_t resource = ld32(c.mem, view + 12);
