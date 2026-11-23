@@ -28,6 +28,10 @@ struct Texture {
     // again after each pass or clear that may have changed the depth.
     std::uint64_t written = 0, copied = ~0ull;
     id<MTLTexture> as_color = nil;
+    // Views over a mip range of `tex` (key: first level << 8 | count), made when
+    // a shader resource view does not start at level 0 or stops early.
+    id<MTLTexture> views_of = nil;
+    std::unordered_map<std::uint32_t, id<MTLTexture>> views;
 };
 
 struct Program {
@@ -70,6 +74,7 @@ struct Device {
     id<MTLCommandBuffer> cmd = nil;
     id<MTLRenderCommandEncoder> enc = nil;
     std::uint32_t enc_rtv[kTargets]{};
+    std::uint8_t enc_mip[kTargets]{};
     std::uint32_t enc_dsv = 0;
     std::string shader_dir;
     std::unordered_map<std::uint32_t, Texture> textures;
@@ -300,6 +305,9 @@ Program& program(std::uint64_t key, bool vertex) {
     }
     MTLCompileOptions* options = [MTLCompileOptions new];
     options.languageVersion = MTLLanguageVersion2_1;
+    // Relaxed: fast arithmetic that still honours NaN and infinity, which the
+    // D3D11 min / max rules in the translated shaders rely on (translate_shaders.py).
+    options.mathMode = MTLMathModeRelaxed;
     NSError* error = nil;
     id<MTLLibrary> lib = [d.dev newLibraryWithSource:source options:options error:&error];
     p.fn = lib ? [lib newFunctionWithName:@"main0"] : nil;
@@ -455,9 +463,32 @@ id<MTLTexture> new_texture(const TextureDesc& desc, MTLPixelFormat format, bool 
 }
 
 // A render pass on exactly these targets, opened with `load` (or clears).
-bool begin_pass(const std::uint32_t rtv[kTargets], std::uint32_t dsv) {
+// The levels a shader resource view covers: the texture itself, or a view of
+// levels first .. first + count - 1 (count 0: to the last level). The bloom
+// chain reads one level of a texture while rendering the next; reading the whole
+// texture there would read the level being written.
+id<MTLTexture> mip_view(Texture& t, std::uint32_t first, std::uint32_t count) {
+    const NSUInteger levels = t.tex.mipmapLevelCount;
+    if (first >= levels) first = static_cast<std::uint32_t>(levels - 1);
+    const NSUInteger n = count == 0 ? levels - first : std::min<NSUInteger>(count, levels - first);
+    if (first == 0 && n == levels) return t.tex;
+    if (t.views_of != t.tex) {
+        t.views.clear();
+        t.views_of = t.tex;
+    }
+    const std::uint32_t key = first << 8 | static_cast<std::uint32_t>(n);
+    if (auto it = t.views.find(key); it != t.views.end()) return it->second;
+    id<MTLTexture> v = [t.tex newTextureViewWithPixelFormat:t.tex.pixelFormat textureType:t.tex.textureType
+                                                     levels:NSMakeRange(first, n) slices:NSMakeRange(0, t.tex.arrayLength)];
+    t.views[key] = v;
+    return v;
+}
+
+bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTargets], std::uint32_t dsv) {
     Device& d = *g_dev;
-    if (d.enc != nil && std::memcmp(d.enc_rtv, rtv, sizeof d.enc_rtv) == 0 && d.enc_dsv == dsv) return true;
+    if (d.enc != nil && std::memcmp(d.enc_rtv, rtv, sizeof d.enc_rtv) == 0 &&
+        std::memcmp(d.enc_mip, mip, sizeof d.enc_mip) == 0 && d.enc_dsv == dsv)
+        return true;
     end_pass();
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     bool any = false;
@@ -465,6 +496,7 @@ bool begin_pass(const std::uint32_t rtv[kTargets], std::uint32_t dsv) {
         Texture* t = rtv[i] ? texture(rtv[i]) : nullptr;
         if (t == nullptr || t->depth) continue;
         pass.colorAttachments[i].texture = t->tex;
+        pass.colorAttachments[i].level = std::min<NSUInteger>(mip[i], t->tex.mipmapLevelCount - 1);
         pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
         pass.colorAttachments[i].storeAction = MTLStoreActionStore;
         any = true;
@@ -484,6 +516,7 @@ bool begin_pass(const std::uint32_t rtv[kTargets], std::uint32_t dsv) {
     if (!any) return false;
     d.enc = [command_buffer() renderCommandEncoderWithDescriptor:pass];
     std::memcpy(d.enc_rtv, rtv, sizeof d.enc_rtv);
+    std::memcpy(d.enc_mip, mip, sizeof d.enc_mip);
     d.enc_dsv = dsv;
     return true;
 }
@@ -736,7 +769,7 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
             }
         }
     }
-    if (!begin_pass(s.rtv, s.dsv)) {
+    if (!begin_pass(s.rtv, s.rtv_mip, s.dsv)) {
         problem("draw with no Metal render target");
         return nil;
     }
@@ -787,11 +820,12 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
     }
     // A texture the function reads as depth2d needs a depth texture, and
     // texture2d a colour one: a mismatch gets the zero stand-in of the right kind.
-    auto pick = [&](std::uint32_t id_, std::uint32_t bit, const StageUse& use, id<MTLTexture> converted) -> id<MTLTexture> {
+    auto pick = [&](std::uint32_t id_, std::uint32_t bit, const StageUse& use, id<MTLTexture> converted,
+                    std::uint32_t first, std::uint32_t count) -> id<MTLTexture> {
         if (converted != nil) return converted;
         const bool want_depth = (use.depth & bit) != 0;
         Texture* t = id_ ? texture(id_) : nullptr;
-        if (t != nullptr && t->depth == want_depth) return t->tex;
+        if (t != nullptr && t->depth == want_depth) return mip_view(*t, first, count);
         if (t != nullptr) problem(std::string("texture kind mismatch: ") + (t->depth ? "depth" : "colour") +
                                   " bound where the shader reads " + (want_depth ? "depth" : "colour"));
         if ((use.textures & bit) == 0) return nil;
@@ -799,8 +833,10 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
     };
     for (unsigned i = 0; i < kSlots; ++i) {
         const std::uint32_t bit = 1u << i;
-        if (id<MTLTexture> t = pick(s.ps_srv[i], bit, pl->ps, color_of_depth[1][i])) [e setFragmentTexture:t atIndex:i];
-        if (id<MTLTexture> t = pick(s.vs_srv[i], bit, pl->vs, color_of_depth[0][i])) [e setVertexTexture:t atIndex:i];
+        if (id<MTLTexture> t = pick(s.ps_srv[i], bit, pl->ps, color_of_depth[1][i], s.ps_srv_mip[i], s.ps_srv_mips[i]))
+            [e setFragmentTexture:t atIndex:i];
+        if (id<MTLTexture> t = pick(s.vs_srv[i], bit, pl->vs, color_of_depth[0][i], s.vs_srv_mip[i], s.vs_srv_mips[i]))
+            [e setVertexTexture:t atIndex:i];
         auto ps_s = d.samplers.find(s.ps_samp[i]);
         if (s.ps_samp[i] && ps_s != d.samplers.end()) [e setFragmentSamplerState:ps_s->second atIndex:i];
         else if (pl->ps.samplers & bit) [e setFragmentSamplerState:d.default_sampler atIndex:i];
@@ -847,11 +883,13 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
         g_dev->textures[key] = t;
         return;
     }
-    // Only mip 0 arrives from the guest, so a texture has more levels only when
-    // the game asks Metal to generate them.
-    const std::uint32_t mips = (desc.misc & 1u) != 0 && desc.mips != 1 ? 0u : 1u;
+    // Only mip 0 of uploaded data arrives from the guest, so an uploaded texture
+    // has more levels only when the game asks Metal to generate them. A render
+    // target keeps its levels: the bloom and glare chains render each level
+    // while reading the one above it.
+    const bool chain = desc.mips != 1 && ((desc.misc & 1u) != 0 || (desc.bind & 0x20u) != 0);
     std::uint32_t levels = 1;
-    if (mips == 0) {
+    if (chain) {
         for (std::uint32_t w = std::max(desc.width, desc.height); w > 1; w >>= 1) ++levels;
         if (desc.mips > 1) levels = std::min(levels, desc.mips);
     }
@@ -972,7 +1010,7 @@ void destroy(std::uint32_t key) {
     g_dev->samplers.erase(key);
 }
 
-void clear_target(std::uint32_t key, const float rgba[4]) {
+void clear_target(std::uint32_t key, std::uint32_t mip, const float rgba[4]) {
     if (!enabled()) return;
     Texture* t = texture(key);
     if (g_trace) std::fprintf(stderr, "clear %06x %g %g %g %g\n", key, rgba[0], rgba[1], rgba[2], rgba[3]);
@@ -980,6 +1018,7 @@ void clear_target(std::uint32_t key, const float rgba[4]) {
     end_pass();
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = t->tex;
+    pass.colorAttachments[0].level = std::min<NSUInteger>(mip, t->tex.mipmapLevelCount - 1);
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]);
@@ -1138,25 +1177,44 @@ void scan_targets() {
         // Per-channel maximum: bytes for 8-bit formats, values for half floats.
         float mx[4] = {};
         std::size_t nans = 0, negative = 0;
+        // Where the NaNs are: texels with any NaN channel, per-channel counts, bounding box.
+        std::size_t nan_texels = 0, nan_ch[4] = {};
+        NSUInteger nx0 = w, ny0 = h, nx1 = 0, ny1 = 0;
         const unsigned channels = t.format == MTLPixelFormatRGBA16Float ? 4 : (bpp == 4 && t.format != MTLPixelFormatR32Float &&
                                   t.format != MTLPixelFormatRG16Float) ? 4 : 0;
-        for (std::size_t i = 0; channels && i < row * h; i += bpp)
+        for (std::size_t i = 0; channels && i < row * h; i += bpp) {
+            bool texel_nan = false;
             for (unsigned ch = 0; ch < 4; ++ch) {
                 float v;
                 if (t.format == MTLPixelFormatRGBA16Float) {
                     __fp16 hv;
                     std::memcpy(&hv, p + i + ch * 2, 2);
                     v = hv;
-                    if (v != v) ++nans;
-                    else if (v < 0) ++negative;
+                    if (v != v) {
+                        ++nans;
+                        ++nan_ch[ch];
+                        texel_nan = true;
+                    } else if (v < 0) {
+                        ++negative;
+                    }
                 } else {
                     v = p[i + ch];
                 }
                 if (v > mx[ch]) mx[ch] = v;
             }
+            if (texel_nan) {
+                ++nan_texels;
+                const NSUInteger x = (i % row) / bpp, y = i / row;
+                nx0 = std::min(nx0, x), ny0 = std::min(ny0, y), nx1 = std::max(nx1, x), ny1 = std::max(ny1, y);
+            }
+        }
         std::fprintf(stderr, "target %06x %4lux%-4lu dxgi %2u: %zu of %lu texels non-zero, max %.3g %.3g %.3g %.3g nan %zu neg %zu\n", key,
                      static_cast<unsigned long>(w), static_cast<unsigned long>(h), t.desc.format, nonzero,
                      static_cast<unsigned long>(w * h), mx[0], mx[1], mx[2], mx[3], nans, negative);
+        if (nan_texels)
+            std::fprintf(stderr, "  nan texels %zu (r %zu g %zu b %zu a %zu) in x %lu..%lu y %lu..%lu\n", nan_texels,
+                         nan_ch[0], nan_ch[1], nan_ch[2], nan_ch[3], static_cast<unsigned long>(nx0),
+                         static_cast<unsigned long>(nx1), static_cast<unsigned long>(ny0), static_cast<unsigned long>(ny1));
     }
 }
 

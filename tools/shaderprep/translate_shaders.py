@@ -348,6 +348,10 @@ def translate_one(src_dir, out_dir, key, tmp):
                    '--output', msl])
     if rc != 0:
         return 'spirv-cross: ' + out.strip()[:300]
+    with open(msl) as f:
+        text = d3d_float_rules(f.read())
+    with open(msl, 'w') as f:
+        f.write(text)
     info = describe(reflect(spv), key, stage, options)
     info['profile'] = profile
     info['inputs'] = [{'location': l, 'semantic': n, 'index': x} for l, n, x in inputs]
@@ -370,6 +374,30 @@ def write_refl(path, info):
                                                 m['name']) for m in cb['members']]
     with open(path, 'w') as f:
         f.write('\n'.join(lines) + '\n')
+
+
+# D3D11 min / max follow IEEE minNum / maxNum: with one NaN operand they return
+# the other, so clamp and saturate turn a NaN into a bound. The game's shaders
+# depend on it: the lit-surface shaders end in min(colour, 65500), which on
+# Windows turns a stray NaN into a bright value the tonemap absorbs. spirv-cross
+# writes fast::min / fast::max / fast::clamp, whose NaN results are undefined; a
+# NaN then reaches the bloom chain and the frame turns magenta. These helpers
+# keep D3D's rule (the runtime compiles with MTLMathModeRelaxed, which keeps NaN
+# semantics, so they are not folded away).
+D3D_FLOAT_HELPERS = """
+// D3D11 float min / max / clamp (IEEE minNum / maxNum), added by translate_shaders.py.
+template <typename T> inline T d3d_min(T a, T b) { return precise::fmin(a, b); }
+template <typename T> inline T d3d_max(T a, T b) { return precise::fmax(a, b); }
+template <typename T> inline T d3d_clamp(T x, T lo, T hi) { return precise::fmin(precise::fmax(x, lo), hi); }
+"""
+
+
+def d3d_float_rules(msl):
+    msl = msl.replace('fast::min(', 'd3d_min(').replace('fast::max(', 'd3d_max(').replace('fast::clamp(', 'd3d_clamp(')
+    marker = 'using namespace metal;\n'
+    if marker not in msl:
+        raise ValueError('spirv-cross output without "using namespace metal;"')
+    return msl.replace(marker, marker + D3D_FLOAT_HELPERS, 1)
 
 
 def main():

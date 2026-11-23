@@ -102,7 +102,7 @@ int main() {
     gpu::upload_buffer(kCb, reinterpret_cast<const std::uint8_t*>(red), sizeof red);
 
     const float blue[4] = {0, 0, 1, 1};
-    gpu::clear_target(kTarget, blue);
+    gpu::clear_target(kTarget, 0, blue);
 
     gpu::DrawState s;
     s.vs = kVs;

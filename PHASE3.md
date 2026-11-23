@@ -165,6 +165,52 @@ What it took, in order of discovery:
 - The game presents with SyncInterval 0, but the cabinet runs at 60 Hz, so
   presents are paced to 60 Hz (`DCUSA_NOPACE=1` to run unthrottled).
 
+**Colours against a Windows capture.** A 9-minute attract recording from the
+cabinet (TeknoParrot, 1918×1078, 30 fps, H.264) was sampled every 2 s and set
+against our attract loop at the same cadence (every 120 presents). The loops
+run the same sequence: Lakeside by day, the speedway, Lakeside at dusk, Metro
+City, the canyon, with ranking and "new live camera" cards and the title in
+between. Two bugs turned the dusk sky and its glare magenta:
+
+- Bloom and glare render each mip level of a texture while reading the level
+  above. Views ignored their mip range: render targets had one level, every
+  render target view wrote level 0, and every shader resource view read the
+  whole texture. Reading and writing the same level gave NaN in red and blue.
+  Render targets now keep their mip chain. RTVs write their `MipSlice`
+  (`rtv_mip`), and SRVs sample a Metal texture view over `MostDetailedMip` /
+  `MipLevels`.
+- D3D11 `min` / `max` are IEEE minNum / maxNum: a NaN operand gives the other
+  one. The lit shaders end in `min(colour, 65500)`, so a stray NaN on Windows
+  becomes a bright value the tonemap absorbs. spirv-cross writes `fast::min` /
+  `fast::max` / `fast::clamp`, whose NaN result is undefined. These are now
+  `d3d_min` / `d3d_max` / `d3d_clamp` (`precise::fmin` / `fmax`; done in
+  `translate_shaders.py`), and the runtime compiles with `MTLMathModeRelaxed`,
+  which keeps NaN semantics.
+
+`DCUSA_METAL_SCAN` reports NaN texels per channel and their bounding box; that
+is how the mip feedback was found. After both fixes, none of 313 attract frames
+has a magenta region, and no render target holds a NaN. Matched scenes, mean
+over the frames (0..255; p10 / p90 are luma percentiles):
+
+| Scene | Luma ref / ours | p10 ref / ours | p90 ref / ours | Saturation ref / ours |
+|---|---|---|---|---|
+| Title (2D) | 202 / 205 | 50 / 64 | 253 / 255 | 0.19 / 0.18 |
+| Ranking card | 98 / 97 | 42 / 41 | 190 / 187 | 0.51 / 0.54 |
+| Lakeside day | 91 / 83 | 27 / 24 | 176 / 169 | 0.40 / 0.44 |
+| Lakeside dusk | 66 / 70 | 14 / 25 | 130 / 119 | 0.56 / 0.59 |
+| Metro City | 100 / 108 | 41 / 57 | 184 / 194 | 0.30 / 0.37 |
+| Canyon | 97 / 96 | 21 / 32 | 179 / 180 | 0.58 / 0.59 |
+
+The 2D screens show identical content and match within three levels. The 3D
+scenes differ by camera position as much as by colour. Ours has slightly lifted
+shadows (p10), which shows on the title too, so it is likely the capture's
+encoder. Frame-exact tolerances are Phase 5's.
+
+Differences that are not colour: the capture runs with credits ("INSERT
+CREDIT(S)"), ours in free play. The capture's ranking table holds that
+machine's saved times. The "YOU" box on the live camera card is black there
+(no camera) and shows the default helmet here.
+
 A 10-minute attract run now completes without a fail-closed stop. Boot reaches
 attract in about 7,500 presents (125 s at 60 Hz). The race runs at 50 to 60
 frames a second, dropping to about 38 in its heaviest scenes, on an M3 Max.

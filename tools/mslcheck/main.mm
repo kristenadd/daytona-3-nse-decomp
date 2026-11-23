@@ -28,6 +28,9 @@ int main(int argc, char** argv) {
         }
         MTLCompileOptions* options = [MTLCompileOptions new];
         options.languageVersion = MTLLanguageVersion2_1;
+        // Relaxed: fast arithmetic that still honours NaN and infinity, which the
+        // D3D11 min / max rules in the translated shaders rely on (translate_shaders.py).
+        options.mathMode = MTLMathModeRelaxed;
         unsigned failed = 0;
         for (NSString* name in shaders) {
             NSString* path = [dir stringByAppendingPathComponent:name];

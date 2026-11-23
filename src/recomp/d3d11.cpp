@@ -1199,10 +1199,18 @@ void create_buffer(Cpu& c) {
     ret_stdcall(c, kSOk, 16);
 }
 
+// D3D11_RENDER_TARGET_VIEW_DESC: Format, ViewDimension, then for TEXTURE2D (4)
+// and TEXTURE2DARRAY (5) MipSlice first. The view keeps its resource at +12 and
+// the level it writes at +16 (the bloom chain renders level after level).
 void create_rtv(Cpu& c) {
+    const std::uint32_t desc = arg(c, 2);
     const std::uint32_t out = arg(c, 3);
     const std::uint32_t obj = spawn(c.mem, Rtv);
     st32(c.mem, obj + 12, arg(c, 1));
+    if (desc != 0) {
+        const std::uint32_t dim = ld32(c.mem, desc + 4);
+        if (dim == 4 || dim == 5) st32(c.mem, obj + 16, ld32(c.mem, desc + 8));
+    }
     add_ref(c.mem, arg(c, 1));  // a view keeps its resource alive
     if (out != 0) st32(c.mem, out, obj);
     ret_stdcall(c, kSOk, 16);
@@ -1376,6 +1384,17 @@ void create_srv(Cpu& c) {
     if (g_srvs <= 3 && stats_on())
         std::fprintf(stderr, "create_srv from %08x res %08x\n", ld32(c.mem, c.r[Cpu::ESP]), arg(c, 1));
     st32(c.mem, obj + 12, arg(c, 1));
+    // D3D11_SHADER_RESOURCE_VIEW_DESC: Format, ViewDimension, then for TEXTURE2D
+    // (4), TEXTURE2DARRAY (5), TEXTURECUBE (9) and TEXTURECUBEARRAY (10)
+    // MostDetailedMip and MipLevels (-1: the rest). Kept at +16 and +20.
+    if (const std::uint32_t desc = arg(c, 2); desc != 0) {
+        const std::uint32_t dim = ld32(c.mem, desc + 4);
+        if (dim == 4 || dim == 5 || dim == 9 || dim == 10) {
+            st32(c.mem, obj + 16, ld32(c.mem, desc + 8));
+            const std::uint32_t levels = ld32(c.mem, desc + 12);
+            st32(c.mem, obj + 20, levels == 0xFFFFFFFFu ? 0u : levels);
+        }
+    }
     add_ref(c.mem, arg(c, 1));
     if (out != 0) st32(c.mem, out, obj);
     ret_stdcall(c, kSOk, 16);
@@ -1772,6 +1791,7 @@ void om_set_targets(Cpu& c) {
     for (unsigned i = 0; i < gpu::kTargets; ++i) {
         const std::uint32_t view = views != 0 && i < count ? ld32(c.mem, views + 4 * i) : 0u;
         gs.rtv[i] = view != 0 ? ld32(c.mem, view + 12) : 0u;
+        gs.rtv_mip[i] = static_cast<std::uint8_t>(view != 0 ? ld32(c.mem, view + 16) : 0u);
     }
     gs.dsv = dsv != 0 ? ld32(c.mem, dsv + 12) : 0u;
     if (count != 0 && views != 0) {
@@ -1819,7 +1839,7 @@ void clear_rtv(Cpu& c) {
     if (view != 0 && color != 0 && gpu::enabled()) {
         float rgba[4];
         std::memcpy(rgba, c.mem + color, 16);
-        gpu::clear_target(ld32(c.mem, view + 12), rgba);
+        gpu::clear_target(ld32(c.mem, view + 12), ld32(c.mem, view + 16), rgba);
     }
     if (view != 0 && color != 0 && !gpu::enabled()) {
         const std::uint32_t resource = ld32(c.mem, view + 12);
@@ -1868,11 +1888,15 @@ void generate_mips(Cpu& c) {
     ret_stdcall(c, kSOk, 8);
 }
 
-// The textures behind `count` views from `views`, from slot `start`.
-void set_views(Cpu& c, std::uint32_t* slots, std::uint32_t start, std::uint32_t count, std::uint32_t views) {
+// The textures behind `count` views from `views`, from slot `start`, and the
+// mip range each view covers.
+void set_views(Cpu& c, std::uint32_t* slots, std::uint8_t* first, std::uint8_t* levels, std::uint32_t start,
+               std::uint32_t count, std::uint32_t views) {
     for (std::uint32_t i = 0; i < count && start + i < gpu::kSlots; ++i) {
         const std::uint32_t view = views != 0 ? ld32(c.mem, views + 4 * i) : 0u;
         slots[start + i] = view != 0 ? ld32(c.mem, view + 12) : 0u;
+        first[start + i] = static_cast<std::uint8_t>(view != 0 ? ld32(c.mem, view + 16) : 0u);
+        levels[start + i] = static_cast<std::uint8_t>(view != 0 ? ld32(c.mem, view + 20) : 0u);
     }
 }
 
@@ -1884,7 +1908,7 @@ void set_objects(Cpu& c, std::uint32_t* slots, unsigned cap, std::uint32_t start
 void ps_set_resources(Cpu& c) {
     const std::uint32_t count = arg(c, 2);
     const std::uint32_t views = arg(c, 3);
-    set_views(c, gs.ps_srv, arg(c, 1), count, views);
+    set_views(c, gs.ps_srv, gs.ps_srv_mip, gs.ps_srv_mips, arg(c, 1), count, views);
     ++g_binds;
     if (views != 0 && count != 0 && count <= 128u) {
         std::uint32_t chosen = 0;
@@ -1912,7 +1936,7 @@ void ps_set_resources(Cpu& c) {
 
 // 0x6D0114. VSSetShaderResources. The next instruction overwrites EAX.
 void vs_set_resources(Cpu& c) {
-    set_views(c, gs.vs_srv, arg(c, 1), arg(c, 2), arg(c, 3));
+    set_views(c, gs.vs_srv, gs.vs_srv_mip, gs.vs_srv_mips, arg(c, 1), arg(c, 2), arg(c, 3));
     ret_stdcall(c, kSOk, 16);
 }
 
