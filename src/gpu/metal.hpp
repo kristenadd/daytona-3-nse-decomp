@@ -111,6 +111,9 @@ void submit();
 // A CAMetalLayer (as void*, so C++ callers need no Objective-C) that show()
 // draws into; nullptr detaches it.
 void set_layer(void* ca_metal_layer);
+// Post-process anti-aliasing (FXAA) of `texture` (the back buffer) in place,
+// before show / read back. The game's own MSAA is not emulated.
+void antialias(std::uint32_t texture);
 // Draws `texture` (the back buffer) into the layer's next drawable, scaled to
 // fit with black bars, and presents it with the frame. Call before submit().
 void show(std::uint32_t texture);

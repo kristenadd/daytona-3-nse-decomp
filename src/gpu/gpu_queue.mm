@@ -29,7 +29,7 @@ namespace {
 
 enum class Op : std::uint8_t {
     CreateTexture, UploadTexture, UploadTextureSub, GenerateMips, UploadBuffer, CreateSampler, Destroy, ClearTarget, ClearDepth,
-    DrawIndexed, Draw, Submit, SetLayer, Show, SetTrace,
+    DrawIndexed, Draw, Submit, SetLayer, Show, SetTrace, Antialias,
 };
 
 struct Cmd {
@@ -89,6 +89,7 @@ void replay(const Batch& b) {
             case Op::SetLayer: direct::set_layer(c.ptr); break;
             case Op::Show: direct::show(c.id); break;
             case Op::SetTrace: direct::set_trace(c.a != 0); break;
+            case Op::Antialias: direct::antialias(c.id); break;
             }
         }
     }
@@ -283,6 +284,11 @@ void set_layer(void* ca_metal_layer) {
 void show(std::uint32_t texture) {
     if (!threaded()) return direct::show(texture);
     record(Op::Show).id = texture;
+}
+
+void antialias(std::uint32_t texture) {
+    if (!threaded()) return direct::antialias(texture);
+    record(Op::Antialias).id = texture;
 }
 
 void set_trace(bool on) {

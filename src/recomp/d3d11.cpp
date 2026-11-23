@@ -1849,6 +1849,7 @@ void present(Cpu& c) {
         const bool in_range = presents >= range.first && presents <= range.second;
         if (in_range) g_frames_after_hitch = std::max(g_frames_after_hitch, 1);
         const bool wanted = every_frame || g_frames_after_hitch > 0 || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
+        gpu::antialias(pipe.backbuffer);  // FXAA (DCUSA_AA=0: off)
         gpu::show(pipe.backbuffer);  // into the window, when there is one
         std::uint32_t w = 0, h = 0;
         if (!wanted) gpu::submit();

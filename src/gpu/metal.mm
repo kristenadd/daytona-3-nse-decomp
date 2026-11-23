@@ -1531,7 +1531,151 @@ bool make_show_pipeline() {
     return true;
 }
 
+// FXAA (Lottes' FXAA 3.11 quality algorithm, written for Metal): finds edges
+// by luma contrast, walks along each edge to its ends, and blends across it.
+constexpr const char* kFxaaSource = R"(
+#include <metal_stdlib>
+using namespace metal;
+struct Out { float4 pos [[position]]; float2 uv; };
+vertex Out fxaa_vs(uint id [[vertex_id]]) {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    Out o;
+    o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    o.uv = uv;
+    return o;
+}
+static float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+static float L(texture2d<float> t, sampler s, float2 uv) { return luma(t.sample(s, uv, level(0)).rgb); }
+fragment float4 fxaa_fs(Out in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
+    const float2 rcp = 1.0 / float2(t.get_width(), t.get_height());
+    const float2 uv = in.uv;
+    const float4 rgbaM = t.sample(s, uv, level(0));
+    const float lM = luma(rgbaM.rgb);
+    const float lN = L(t, s, uv + float2(0, -rcp.y)), lS = L(t, s, uv + float2(0, rcp.y));
+    const float lE = L(t, s, uv + float2(rcp.x, 0)), lW = L(t, s, uv + float2(-rcp.x, 0));
+    const float lMax = max(lM, max(max(lN, lS), max(lE, lW)));
+    const float lMin = min(lM, min(min(lN, lS), min(lE, lW)));
+    const float range = lMax - lMin;
+    if (range < max(0.0312, lMax * 0.125)) return rgbaM;
+    const float lNW = L(t, s, uv + float2(-rcp.x, -rcp.y)), lNE = L(t, s, uv + float2(rcp.x, -rcp.y));
+    const float lSW = L(t, s, uv + float2(-rcp.x, rcp.y)), lSE = L(t, s, uv + float2(rcp.x, rcp.y));
+    // Sub-pixel aliasing: how far the centre is from its neighbourhood.
+    const float avg = (2.0 * (lN + lS + lE + lW) + lNW + lNE + lSW + lSE) / 12.0;
+    const float sub = smoothstep(0.0, 1.0, saturate(abs(avg - lM) / range));
+    const float subOffset = sub * sub * 0.75;
+    const float edgeH = abs(-2.0 * lW + lNW + lSW) + 2.0 * abs(-2.0 * lM + lN + lS) + abs(-2.0 * lE + lNE + lSE);
+    const float edgeV = abs(-2.0 * lN + lNW + lNE) + 2.0 * abs(-2.0 * lM + lW + lE) + abs(-2.0 * lS + lSW + lSE);
+    const bool horz = edgeH >= edgeV;
+    const float l1 = horz ? lN : lW, l2 = horz ? lS : lE;
+    const float g1 = l1 - lM, g2 = l2 - lM;
+    const bool steep1 = abs(g1) >= abs(g2);
+    const float gradScaled = 0.25 * max(abs(g1), abs(g2));
+    float stepLen = horz ? rcp.y : rcp.x;
+    float lLocal;
+    if (steep1) { stepLen = -stepLen; lLocal = 0.5 * (l1 + lM); } else { lLocal = 0.5 * (l2 + lM); }
+    float2 cur = uv;
+    if (horz) cur.y += stepLen * 0.5; else cur.x += stepLen * 0.5;
+    const float2 off = horz ? float2(rcp.x, 0) : float2(0, rcp.y);
+    float2 uv1 = cur - off, uv2 = cur + off;
+    float e1 = L(t, s, uv1) - lLocal, e2 = L(t, s, uv2) - lLocal;
+    bool r1 = abs(e1) >= gradScaled, r2 = abs(e2) >= gradScaled;
+    const float steps[10] = {1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0};
+    for (int i = 0; i < 10 && !(r1 && r2); ++i) {
+        if (!r1) { uv1 -= off * steps[i]; e1 = L(t, s, uv1) - lLocal; r1 = abs(e1) >= gradScaled; }
+        if (!r2) { uv2 += off * steps[i]; e2 = L(t, s, uv2) - lLocal; r2 = abs(e2) >= gradScaled; }
+    }
+    const float d1 = horz ? uv.x - uv1.x : uv.y - uv1.y;
+    const float d2 = horz ? uv2.x - uv.x : uv2.y - uv.y;
+    const bool dir1 = d1 < d2;
+    const float pixelOffset = -min(d1, d2) / (d1 + d2) + 0.5;
+    const bool centreSmaller = lM < lLocal;
+    const bool correct = ((dir1 ? e1 : e2) < 0.0) != centreSmaller;
+    const float finalOffset = max(correct ? pixelOffset : 0.0, subOffset);
+    float2 fuv = uv;
+    if (horz) fuv.y += finalOffset * stepLen; else fuv.x += finalOffset * stepLen;
+    return float4(t.sample(s, fuv, level(0)).rgb, rgbaM.a);
+}
+)";
+
+struct Fxaa {
+    id<MTLRenderPipelineState> state = nil;
+    MTLPixelFormat format = MTLPixelFormatInvalid;
+    id<MTLSamplerState> sampler = nil;
+    id<MTLTexture> scratch = nil;
+    bool failed = false;
+} g_fxaa;
+
+bool aa_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("DCUSA_AA");
+        return !(v != nullptr && std::strcmp(v, "0") == 0);
+    }();
+    return on;
+}
+
 }  // namespace
+
+void antialias(std::uint32_t key) {
+    if (!enabled() || !aa_enabled() || g_fxaa.failed) return;
+    Texture* t = used(key);
+    if (t == nullptr || t->tex == nil || t->depth || t->cube) return;
+    Device& d = *g_dev;
+    if (g_fxaa.state == nil || g_fxaa.format != t->format) {
+        NSError* error = nil;
+        id<MTLLibrary> lib = [d.dev newLibraryWithSource:@(kFxaaSource) options:nil error:&error];
+        MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"fxaa_vs"];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fxaa_fs"];
+        pd.colorAttachments[0].pixelFormat = t->format;
+        g_fxaa.state = lib ? [d.dev newRenderPipelineStateWithDescriptor:pd error:&error] : nil;
+        if (g_fxaa.state == nil) {
+            problem(std::string("fxaa: ") + (error ? error.localizedDescription.UTF8String : "?"));
+            g_fxaa.failed = true;
+            return;
+        }
+        g_fxaa.format = t->format;
+        MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
+        sd.minFilter = MTLSamplerMinMagFilterLinear;
+        sd.magFilter = MTLSamplerMinMagFilterLinear;
+        sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+        sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        g_fxaa.sampler = [d.dev newSamplerStateWithDescriptor:sd];
+        g_fxaa.scratch = nil;
+    }
+    const NSUInteger w = t->tex.width, h = t->tex.height;
+    if (g_fxaa.scratch == nil || g_fxaa.scratch.width != w || g_fxaa.scratch.height != h ||
+        g_fxaa.scratch.pixelFormat != t->format) {
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t->format width:w height:h
+                                                                                   mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        g_fxaa.scratch = [d.dev newTextureWithDescriptor:td];
+    }
+    end_pass();
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = g_fxaa.scratch;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    profile_pass(pass, "fxaa");
+    id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:pass];
+    [e setRenderPipelineState:g_fxaa.state];
+    [e setFragmentTexture:mip_view(*t, 0, 1) atIndex:0];
+    [e setFragmentSamplerState:g_fxaa.sampler atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    // Back into the back buffer, so the window, read back and frame dumps all see it.
+    id<MTLBlitCommandEncoder> blit = blit_encoder("fxaa copy");
+    // DCUSA_AA=split: the right half only, to compare with and without.
+    static const bool split = [] {
+        const char* v = std::getenv("DCUSA_AA");
+        return v != nullptr && std::strcmp(v, "split") == 0;
+    }();
+    const NSUInteger x0 = split ? w / 2 : 0;
+    [blit copyFromTexture:g_fxaa.scratch sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, 0, 0)
+               sourceSize:MTLSizeMake(w - x0, h, 1) toTexture:t->tex destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake(x0, 0, 0)];
+    [blit endEncoding];
+}
 
 void set_layer(void* layer) {
     if (!enabled()) return;

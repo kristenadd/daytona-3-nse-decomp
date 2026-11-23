@@ -234,6 +234,17 @@ carries its smaller levels over. Blend states with `AlphaToCoverageEnable`
 (eight of them, the foliage cards among them) now turn on the pipeline's
 alpha to coverage; with one sample a pixel that is an alpha test at 0.5, as in
 D3D11. Without it the trees were solid green cards.
+
+**Anti-aliasing.** The game asks for 2x and 4x MSAA for its scene buffers;
+the D3D layer says no (`DCUSA_MSAA=1` says yes, experimental: the game then
+creates 4x scene buffers and 4x-specific shadow shaders, which Metal does not
+yet render as multisampled). Instead an FXAA pass (FXAA 3.11 quality
+algorithm, `antialias` in metal.mm) runs on the back buffer before it is
+shown or read back: on by default, `DCUSA_AA=0` off, `DCUSA_AA=split` on the
+right half only for comparison. Over 20 race frames it cuts the right half's
+edge energy relative to the left by about a quarter. The scene is drawn
+1280 wide and stretched to 1920 before FXAA sees it, which limits how much
+it can smooth.
 `DCUSA_FRAME_RANGE=<a>-<b>` writes every present in a range, and
 `DCUSA_METAL_TRACE_FRAMES=<k>` traces k frames, which is how it was found.
 

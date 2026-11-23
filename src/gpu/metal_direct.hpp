@@ -21,6 +21,7 @@ void draw(const DrawState& s, std::uint32_t count, std::uint32_t start);
 void submit();
 void set_layer(void* ca_metal_layer);
 void show(std::uint32_t texture);
+void antialias(std::uint32_t texture);
 bool read_rgba8(std::uint32_t texture, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height);
 void scan_targets();
 void set_trace(bool on);
