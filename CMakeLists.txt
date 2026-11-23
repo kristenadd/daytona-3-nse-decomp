@@ -237,4 +237,25 @@ if(APPLE AND Python3_FOUND)
 endif()
 # Needs the player's files (skips otherwise). Writes caches under the build tree only.
 dcusa_test(test_game_files "${DCUSA_GAME_LIBRARY}" "${CMAKE_CURRENT_BINARY_DIR}/test-cache")
+
+# ---- Phase 5: autoplay and compare (label phase5; minutes each, so leave them
+# out of routine runs with `ctest -LE phase5`). They need the player's game
+# folder and prepared cache; phase5_attract also needs a Windows capture of
+# the attract loop (DCUSA_REFERENCE_VIDEO). Missing inputs skip (77).
+set(DCUSA_REFERENCE_VIDEO "${DCUSA_GAME_LIBRARY}/../Daytona Championship USA Reference Footage/Daytona Championship USA New Season Edition Attract Mode.mp4"
+    CACHE FILEPATH "A Windows capture of the attract loop, for phase5_attract")
+if(TARGET dcrun AND DCUSA_PREPARED_CACHE)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME phase5_controls
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/phase5/controls_smoke.py
+                     --dcrun $<TARGET_FILE:dcrun> --cache ${DCUSA_PREPARED_CACHE} --content ${DCUSA_GAME_LIBRARY}
+                     --out ${CMAKE_CURRENT_BINARY_DIR}/phase5/controls)
+    add_test(NAME phase5_attract
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/phase5/attract_compare.py
+                     --dcrun $<TARGET_FILE:dcrun> --cache ${DCUSA_PREPARED_CACHE} --content ${DCUSA_GAME_LIBRARY}
+                     --reference ${DCUSA_REFERENCE_VIDEO} --out ${CMAKE_CURRENT_BINARY_DIR}/phase5/attract)
+    set_tests_properties(phase5_controls phase5_attract PROPERTIES LABELS phase5 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+    set_tests_properties(phase5_controls PROPERTIES TIMEOUT 600)
+    set_tests_properties(phase5_attract PROPERTIES TIMEOUT 1200)
+endif()
 set_tests_properties(test_game_files PROPERTIES LABELS "game-files" TIMEOUT 300)

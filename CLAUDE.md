@@ -47,8 +47,8 @@ agreed to this).
    settings go through `dcrun --shell-setting Section.Key=Value`, since the
    operator menu is the shell's, and in this release the game has no input path
    for Test / Service (PHASE4 "Operator settings").
-7. **Phase 5.** An automated autoplay-and-compare test against the Windows
-   attract capture (`Daytona Championship USA Reference Footage/`).
+7. **Phase 5.** **Verified** (see below). CTest `phase5_attract` and
+   `phase5_controls` (label `phase5`; [PHASE5.md](PHASE5.md)).
 
 ## Known issues
 
@@ -75,5 +75,9 @@ agreed to this).
 - **Credits** (item 6). `--shell-setting Credit.Freeplay=0`: attract shows
   INSERT CREDIT(S) / CREDIT(S) 0, Start is ignored without credit, a coin
   gives CREDIT(S) 1, and Start opens Single Player.
+- **Phase 5** (item 7). `ctest -L phase5`. `phase5_attract` passes on the
+  current build (95th-percentile colour distance 0.451, medians within
+  tolerance) and fails on the magenta-bloom build (0.808, 32 magenta frames).
+  `phase5_controls` passes all 15 checks.
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.
