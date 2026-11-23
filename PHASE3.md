@@ -357,6 +357,11 @@ Two directions were then measured and set aside:
   memory stalls and under a tenth in mispredictions, with no sign that
   instruction fetch is the limit on this Mac. Both options stay in the build
   for devices with smaller caches.
+- **The draw path inlined whole.** Every direct call in `0x6CFDB0` (the
+  remaining helpers were up to 287 instructions) and in `0x733490` inlined
+  (`INLINE_LIMITS` in translate.py). Two seven-minute runs: race 9.91 vs
+  9.89 ms, heavy intervals at about 2,600 draws 15.5 vs 15.6 ms. No gain: the
+  draw path's cost is its memory work, not its calls. The table is empty.
 
 `dcrun --content <folder>` mounts that install and stays in the frame loop.
 `DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.

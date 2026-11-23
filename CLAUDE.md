@@ -45,9 +45,9 @@ agreed to this).
    (82% of the main thread, about 6 us a draw, no single hot spot). PGO was
    tried and gained nothing measurable. A heavy frame is about 7 ms of GPU
    time on this Mac (`DCUSA_GPU_PASSES`). Code layout and size (order file,
-   `-Os`) were also neutral. Left: a native fast path for the engine's draw
-   call `0x6CFDB0`, translator register allocation across calls, and
-   one-second stalls at scene changes.
+   `-Os`) and inlining the whole draw path were also neutral: the remaining
+   cost is the engine's memory work. Left: one-second stalls at scene
+   changes.
 6. **Cabinet settings.** **Verified** for credits (see below). Operator
    settings go through `dcrun --shell-setting Section.Key=Value`, since the
    operator menu is the shell's, and in this release the game has no input path

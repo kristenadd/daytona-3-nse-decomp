@@ -1226,7 +1226,8 @@ class FunctionTranslator(X87Mixin, SseMixin):
             cookie = COOKIE_CHECKS.get(getattr(self.tr.img, 'edition', None), {}).get(t)
             if cookie and self.tr.img.bytes(t, 6) != b'\x3b\x0d' + cookie[0].to_bytes(4, 'little'):
                 raise ValueError('COOKIE_CHECKS: %08X is not cmp ecx, [%08X]' % (t, cookie[0]))
-            body = None if self.inlined or cookie or t == self.entry else self.tr.inline_body(t)
+            limit = INLINE_LIMITS.get(getattr(self.tr.img, 'edition', None), {}).get(self.entry, Translator.INLINE_MAX)
+            body = None if self.inlined or cookie or t == self.entry else self.tr.inline_body(t, limit)
             if body is not None:
                 lines, refs = body
                 site = '%08X' % insn.address
@@ -1374,6 +1375,13 @@ SITE_OVERRIDES = {
     },
 }
 
+# Callers whose direct callees are inlined up to a larger size than
+# Translator.INLINE_MAX: caller -> limit. Tried on the engine's draw path
+# ({0x6CFDB0: 300, 0x733490: 300}: every direct call in the draw function
+# inlined, 129 KB of C++) and measured as no gain (PHASE3 "Frame-rate
+# profile"), so empty.
+INLINE_LIMITS = {}
+
 # __security_check_cookie (`cmp ecx, [cookie]; jne fail; repz ret`), inlined
 # at every direct call whose flags are dead after it: entry -> (cookie,).
 # Called at the end of most functions, it was 7% of the main thread.
@@ -1423,8 +1431,9 @@ class Translator:
         self.walker.noreturn.update(data.get('noreturn_imports', []))
 
     INLINE_MAX = 30
+    INLINE_BIGGEST = 300  # the largest INLINE_LIMITS allows
 
-    def inline_body(self, entry):
+    def inline_body(self, entry, limit=INLINE_MAX):
         """The body of `entry` to inline at a direct call, or None.
 
         A call writes every register back to the Cpu and reads them again, and
@@ -1434,7 +1443,8 @@ class Translator:
         jump and no native override. The return address is still pushed and
         popped, so the guest stack is the same."""
         if entry in self.inline_cache:
-            return self.inline_cache[entry]
+            got = self.inline_cache[entry]
+            return got[:2] if got is not None and got[2] <= limit else None
         self.inline_cache[entry] = None
         edition = getattr(self.img, 'edition', None)
         if (entry not in self.functions or entry in self.flags_returned or self.flags_live_at_exit
@@ -1442,7 +1452,7 @@ class Translator:
                 or self.functions[entry].get('noreturn')):
             return None
         fn = self.walker.walk(entry)
-        if (not fn.insns or len(fn.insns) > self.INLINE_MAX or fn.jump_tables or fn.indirect_jumps or fn.undecodable
+        if (not fn.insns or len(fn.insns) > self.INLINE_BIGGEST or fn.jump_tables or fn.indirect_jumps or fn.undecodable
                 or any(va in SITE_OVERRIDES.get(edition, {}) for va in fn.insns)):
             return None
         mnems = [i.mnem for i in fn.insns.values()]
@@ -1460,8 +1470,8 @@ class Translator:
             return None
         if ft.trapped or ft.live_in.get(entry, 0) & F.ALL:
             return None
-        self.inline_cache[entry] = (lines, ft.refs)
-        return self.inline_cache[entry]
+        self.inline_cache[entry] = (lines, ft.refs, len(fn.insns))
+        return (lines, ft.refs) if len(fn.insns) <= limit else None
 
     def translate(self, entry):
         fn = self.walker.walk(entry)
