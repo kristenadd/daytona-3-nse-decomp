@@ -69,6 +69,76 @@ buffer keeps its `WAVEFORMATEX`), `QueryInterface` for `IDirectSoundBuffer8`,
 region reusable, and the heap continues at `0x80000000` past its two fixed
 regions.
 
+## Controls (landed)
+
+The cabinet's controls are a USB IO board the game reads through DirectInput.
+`0x5DEBA0` enumerates game controllers (callback `0x5DE930`) and keeps a device
+only when its instance name is `SEGA IO Controller`. It enumerates the axes
+(callback `0x5DE8B0` sets each to -1000..1000), sets `c_dfDIJoystick` and
+acquires it. Each frame `0x47CDF0` polls up to two boards (player slots at
+`0x15964A0`, stride `0x90`):
+
+- `lX` is steering: `(lX + 1000) / 2000 * 255`, then the test-menu calibration
+  (`0x518470` / `0x518490` / `0x518420`, defaults 0 / 255 / 127), stored as
+  0..0xFF00.
+- `lRx` is the accelerator and `lZ` the brake: -1000 released, +1000 full.
+- Buttons go through a per-device profile at `0x116D490` (five profiles of
+  `0xE0` bytes chosen by name; twelve button → action pairs at `+0x80`). The
+  `SEGA IO Controller` profile: button 0 start (action 2), 8..11 VR / view 1..4
+  (3..6), 3 shift up (14), 4 shift down (13), 1 / 2 / 6 / 7 gear 1..4 (7..10).
+- `0x5E2D80` turns the actions into the race's switch image (`0x19C87F8`) and
+  the gear index `0x19C880C` (0..3). Shift up / down are edge-triggered (one
+  gear per press) and clamped to 1..4 by the game; the H-pattern lever is the
+  second board's buttons 8 / 9 / 10 (actions 3 / 4 / 5), shown as SHIFT1..4 in
+  the input test (`0x5D2660`). The second board is not reported, which reads
+  as the lever in neutral.
+- Coin is not on the board. The shell sends `SHELL_MSG_SETCREDIT` (DYT `0x2D`,
+  one byte: the credit count, which `0x48CE80` stores at `0x15278F8 + 7`), so a
+  coin is the game's current count plus one. Message ids are the name table
+  at `0x1543830` plus 20: `0x2C` `SHELL_MSG_SET_SKU` (the greeting), `0x2D`
+  `SETCREDIT`, `0x2E` `SECURITY_AUTHENTICATE`.
+- Test and service (actions 0 / 1) are not on the board profile either.
+
+The host side is `PadSnapshot`, sampled once per present
+(`set_pad_source` / `sample_pad`). `src/runtime/pad_mapping.cpp` is the default
+gamepad layout:
+
+| Game action | Controller |
+|---|---|
+| Coin | Back / Share |
+| Start | Start / Options |
+| Shift up / down | Right / left shoulder |
+| View 1 / 2 / 3 / 4 | Y / X / B / A (Triangle / Square / Circle / Cross) |
+| Steering | Left stick X, 10% dead zone, rescaled to full lock |
+| Gas / brake | Right / left trigger, analog |
+| Gear 1..4 | Unassigned |
+
+`src/platform/macos/gamecontroller_pad.mm` reads the first extended gamepad
+through GameController.framework (`shouldMonitorBackgroundEvents`; the main run
+loop is serviced from the sample, since the game holds the main thread).
+`DCUSA_PAD=0` turns it off. `DCUSA_PAD_SCRIPT=<file>` plays a script instead
+(`src/runtime/pad_script.hpp`: `<frame>[-<last>] <control>[=<value>]`), and
+`DCUSA_PAD_TRACE=1` prints the snapshot next to what the game decoded. CTest
+`test_pad` covers the layout and the script; `test_imports` the board.
+
+Checked in the game with a script, from attract into a race at Daytona:
+
+- Coin: the credit count goes from unset to 1.
+- Start: leaves attract for Single Player.
+- The throttle confirms each menu: Quick Race, track, car. Shift down at car
+  select picks MT.
+- In the race, every control decodes as expected:
+  - Throttle 0.5 / 1.0 → `0x8000` / `0x10000`.
+  - Brake 0.6 / 1.0 → `0x9999` / `0x10000`.
+  - Steering is proportional both ways around the calibrated centre; full lock
+    reads 0 / `0xFF00`.
+  - The four views switch between bumper, hood, near chase and high chase.
+  - Five shift-ups from first stop at fourth; five shift-downs stop at first. A
+    held shoulder button counts once.
+
+Starting a race also needed `GlobalMemoryStatus` (logged only), the `PSFD00`
+section's functions, and the CRT `fmod` / `atan2` handlers (PHASE2, PHASE3).
+
 ## Landed
 
 `dcrun --content` calls `set_guest_files` with the install root (the folder that
@@ -90,18 +160,14 @@ writes 0, not `STILL_ACTIVE` (259).
 
 `PeekMessageW` at `0x41ECF6` returns a posted message, or 0 when the queue is
 empty. `PostQuitMessage` posts `0x12`. `GetClientRect` writes a 1920×1080
-client. `XInputGetState` reads `set_pad_snapshot`. A disconnected pad still
-returns 1167, which `0x6A0281` counts as no pad.
+client. `XInputGetState` always returns 1167, which `0x6A0281` counts as no
+pad: the controls reach the game through the IO board (see Controls).
 
 `FindWindowA` and `FindWindowW` return `0x2001` when the class or the title
 contains `NRT`, which is the class at `0x1415734` and `0x1417FF8`. Any other
 name returns 0, so the `SendMessage` of `0x8064` stays on the path that already
-returns success. `DirectInput8Create` returns an `IDirectInput8`. `CreateDevice`
-returns a device whose `GetDeviceState` fills a `DIJOYSTATE` from the same
-`PadSnapshot`: the wheel is `lX` around 32767, the accelerator is `lY`, the
-brake is the first slider, and Start, View, Shift, Test, Service, and Coin are
-buttons 0 through 6. `Acquire`, `Poll`, `SetDataFormat`, and
-`SetCooperativeLevel` return 0. `DirectSoundCreate8` (ordinal 11) returns a
+returns success. `DirectInput8Create` returns an `IDirectInput8` that reports
+the SEGA IO board (see Controls). `DirectSoundCreate8` (ordinal 11) returns a
 device. `CreateSoundBuffer` returns a buffer whose `Lock` points at guest
 memory at `0x36000000` and whose `Play`, `Stop`, and `GetCurrentPosition`
 succeed. No samples are mixed.
@@ -149,7 +215,7 @@ By DLL, the imports with no handler:
 | OLEAUT32 | 3 | Three ordinals |
 | AVICAP32 | 2 | `capCreateCaptureWindowA` |
 | IPHLPAPI | 2 | `GetAdaptersAddresses`, `GetIfTable` |
-| DINPUT8 | 1 | `DirectInput8Create` is handled. An unknown method on the device still fails closed |
+| DINPUT8 | 1 | `DirectInput8Create` is handled: one `SEGA IO Controller` with four axes. An unknown method on the device still fails closed |
 | DSOUND | 1 | Ordinal 11, `DirectSoundCreate8`, is a silent device. ADX is not decoded |
 | DWrite | 1 | `DWriteCreateFactory` |
 | ADVAPI32 | 1 | `GetUserNameA` |

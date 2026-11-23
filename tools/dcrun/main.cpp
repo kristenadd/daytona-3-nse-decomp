@@ -6,13 +6,20 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <memory>
+#include <sstream>
 #include <optional>
 #include <string>
 
 #include "recomp/generated.hpp"
 #include "recomp/host_files.hpp"
 #include "recomp/loader.hpp"
+#include "recomp/win32.hpp"
+#include "platform/macos/gamecontroller_pad.hpp"
+#include "runtime/pad_script.hpp"
 #include "runtime/fail_closed.hpp"
 #include "system/content.hpp"
 #include "system/edition.hpp"
@@ -141,6 +148,24 @@ int main(int argc, char** argv) {
         dcusa::recomp::set_guest_files(install->install_root, install->game_dir.filename().string(), writable);
         std::fprintf(stderr, "content %s\n", install->game_dir.string().c_str());
     }
+    // The controls: DCUSA_PAD_SCRIPT=<file> plays a script (runtime/pad_script.hpp);
+    // otherwise the first game controller, unless DCUSA_PAD=0.
+    std::unique_ptr<dcusa::PadSource> pad;
+    if (const char* script = std::getenv("DCUSA_PAD_SCRIPT")) {
+        std::ifstream in(script);
+        std::stringstream text;
+        text << in.rdbuf();
+        auto scripted = std::make_unique<dcusa::ScriptPad>();
+        std::string why;
+        if (!in || !scripted->parse(text.str(), &why)) {
+            std::fprintf(stderr, "%s\n", why.empty() ? "cannot read DCUSA_PAD_SCRIPT" : why.c_str());
+            return 1;
+        }
+        pad = std::move(scripted);
+    } else if (const char* off = std::getenv("DCUSA_PAD"); off == nullptr || std::string(off) != "0") {
+        pad = dcusa::make_gamecontroller_pad();
+    }
+    dcusa::recomp::set_pad_source(pad.get());
     std::fprintf(stderr, "%.*s entry %08X, %zu imports\n", static_cast<int>(info.id.size()), info.id.data(),
                  static_cast<unsigned>(process.entry()), process.imports().size());
     try {

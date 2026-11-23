@@ -16,6 +16,7 @@ struct PadSnapshot {
         ShiftUp = 1u << 4, ShiftDown = 1u << 5,
         Start = 1u << 6,
         Test = 1u << 7, Service = 1u << 8, Coin = 1u << 9,
+        Gear1 = 1u << 10, Gear2 = 1u << 11, Gear3 = 1u << 12, Gear4 = 1u << 13,  // direct gear selection
     };
     std::uint32_t buttons = 0;
     std::int8_t gear = 0;  // H-pattern lever: 0 neutral or not fitted, 1..4

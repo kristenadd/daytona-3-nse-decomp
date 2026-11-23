@@ -1067,11 +1067,9 @@ int main() {
     pad.buttons = dcusa::PadSnapshot::Start;
     set_pad_snapshot(pad);
     c = make_cpu(mem);
+    // The pad reaches the game through the IO board (DirectInput), never XInput.
     call(c, "XINPUT9_1_0.dll!XInputGetState", {0u, Buf});
-    CHECK(c.r[Cpu::EAX] == 0);
-    CHECK(ld16(m, Buf + 4) == 0x0010);
-    CHECK(m[Buf + 7] == 255);
-    CHECK(static_cast<std::int16_t>(ld16(m, Buf + 8)) == 32767);
+    CHECK(c.r[Cpu::EAX] == 1167);
     pad = {};
     set_pad_snapshot(pad);
 
@@ -1287,7 +1285,7 @@ int main() {
 
     pad.connected = true;
     pad.steering = 1.0f;
-    pad.buttons = dcusa::PadSnapshot::Start;
+    pad.buttons = dcusa::PadSnapshot::Start | dcusa::PadSnapshot::ShiftUp | dcusa::PadSnapshot::View1;
     set_pad_snapshot(pad);
     c = make_cpu(mem);
     call(c, "DINPUT8.dll!DirectInput8Create", {0u, 0x800u, Buf, Buf + 32, 0u});
@@ -1311,8 +1309,40 @@ int main() {
     c.r[Cpu::ESP] = Stack;
     call_com(c, kComCall + (22u << 12) + 0x24);
     CHECK(c.r[Cpu::EAX] == 0);
-    CHECK(ld32(m, Buf + 64) == 65534u);
-    CHECK(m[Buf + 64 + 48] == 0x80);
+    CHECK(ld32(m, Buf + 64) == 65535u);  // lX: full right in the default 0..65535
+    CHECK(m[Buf + 64 + 48] == 0x80);      // start: board button 0
+    CHECK(m[Buf + 64 + 48 + 3] == 0x80);  // shift up: button 3
+    CHECK(m[Buf + 64 + 48 + 8] == 0x80);  // view 1: button 8
+    CHECK(m[Buf + 64 + 48 + 4] == 0);
+    // SetProperty(DIPROP_RANGE, DIPH_DEVICE, -1000..1000), as 0x5DE8B0 sets each axis.
+    st32(m, Buf + 200, 24);
+    st32(m, Buf + 204, 16);
+    st32(m, Buf + 208, 0);
+    st32(m, Buf + 212, 0);
+    st32(m, Buf + 216, static_cast<std::uint32_t>(-1000));
+    st32(m, Buf + 220, 1000);
+    c = make_cpu(mem);
+    st32(m, Stack, 0);
+    st32(m, Stack + 4, 0);
+    st32(m, Stack + 8, 4);
+    st32(m, Stack + 12, Buf + 200);
+    c.r[Cpu::ESP] = Stack;
+    call_com(c, kComCall + (22u << 12) + 0x18);
+    CHECK(c.r[Cpu::EAX] == 0);
+    pad.steering = 1.0f;
+    pad.accelerator = 1.0f;
+    pad.brake = 0.0f;
+    set_pad_snapshot(pad);
+    c = make_cpu(mem);
+    st32(m, Stack, 0);
+    st32(m, Stack + 4, 0);
+    st32(m, Stack + 8, 80);
+    st32(m, Stack + 12, Buf + 64);
+    c.r[Cpu::ESP] = Stack;
+    call_com(c, kComCall + (22u << 12) + 0x24);
+    CHECK(static_cast<std::int32_t>(ld32(m, Buf + 64)) == 1000);       // lX: full right
+    CHECK(static_cast<std::int32_t>(ld32(m, Buf + 64 + 12)) == 1000);  // lRx: full throttle
+    CHECK(static_cast<std::int32_t>(ld32(m, Buf + 64 + 8)) == -1000);  // lZ: brake released
     pad = {};
     set_pad_snapshot(pad);
 

@@ -3,6 +3,7 @@
 // pointers, imports through the IAT. Every guest entry point the translator
 // produced is in one sorted table; anything else fails closed.
 #include <cstdint>
+#include <initializer_list>
 #include <span>
 
 #include "recomp/cpu.hpp"
@@ -35,5 +36,9 @@ void dispatch_install(std::span<const GuestEntry> entries, std::span<const Impor
 void call_indirect(Cpu& c, std::uint32_t target);
 // Looks up a translated function; nullptr when there is none.
 GuestFn find_entry(std::uint32_t target);
+// Calls a guest stdcall function from a handler, as Windows calls an
+// application callback: `args` are pushed right to left below the handler's
+// stack, then a return address. Returns eax; esp is as it was before.
+std::uint32_t call_guest(Cpu& c, std::uint32_t target, std::initializer_list<std::uint32_t> args);
 
 }

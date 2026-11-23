@@ -136,6 +136,39 @@ What it took, in order of discovery:
 - The shell's security challenge is answered (PHASE4): without it the game
   asked for a reboot 50 s in.
 
+**Long runs and frame rate.** Attract used to slow to a crawl after about
+12,500 presents and stop at 14,000. Causes, in order:
+
+- The NRT heap ran out of address space. Failed 16 MB and 1.3 MB allocations
+  (`nrt_texture.cpp`, `resource_creator.cpp`) were retried forever by a worker
+  thread, each writing to `debug.txt` (about 30,000 opens a second).
+  `VirtualAlloc` now uses `0x40000000`–`0xB0000000` and the third heap region is
+  `0xB0000000`–`0xE0000000`. Path lookups below the install root are cached.
+- The CRT's x87 math descriptors (`fmod` at `0x13DE170`, `atan2` at `0x13F3DD0`:
+  a name, then sixteen handlers at `+0x10` that `0xC44D50` / `0xC44DCB` jump
+  through) are discovery roots now (`CRT_DISPATCH_TABLES`). Nothing else points at
+  the handlers (`0xC450D4`, `0xC4510F`, the `fprem` loop `0xC1E804`, `0xC50388`),
+  so none of them were translated. `0xC5030C` stays native.
+- `fnsave` / `frstor` / `fnstenv` / `fldenv` are translated (`fpu_save` /
+  `fpu_restore`): the CRT x87 exception helper (`0xC3946D`) runs in attract.
+- The Metal backend: the pipeline cache key was built with `ostringstream` on
+  every draw (about 1,200 a frame in the race), and every buffer update made a
+  new `MTLBuffer`. The key is raw bytes now. Repeat buffer updates go into 8 MB
+  shared upload arenas, which are reused once the GPU is done with them and no
+  buffer's current bytes live there (a buffer's first upload gets its own
+  `MTLBuffer`). A constant buffer shorter than the function reads gets a
+  zero-padded copy, as D3D11 reads zeros past the end.
+- `Present` read the frame back and waited for the GPU every frame. It now
+  commits without waiting (at most two frames queued) and reads back only the
+  frames `DCUSA_FRAME` writes (`DCUSA_READBACK=1` for every frame). A shared
+  texture the GPU may still read gets a new Metal texture before a CPU write.
+- The game presents with SyncInterval 0, but the cabinet runs at 60 Hz, so
+  presents are paced to 60 Hz (`DCUSA_NOPACE=1` to run unthrottled).
+
+A 10-minute attract run now completes without a fail-closed stop. Boot reaches
+attract in about 7,500 presents (125 s at 60 Hz). The race runs at 50 to 60
+frames a second, dropping to about 38 in its heaviest scenes, on an M3 Max.
+
 `dcrun --content <folder>` mounts that install and stays in the frame loop.
 `DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
 `DCUSA_FRAME=<path>` writes present 1, 30, and every `DCUSA_EVERY`th as PPM.

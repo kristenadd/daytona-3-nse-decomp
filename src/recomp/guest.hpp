@@ -167,6 +167,34 @@ inline void fpu_prem(Fpu& f, bool ieee) {
     f.status = s;
     f.at(0) = r;
 }
+// fnstenv / fnsave and fldenv / frstor, 32-bit protected-mode layout: the
+// 28-byte environment (control, status, tag, then zeroed instruction and
+// operand pointers), and for the full state the eight registers in ST order,
+// 10 bytes each. fnsave then reinitialises the FPU like fninit.
+inline void fpu_store_env(std::uint8_t* M, std::uint32_t a, const Fpu& f) {
+    const std::uint32_t env[7] = {0xFFFF0000u | f.control, 0xFFFF0000u | f.status_word(), 0xFFFF0000u | f.tag, 0, 0, 0,
+                                  0xFFFF0000u};
+    std::memcpy(M + a, env, sizeof env);
+}
+inline void fpu_load_env(const std::uint8_t* M, std::uint32_t a, Fpu& f) {
+    std::uint16_t control, status, tag;
+    std::memcpy(&control, M + a, 2);
+    std::memcpy(&status, M + a + 4, 2);
+    std::memcpy(&tag, M + a + 8, 2);
+    f.control = control;
+    f.top = (status >> 11) & 7;
+    f.status = std::uint16_t(status & ~0x3800u);
+    f.tag = tag;
+}
+inline void fpu_save(std::uint8_t* M, std::uint32_t a, Fpu& f) {
+    fpu_store_env(M, a, f);
+    for (unsigned i = 0; i < 8; ++i) st80(M, a + 28 + 10 * i, f.at(i));
+    f = Fpu{};
+}
+inline void fpu_restore(const std::uint8_t* M, std::uint32_t a, Fpu& f) {
+    fpu_load_env(M, a, f);
+    for (unsigned i = 0; i < 8; ++i) f.at(i) = ld80(M, a + 28 + 10 * i);
+}
 inline std::int16_t fpu_trunc_i16(double v) {
     double r = std::trunc(v);
     if (!(r >= -32768.0 && r <= 32767.0)) return std::numeric_limits<std::int16_t>::min();

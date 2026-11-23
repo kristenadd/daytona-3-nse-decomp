@@ -76,7 +76,11 @@ std::uint32_t virt_bump = kVirtBase;
 // Past the low region, the rest of a large-address-aware process's space: above
 // the guest thread stacks at 0x3C000000, below the COM and import thunks.
 constexpr std::uint32_t kVirtHigh = 0x40000000u;
-constexpr std::uint32_t kVirtHighLimit = 0x80000000u;  // the heap's third region follows
+// NRT's own heap grows by VirtualAlloc to nearly 1 GB once the attract scenes
+// load (its statistics at 0x154EF44 / 0x154EF4C); with less, every allocation
+// after that fails and a worker retries forever (resource_creator.cpp). A
+// large-address-aware process on 64-bit Windows has almost 4 GB to give it.
+constexpr std::uint32_t kVirtHighLimit = 0xB0000000u;  // the heap's third region follows
 std::uint32_t virt_high = kVirtHigh;
 
 bool commit_guest(std::uint8_t* mem, std::uint32_t address, std::uint32_t size) {
@@ -117,7 +121,7 @@ std::uint32_t heap2_bump = kHeap2 + 16;
 // Past both fixed heaps, blocks come from a large region in the upper half of
 // the address space (a large-address-aware process has it), committed as the
 // bump pointer reaches it. Course loads ask for single blocks over 50 MB.
-constexpr std::uint32_t kHeap3 = 0x80000000u;
+constexpr std::uint32_t kHeap3 = 0xB0000000u;
 constexpr std::uint32_t kHeap3Limit = 0xE0000000u;
 std::uint32_t heap3_bump = kHeap3 + 16;
 
@@ -1647,37 +1651,10 @@ void GetCursorPos(Cpu& c) {
 }
 
 // 0x6A027A probes users 0..3. A non-zero result is "not connected" and the init
-// still returns success. No pad is attached.
-void XInputGetState(Cpu& c) {
-    const std::uint32_t user = arg(c, 0);
-    const std::uint32_t out = arg(c, 1);
-    if (user != 0 || !pad_snapshot.connected) {
-        ret_stdcall(c, 1167, 8);
-        return;
-    }
-    if (out != 0) {
-        std::memset(c.mem + out, 0, 16);
-        st32(c.mem, out, 1);
-        std::uint16_t buttons = 0;
-        if (pad_snapshot.buttons & PadSnapshot::Start) buttons = static_cast<std::uint16_t>(buttons | 0x0010u);
-        if (pad_snapshot.buttons & PadSnapshot::View1) buttons = static_cast<std::uint16_t>(buttons | 0x1000u);
-        if (pad_snapshot.buttons & PadSnapshot::ShiftUp) buttons = static_cast<std::uint16_t>(buttons | 0x0200u);
-        if (pad_snapshot.buttons & PadSnapshot::ShiftDown) buttons = static_cast<std::uint16_t>(buttons | 0x0100u);
-        st16(c.mem, out + 4, buttons);
-        const auto axis = [](float v) {
-            if (v < 0) v = 0;
-            if (v > 1) v = 1;
-            return static_cast<std::uint8_t>(v * 255.0f + 0.5f);
-        };
-        c.mem[out + 6] = axis(pad_snapshot.brake);
-        c.mem[out + 7] = axis(pad_snapshot.accelerator);
-        float steer = pad_snapshot.steering;
-        if (steer < -1) steer = -1;
-        if (steer > 1) steer = 1;
-        st16(c.mem, out + 8, static_cast<std::uint16_t>(static_cast<std::int16_t>(steer * 32767.0f)));
-    }
-    ret_stdcall(c, 0, 8);
-}
+// still returns success. The cabinet's controls are the SEGA IO board, which the
+// game reads through DirectInput (d3d11.cpp), so no XInput pad is ever reported:
+// a pad here as well would reach the game twice.
+void XInputGetState(Cpu& c) { ret_stdcall(c, 1167, 8); }
 
 void write_msg(std::uint8_t* mem, std::uint32_t dst, const GuestMsg& msg) {
     st32(mem, dst, msg.hwnd);
@@ -2031,6 +2008,21 @@ void CreateFileCommon(Cpu& c, bool wide) {
         if (std::getenv("DCUSA_IO") != nullptr) {
             std::fprintf(stderr, "open %s handle %x err %u thread %u\n", path.c_str(), handle, err,
                          ld32(c.mem, c.fs_base + 0x24));
+            static int stacks = 0;
+            if (std::getenv("DCUSA_IO_STACK") != nullptr && path.find(std::getenv("DCUSA_IO_STACK")) != std::string::npos &&
+                stacks++ < 2) {
+                // The EBP frame chain: [ebp] is the caller's ebp, [ebp+4] its return address.
+                std::fprintf(stderr, "  frames: %08X", ld32(c.mem, c.r[Cpu::ESP]));
+                const std::uint32_t top = ld32(c.mem, c.fs_base + 4), bottom = ld32(c.mem, c.fs_base + 8);
+                std::uint32_t bp = c.r[Cpu::EBP];
+                for (int n = 0; n < 16 && bp >= bottom && bp + 8 <= top; ++n) {
+                    std::fprintf(stderr, " %08X", ld32(c.mem, bp + 4));
+                    const std::uint32_t next = ld32(c.mem, bp);
+                    if (next <= bp) break;
+                    bp = next;
+                }
+                std::fprintf(stderr, "\n");
+            }
         } else if (std::getenv("DCUSA_STATS") != nullptr) {
             static int opened = 0;
             if (opened < 30 || err != 0) {
@@ -2094,6 +2086,14 @@ void WriteFile(Cpu& c) {
     std::uint32_t put = 0;
     std::uint32_t err = overlapped_seek(c, handle, ov);
     if (err == 0) err = guest_write_file(handle, c.mem + buf, n, &put);
+    if (std::getenv("DCUSA_IO") != nullptr) {
+        static int shown = 0;
+        if (shown++ < 40) {
+            std::string text(reinterpret_cast<const char*>(c.mem + buf), std::min<std::uint32_t>(n, 160u));
+            for (char& ch : text) if (ch == '\n' || ch == '\r') ch = '|';
+            std::fprintf(stderr, "write h %x n %u put %u err %u: %s\n", handle, n, put, err, text.c_str());
+        }
+    }
     if (put_at != 0) st32(c.mem, put_at, put);
     overlapped_done(c, ov, err, put);
     set_error(c, err);
@@ -2373,6 +2373,24 @@ void Sleep(Cpu& c) {
     sched_sleep(c, ms);
 }
 
+// 0x4DB20C fills a MEMORYSTATUS (32 bytes) only to log it when a game starts.
+// The figures are those of a 4 GB machine running a large-address-aware
+// 32-bit process; nothing reads them back.
+void GlobalMemoryStatus(Cpu& c) {
+    const std::uint32_t out = arg(c, 0);
+    if (out != 0) {
+        st32(c.mem, out + 0, 32);            // dwLength
+        st32(c.mem, out + 4, 25);            // dwMemoryLoad, percent
+        st32(c.mem, out + 8, 0xFFFFFFFFu);   // dwTotalPhys (capped, as Windows does)
+        st32(c.mem, out + 12, 0xC0000000u);  // dwAvailPhys
+        st32(c.mem, out + 16, 0xFFFFFFFFu);  // dwTotalPageFile
+        st32(c.mem, out + 20, 0xC0000000u);  // dwAvailPageFile
+        st32(c.mem, out + 24, 0xFFFE0000u);  // dwTotalVirtual
+        st32(c.mem, out + 28, 0x80000000u);  // dwAvailVirtual
+    }
+    ret_stdcall(c, 0, 4);
+}
+
 void GetTickCount(Cpu& c) {
     using namespace std::chrono;
     const auto ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
@@ -2609,6 +2627,7 @@ constexpr Handler kHandlers[] = {
     {"KERNEL32.dll!TerminateThread", TerminateThread},
     {"KERNEL32.dll!Sleep", Sleep},
     {"KERNEL32.dll!GetTickCount", GetTickCount},
+    {"KERNEL32.dll!GlobalMemoryStatus", GlobalMemoryStatus},
     {"KERNEL32.dll!GetLocalTime", GetLocalTime},
     {"KERNEL32.dll!GetSystemTime", GetSystemTime},
     {"KERNEL32.dll!GetEnvironmentStringsW", GetEnvironmentStringsW},
@@ -2619,6 +2638,26 @@ constexpr Handler kHandlers[] = {
 }  // namespace
 
 void set_pad_snapshot(const PadSnapshot& pad) { pad_snapshot = pad; }
+
+namespace {
+PadSource* pad_source = nullptr;
+}
+
+void set_pad_source(PadSource* source) { pad_source = source; }
+
+void sample_pad() {
+    if (pad_source != nullptr) pad_snapshot = pad_source->sample();
+}
+
+// SHELL_MSG_SETCREDIT (0x2D) carries the credit count itself. The game spends
+// credits on its own, so a coin is the count it holds now (0x15278F8 + 7, 0xFF
+// before the first message) plus one.
+void shell_insert_coin(const std::uint8_t* mem) {
+    if (shell_socket == 0) return;  // the link is not up yet
+    const std::uint8_t now = mem[0x15278F8u + 7u];
+    const std::uint8_t credits = static_cast<std::uint8_t>(now == 0xFF ? 1 : std::min(now + 1, 99));
+    shell_inbox.push_back(dyt_packet(0x2D, &credits, 1));
+}
 
 const dcusa::PadSnapshot& current_pad() { return pad_snapshot; }
 

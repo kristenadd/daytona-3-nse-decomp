@@ -71,4 +71,20 @@ void call_indirect(Cpu& c, std::uint32_t target) {
     fail_closed(Unported::Function, target, "indirect call to an address with no translated function");
 }
 
+std::uint32_t call_guest(Cpu& c, std::uint32_t target, std::initializer_list<std::uint32_t> args) {
+    const std::uint32_t saved = c.r[Cpu::ESP];
+    std::uint32_t esp = saved;
+    for (auto it = args.end(); it != args.begin();) {
+        esp -= 4;
+        st32(c.mem, esp, *--it);
+    }
+    esp -= 4;
+    st32(c.mem, esp, 0);  // return address: translated code returns natively
+    c.r[Cpu::ESP] = esp;
+    call_indirect(c, target);
+    const std::uint32_t eax = c.r[Cpu::EAX];
+    c.r[Cpu::ESP] = saved;
+    return eax;
+}
+
 }

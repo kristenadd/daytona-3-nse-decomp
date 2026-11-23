@@ -27,6 +27,12 @@ GuestFn import_handler(std::string_view name);
 // ERROR_DEVICE_NOT_CONNECTED, which is what startup counts as "no pad".
 void set_pad_snapshot(const dcusa::PadSnapshot& pad);
 const dcusa::PadSnapshot& current_pad();
+// Where sample_pad() reads the controls from (nullptr: the snapshot stays as set).
+void set_pad_source(dcusa::PadSource* source);
+// Once per presented frame: the source's next snapshot becomes current_pad().
+void sample_pad();
+// The shell's answer to a coin: SHELL_MSG_SETCREDIT with one more credit.
+void shell_insert_coin(const std::uint8_t* mem);
 
 // True when `address` is inside memory the allocators have committed (the
 // image is not included). For debug readers that must not fault.

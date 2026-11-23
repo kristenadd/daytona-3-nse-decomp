@@ -28,6 +28,15 @@ from image import Image  # noqa: E402
 from cfg import CONDITIONAL as CONDITIONAL_MNEMS, HEX, Walker  # noqa: E402
 
 EH_MAGICS = (0x19930520, 0x19930521, 0x19930522)
+# The CRT's x87 math descriptors: a length-prefixed name, then at +0x10 sixteen
+# handlers the dispatchers 0xC44D50 / 0xC44DCB jump through by operand class
+# (found as `mov edx, <descriptor>; jmp <dispatcher>`). Nothing else points at
+# the handlers. (handler list, entries) per edition; 2019: fmod (0x13DE170) and
+# atan2 (0x13F3DD0). A game started from attract reaches them.
+CRT_DISPATCH_TABLES = {2019: [(0x13DE180, 16), (0x13F3DE0, 16)]}
+# Handled natively by call_indirect (dispatch.cpp), so not made a function entry.
+CRT_NATIVE = {0xC5030C}
+
 NORETURN_IMPORTS = {'ExitProcess', 'RaiseException', 'FatalAppExitA', 'FatalAppExitW', 'ExitThread'}
 
 
@@ -526,6 +535,13 @@ def main():
     for table, count in initializers:
         for k in range(count):
             d.add(img.u32(table + 4 * k), 'xc')
+    # The CRT's x87 math dispatch tables (the binary _trandisp class handlers):
+    # some entries are a few instructions right after another handler's jmp,
+    # inside what the walker reads as one body, so no weak round accepts them.
+    for table, count in CRT_DISPATCH_TABLES.get(img.edition, ()):
+        for k in range(count):
+            if img.u32(table + 4 * k) not in CRT_NATIVE:
+                d.add(img.u32(table + 4 * k), 'crt-table')
     d.fixpoint()
     print('strong roots: %d functions after fixpoint, m2e tables %s, init tables %s (%.0f s)' % (
         len(d.functions), ' '.join('%x/%d' % (t, n) for t, n in tables),
@@ -578,7 +594,8 @@ def main():
     run_start = None
     for i in range(text.file_backed + 1):
         va = text.va + i
-        gap = i < text.file_backed and not owners[i] and va not in d.walker.data_in_text and img.u8(va) not in (0xCC, 0x90)
+        gap = (i < text.file_backed and img.in_text(va) and not owners[i] and va not in d.walker.data_in_text
+               and img.u8(va) not in (0xCC, 0x90))
         if gap:
             gap_code += 1
             if run_start is None:
@@ -621,7 +638,7 @@ def main():
         imms[va] = refs
     reachable = set()
     stack = [va for va, ks in d.kinds.items()
-             if ks & {'entry', 'vtable', 'seh', 'eh', 'data', 'm2e', 'xc'} and va in d.functions]
+             if ks & {'entry', 'vtable', 'seh', 'eh', 'data', 'm2e', 'xc', 'crt-table'} and va in d.functions]
     while stack:
         va = stack.pop()
         if va in reachable:

@@ -94,6 +94,9 @@ void clear_depth(std::uint32_t texture, float depth, std::uint8_t stencil, std::
 void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, std::int32_t base);
 void draw(const DrawState& s, std::uint32_t count, std::uint32_t start);
 
+// Commits the frame without waiting for it (at most two frames stay queued).
+void submit();
+
 // Commits the frame, waits, and copies `texture` (an RGBA8 or BGRA8 target) out
 // as RGBA8 rows. False when it has no Metal texture.
 bool read_rgba8(std::uint32_t texture, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height);

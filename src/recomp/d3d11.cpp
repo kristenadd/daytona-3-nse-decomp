@@ -14,6 +14,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -31,6 +32,13 @@ std::uint32_t g_frame_w = 0;
 std::uint32_t g_frame_h = 0;
 
 namespace {
+
+// Environment switches, read once: getenv walks the whole environment and
+// several of these sit on per-draw paths.
+bool stats_on() {
+    static const bool on = std::getenv("DCUSA_STATS") != nullptr;
+    return on;
+}
 
 constexpr std::uint32_t kSOk = 0;
 constexpr std::uint32_t kNotFound = 0x887A0002u;
@@ -672,7 +680,7 @@ void draw_triangles(std::uint32_t count, std::uint32_t start, std::int32_t base_
         }
         if (!ok) {
             ++g_skipped;
-            if (count > 8 && std::getenv("DCUSA_STATS") != nullptr) {
+            if (count > 8 && stats_on()) {
                 static int noted = 0;
                 if (noted < 3) {
                     ++noted;
@@ -750,7 +758,7 @@ void draw_triangles(std::uint32_t count, std::uint32_t start, std::int32_t base_
                 if (!any) tex = nullptr;
             }
             const bool world = g_world_tri;
-            if (count > 8 && std::getenv("DCUSA_STATS") != nullptr) {
+            if (count > 8 && stats_on()) {
                 static int mesh_note = 0;
                 if (mesh_note < 2) {
                     ++mesh_note;
@@ -758,7 +766,7 @@ void draw_triangles(std::uint32_t count, std::uint32_t start, std::int32_t base_
                                  xy[0][0], xy[0][1], col[0][0], col[0][1], col[0][2], pipe.target);
                 }
             }
-            if (g_draws <= 8 && std::getenv("DCUSA_STATS") != nullptr) {
+            if (g_draws <= 8 && stats_on()) {
                 const auto tgt = stored.find(pipe.target);
                 std::fprintf(stderr,
                              "draw %u idx %u raw (%.2f,%.2f) (%.2f,%.2f) (%.2f,%.2f) target %u/%u tex %u/%u\n", g_draws,
@@ -773,7 +781,7 @@ void draw_triangles(std::uint32_t count, std::uint32_t start, std::int32_t base_
                 ++g_skipped;
                 continue;
             }
-            if (g_drawn == 0 && std::getenv("DCUSA_STATS") != nullptr) {
+            if (g_drawn == 0 && stats_on()) {
                 const auto layout = layouts.find(pipe.layout);
                 std::fprintf(stderr,
                              "tri (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) uv (%.3f,%.3f) (%.3f,%.3f) (%.3f,%.3f) col %u %u "
@@ -817,7 +825,7 @@ void publish_frame(std::uint32_t resource) {
     g_frame = it->second.bytes;
     static int seen = 0;
     ++seen;
-    if (std::getenv("DCUSA_STATS") != nullptr && seen == 1) {
+    if (stats_on() && seen == 1) {
         unsigned live = 0;
         for (const auto& item : stored) {
             if (item.second.bytes.size() < 4096u) continue;
@@ -844,7 +852,7 @@ void publish_frame(std::uint32_t resource) {
     const char* every_env = std::getenv("DCUSA_EVERY");
     const int every = every_env ? std::atoi(every_env) : 0;
     const bool periodic = every > 0 && seen % every == 0;
-    if (std::getenv("DCUSA_STATS") != nullptr && (seen == 1 || seen == 30 || periodic)) {
+    if (stats_on() && (seen == 1 || seen == 30 || periodic)) {
         std::fprintf(stderr,
                      "present %d draws %u painted %u skipped %u binds %u meshes %u tex %u textures %u target %u back %u rgba %u/%u first %u\n",
                      seen, g_draws, g_drawn, g_skipped, g_binds, g_meshes, pipe.texture, g_textures, resource, g_back_draws,
@@ -928,7 +936,7 @@ void copy_from_guest(std::uint32_t obj, const std::uint8_t* mem, std::uint32_t s
     if (rows <= 1 || src_row == 0 || src_row == row) {
         const std::uint32_t n = static_cast<std::uint32_t>(it->second.bytes.size());
         std::memcpy(it->second.bytes.data(), mem + src, n);
-        if (std::getenv("DCUSA_STATS") != nullptr) {
+        if (stats_on()) {
             static int uploads = 0;
             bool any = false;
             const std::uint32_t step = n > 4096u ? n / 32u : 1u;
@@ -942,7 +950,7 @@ void copy_from_guest(std::uint32_t obj, const std::uint8_t* mem, std::uint32_t s
     }
     for (std::uint32_t y = 0; y < rows; ++y)
         std::memcpy(it->second.bytes.data() + static_cast<std::size_t>(y) * row, mem + src + static_cast<std::size_t>(y) * src_row, row);
-    if (std::getenv("DCUSA_STATS") != nullptr) {
+    if (stats_on()) {
         static int row_uploads = 0;
         bool any = false;
         for (std::uint32_t y = 0; y < rows && !any; y += std::max(rows / 16u, 1u))
@@ -1330,7 +1338,7 @@ void create_shader(Cpu& c) {
     std::uint64_t embedded = 0;
     if (blob_key(c.mem, arg(c, 1), &embedded)) shader_obj_key[obj] = embedded;
     else if (const auto key = shader_key.find(arg(c, 1)); key != shader_key.end()) shader_obj_key[obj] = key->second;
-    else if (std::getenv("DCUSA_STATS") != nullptr) {
+    else if (stats_on()) {
         static int misses = 0;
         if (misses++ < 5) std::fprintf(stderr, "create shader from %08x: no compile key (%zu keys)\n", arg(c, 1), shader_key.size());
     }
@@ -1365,7 +1373,7 @@ void create_srv(Cpu& c) {
     const std::uint32_t out = arg(c, 3);
     const std::uint32_t obj = spawn(c.mem, Srv);
     ++g_srvs;
-    if (g_srvs <= 3 && std::getenv("DCUSA_STATS") != nullptr)
+    if (g_srvs <= 3 && stats_on())
         std::fprintf(stderr, "create_srv from %08x res %08x\n", ld32(c.mem, c.r[Cpu::ESP]), arg(c, 1));
     st32(c.mem, obj + 12, arg(c, 1));
     add_ref(c.mem, arg(c, 1));
@@ -1392,7 +1400,7 @@ void create_texture(Cpu& c) {
         remember(obj, bytes, row);
         stored[obj].format = ld32(c.mem, desc + 16);
         ++g_textures;
-        if (std::getenv("DCUSA_STATS") != nullptr && (bytes > 4096u || g_textures <= 4))
+        if (stats_on() && (bytes > 4096u || g_textures <= 4))
             std::fprintf(stderr, "tex %u %ux%u fmt %u bytes %u\n", g_textures, ld32(c.mem, desc),
                          ld32(c.mem, desc + 4), ld32(c.mem, desc + 16), bytes);
     }
@@ -1569,11 +1577,63 @@ void print_watch(const std::uint8_t* mem, int present_no) {
                  static_cast<unsigned long long>(g_probe[1]));
 }
 
+// The game presents with SyncInterval 0, and on the cabinet it still runs at
+// the display's 60 Hz (the capture shows 60 frames a second), so a present
+// returns no earlier than one 60 Hz period after the last one (SyncInterval
+// periods when it is above 1). DCUSA_NOPACE=1 runs unthrottled (benchmarks).
+void pace_present(std::uint32_t sync_interval) {
+    using clock = std::chrono::steady_clock;
+    static const bool off = std::getenv("DCUSA_NOPACE") != nullptr;
+    static clock::time_point next{};
+    if (off) return;
+    const auto period = std::chrono::nanoseconds(16'666'667) * std::max(1u, sync_interval);
+    const auto now = clock::now();
+    // More than a period behind: start over from now rather than run fast to catch up.
+    if (next.time_since_epoch().count() == 0 || now > next + period) next = now;
+    else std::this_thread::sleep_until(next);
+    next += period;
+}
+
+// DCUSA_PAD_TRACE=1: when the pad changes (and for the next three presents),
+// the snapshot and what the game made of it: player 0's switch bits
+// at 0x15964A0 (+0x30 held, +0x20 newly pressed) and analogs (+0x40 steering
+// 0..0xFF00, +0x44 accel, +0x48 brake 0..0x10000), the switch image the race
+// reads (0x19C87F8: steer, accel, brake bytes; 0x19C8800/01 switch bytes), the
+// gear index 0x19C880C (0..3) and the credit count (0x15278F8 + 7).
+void print_pad_trace(const std::uint8_t* mem, int present_no) {
+    static const bool on = std::getenv("DCUSA_PAD_TRACE") != nullptr;
+    static dcusa::PadSnapshot last;
+    static int left = 0;
+    if (!on) return;
+    const dcusa::PadSnapshot& pad = current_pad();
+    if (pad.buttons != last.buttons || pad.steering != last.steering || pad.accelerator != last.accelerator ||
+        pad.brake != last.brake)
+        left = 4;
+    last = pad;
+    if (left == 0 && present_no % 120 != 0) return;
+    if (left > 0) --left;
+    constexpr std::uint32_t slot = 0x15964A0u;
+    std::fprintf(stderr,
+                 "pad %d: snap btn %04x steer %+.2f acc %.2f brk %.2f | held %08x%08x new %08x%08x "
+                 "steer %05x acc %05x brk %05x | jvs %02x %02x %02x sw %02x %02x gear %u credit %u\n",
+                 present_no, pad.buttons, pad.steering, pad.accelerator, pad.brake, ld32(mem, slot + 0x34),
+                 ld32(mem, slot + 0x30), ld32(mem, slot + 0x24), ld32(mem, slot + 0x20), ld32(mem, slot + 0x40),
+                 ld32(mem, slot + 0x44), ld32(mem, slot + 0x48), mem[0x19C87F8u], mem[0x19C87F9u], mem[0x19C87FAu],
+                 mem[0x19C8800u], mem[0x19C8801u], ld32(mem, 0x19C880Cu), mem[0x15278F8u + 7u]);
+}
+
 void present(Cpu& c) {
     {
         static int all_presents = 0;
         print_watch(c.mem, ++all_presents);
+        print_pad_trace(c.mem, all_presents);
     }
+    if (static bool shown = false; !shown && stats_on()) {
+        shown = true;
+        std::fprintf(stderr, "present: sync interval %u flags %u\n", arg(c, 1), arg(c, 2));
+    }
+    pace_present(arg(c, 1));
+    sample_pad();  // the controls for the frame the game builds next
     if (gpu::enabled()) {
         static int presents = 0;
         ++presents;
@@ -1582,8 +1642,18 @@ void present(Cpu& c) {
         // DCUSA_METAL_TRACE=<n>: one line per draw of the frame that present n ends.
         if (const char* trace = std::getenv("DCUSA_METAL_TRACE"))
             gpu::set_trace(std::atoi(trace) == presents + 1);
+        // Reading the frame back waits for the GPU, so only the frames that are
+        // written out or reported pay for it (DCUSA_READBACK=1: every frame).
+        static const bool every_frame = std::getenv("DCUSA_READBACK") != nullptr;
+        static const bool dumping = std::getenv("DCUSA_FRAME") != nullptr || stats_on();
+        static const int every = [] {
+            const char* e = std::getenv("DCUSA_EVERY");
+            return e ? std::atoi(e) : 0;
+        }();
+        const bool wanted = every_frame || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
         std::uint32_t w = 0, h = 0;
-        if (gpu::read_rgba8(pipe.backbuffer, &stored[pipe.backbuffer].bytes, &w, &h)) stored[pipe.backbuffer].row = w * 4u;
+        if (!wanted) gpu::submit();
+        else if (gpu::read_rgba8(pipe.backbuffer, &stored[pipe.backbuffer].bytes, &w, &h)) stored[pipe.backbuffer].row = w * 4u;
         publish_frame(pipe.backbuffer);
         ret_stdcall(c, kSOk, 12);
         return;
@@ -1830,7 +1900,7 @@ void ps_set_resources(Cpu& c) {
             if ((format == 28 || format == 29 || format == 71 || format == 77 || format == 87) && nbytes > 256u)
                 color = res;
             static int color_logs = 0;
-            if (std::getenv("DCUSA_STATS") != nullptr && color_logs < 8 && color == res && nbytes > 256u) {
+            if (stats_on() && color_logs < 8 && color == res && nbytes > 256u) {
                 ++color_logs;
                 std::fprintf(stderr, "color bind %u slot %u bytes %zu fmt %u\n", g_binds, i, nbytes, format);
             }
@@ -1912,7 +1982,7 @@ void unmap_resource(Cpu& c) {
                     g_have_proj = true;
                 }
             }
-            if (std::getenv("DCUSA_STATS") != nullptr && stored_it->second.format == 0 && it->size >= 64 &&
+            if (stats_on() && stored_it->second.format == 0 && it->size >= 64 &&
                 it->size <= 8192) {
                 static int shown = 0;
                 float head = 0;
@@ -1969,7 +2039,8 @@ const std::uint8_t* g_mem_for_trace = nullptr;
 void resolve_shaders() {
     gs.vs = key_of_shader(bound_shaders.vs);
     gs.ps = key_of_shader(bound_shaders.ps);
-    if (std::getenv("DCUSA_SHADER_TRACE") != nullptr) {
+    static const bool shader_trace = std::getenv("DCUSA_SHADER_TRACE") != nullptr;
+    if (shader_trace) {
         static int shown = 0;
         if (shown++ < 6) {
             const auto code = shader_code.find(bound_shaders.ps);
@@ -2087,76 +2158,170 @@ void device_call(Cpu& c, std::uint32_t slot) {
 constexpr std::uint32_t kSoundScratch = 0x36000000u;
 constexpr std::uint32_t kSoundScratchBytes = 1u << 20;
 
+// DirectInput: the cabinet's SEGA IO board, the one device the game reads.
+//
+// 0x5DEBA0 enumerates game controllers (callback 0x5DE930) and keeps a device
+// only when its instance name is "SEGA IO Controller"; it then enumerates the
+// axes (callback 0x5DE8B0 sets each to -1000..1000), sets c_dfDIJoystick and
+// acquires it. Each frame 0x47CDF0 polls it with GetDeviceState and maps:
+//   lX  steering: (lX + 1000) / 2000 * 255, then the test-menu calibration
+//   lRx accelerator, lZ brake: -1000 released .. +1000 full
+//   buttons through the profile at 0x116D490 + 4 * 0xE0 (button -> action):
+//     0 start (2), 8..11 VR / view 1..4 (3..6), 3 shift up (14), 4 shift down
+//     (13), 1 2 6 7 gear 1..4 (7..10).
+// The game counts a shift once per press (0x5E2F96) and keeps the gear in
+// 1..4 itself. Coin is not on the board: the shell sends credits
+// (shell_insert_coin). A second board (the H-pattern lever, player 2) is not
+// reported, which reads as the lever in neutral.
+constexpr char kIoBoardName[] = "SEGA IO Controller";
+// Axis instances in c_dfDIJoystick: lX 0, lY 1, lZ 2, lRx 3.
+constexpr unsigned kAxes = 4;
+std::int32_t axis_min[kAxes] = {0, 0, 0, 0}, axis_max[kAxes] = {65535, 65535, 65535, 65535};
+bool coin_held = false;
+
 void dinput_create_device(Cpu& c) {
     const std::uint32_t out = arg(c, 2);
     if (out != 0) st32(c.mem, out, object(DInputDev));
     ret_stdcall(c, kSOk, 16);
 }
 
-void dinput_enum(Cpu& c) { ret_stdcall(c, kSOk, 20); }
-void dinput_enum_objects(Cpu& c) { ret_stdcall(c, kSOk, 16); }
+void put_name(std::uint8_t* mem, std::uint32_t at, const char* name) {
+    for (std::uint32_t i = 0;; ++i) {
+        st8(mem, at + i, static_cast<std::uint8_t>(name[i]));
+        if (name[i] == 0) break;
+    }
+}
+
+// EnumDevices(this, dwDevType, callback, pvRef, dwFlags): one DIDEVICEINSTANCEA.
+void dinput_enum(Cpu& c) {
+    const std::uint32_t type = arg(c, 1), callback = arg(c, 2), ref = arg(c, 3);
+    // DI8DEVCLASS_ALL (0) or DI8DEVCLASS_GAMECTRL (4).
+    if (callback != 0 && (type == 0 || type == 4)) {
+        const std::uint32_t saved = c.r[Cpu::ESP];
+        c.r[Cpu::ESP] = (saved - 0x300u) & ~15u;
+        const std::uint32_t inst = c.r[Cpu::ESP];
+        std::memset(c.mem + inst, 0, 0x244);
+        st32(c.mem, inst, 0x244);              // dwSize
+        st32(c.mem, inst + 0x04, 0x5E6A10D0);  // guidInstance (any stable value)
+        st32(c.mem, inst + 0x14, 0x5E6A10D1);  // guidProduct
+        st32(c.mem, inst + 0x24, 0x00000116);  // dwDevType: DI8DEVTYPE_DRIVING, first person
+        put_name(c.mem, inst + 0x28, kIoBoardName);   // tszInstanceName
+        put_name(c.mem, inst + 0x12C, kIoBoardName);  // tszProductName
+        call_guest(c, callback, {inst, ref});
+        c.r[Cpu::ESP] = saved;
+    }
+    ret_stdcall(c, kSOk, 20);
+}
+
+// EnumObjects(this, callback, pvRef, dwFlags): the four absolute axes.
+void dinput_enum_objects(Cpu& c) {
+    const std::uint32_t callback = arg(c, 1), ref = arg(c, 2), flags = arg(c, 3);
+    // DIDFT_ALL (0), or a mask that includes DIDFT_ABSAXIS (2).
+    if (callback != 0 && (flags == 0 || (flags & 2u) != 0)) {
+        const std::uint32_t saved = c.r[Cpu::ESP];
+        c.r[Cpu::ESP] = (saved - 0x200u) & ~15u;
+        const std::uint32_t obj = c.r[Cpu::ESP];
+        static const char* names[kAxes] = {"X Axis", "Y Axis", "Z Axis", "X Rotation"};
+        static const std::uint32_t offsets[kAxes] = {0, 4, 8, 12};
+        for (unsigned i = 0; i < kAxes; ++i) {
+            std::memset(c.mem + obj, 0, 0x13C);
+            st32(c.mem, obj, 0x13C);                  // dwSize
+            st32(c.mem, obj + 0x14, offsets[i]);      // dwOfs
+            st32(c.mem, obj + 0x18, 2u | (i << 8));   // dwType: DIDFT_ABSAXIS | instance
+            put_name(c.mem, obj + 0x20, names[i]);
+            if (call_guest(c, callback, {obj, ref}) == 0) break;  // DIENUM_STOP
+        }
+        c.r[Cpu::ESP] = saved;
+    }
+    ret_stdcall(c, kSOk, 16);
+}
 
 void dinput_caps(Cpu& c) {
     const std::uint32_t caps = arg(c, 1);
     if (caps != 0) {
         const std::uint32_t n = ld32(c.mem, caps);
         if (n >= 24 && n <= 64) {
-            st32(c.mem, caps + 4, 0x100u);
-            st32(c.mem, caps + 8, 0x16u);
-            st32(c.mem, caps + 12, 4u);
-            st32(c.mem, caps + 16, 12u);
-            st32(c.mem, caps + 20, 1u);
+            st32(c.mem, caps + 4, 0x5u);     // DIDC_ATTACHED | DIDC_POLLEDDEVICE
+            st32(c.mem, caps + 8, 0x116u);   // dwDevType
+            st32(c.mem, caps + 12, kAxes);   // dwAxes
+            st32(c.mem, caps + 16, 12u);     // dwButtons
+            st32(c.mem, caps + 20, 0u);      // dwPOVs
         }
     }
     ret_stdcall(c, kSOk, 8);
 }
 
+// DIPROP_RANGE (4): DIPROPHEADER {dwSize, dwHeaderSize, dwObj, dwHow} then lMin, lMax.
 void dinput_get_prop(Cpu& c) {
     const std::uint32_t prop = arg(c, 1);
     const std::uint32_t hdr = arg(c, 2);
     if (prop == 4 && hdr != 0 && ld32(c.mem, hdr) >= 24) {
-        st32(c.mem, hdr + 16, 0);
-        st32(c.mem, hdr + 20, 65535u);
+        const unsigned i = ld32(c.mem, hdr + 12) == 2 ? (ld32(c.mem, hdr + 8) >> 8) & 0xFFFFu : 0u;
+        st32(c.mem, hdr + 16, static_cast<std::uint32_t>(axis_min[i < kAxes ? i : 0]));
+        st32(c.mem, hdr + 20, static_cast<std::uint32_t>(axis_max[i < kAxes ? i : 0]));
     }
     ret_stdcall(c, kSOk, 12);
 }
 
-void dinput_set_prop(Cpu& c) { ret_stdcall(c, kSOk, 12); }
+void dinput_set_prop(Cpu& c) {
+    const std::uint32_t prop = arg(c, 1);
+    const std::uint32_t hdr = arg(c, 2);
+    if (prop == 4 && hdr != 0 && ld32(c.mem, hdr) >= 24) {
+        const auto lo = static_cast<std::int32_t>(ld32(c.mem, hdr + 16));
+        const auto hi = static_cast<std::int32_t>(ld32(c.mem, hdr + 20));
+        const std::uint32_t how = ld32(c.mem, hdr + 12);
+        for (unsigned i = 0; i < kAxes && lo < hi; ++i) {
+            // DIPH_DEVICE (0) sets every axis; DIPH_BYID (2) the one named by dwObj.
+            if (how == 0 || (how == 2 && ((ld32(c.mem, hdr + 8) >> 8) & 0xFFFFu) == i)) {
+                axis_min[i] = lo;
+                axis_max[i] = hi;
+            }
+        }
+    }
+    ret_stdcall(c, kSOk, 12);
+}
+
 void dinput_acquire(Cpu& c) { ret_stdcall(c, kSOk, 4); }
 void dinput_format(Cpu& c) { ret_stdcall(c, kSOk, 8); }
 void dinput_coop(Cpu& c) { ret_stdcall(c, kSOk, 12); }
 
+// A value in 0..1 (or -1..1 when `centred`) as a position in the axis range.
+std::int32_t axis_value(unsigned axis, float v, bool centred) {
+    const float t = centred ? (std::clamp(v, -1.0f, 1.0f) + 1.0f) * 0.5f : std::clamp(v, 0.0f, 1.0f);
+    const double span = static_cast<double>(axis_max[axis]) - axis_min[axis];
+    return static_cast<std::int32_t>(std::lround(axis_min[axis] + t * span));
+}
+
+// GetDeviceState(this, cbData, lpvData) with c_dfDIJoystick (80 bytes).
 void dinput_state(Cpu& c) {
     const std::uint32_t cb = arg(c, 1);
     const std::uint32_t data = arg(c, 2);
+    const dcusa::PadSnapshot& pad = current_pad();
     if (data != 0 && cb >= 80 && cb <= 512) {
         std::memset(c.mem + data, 0, cb);
-        const dcusa::PadSnapshot& pad = current_pad();
-        float steer = pad.connected ? pad.steering : 0;
-        if (steer < -1) steer = -1;
-        if (steer > 1) steer = 1;
-        const auto centered = static_cast<std::int32_t>(steer * 32767.0f) + 32767;
-        st32(c.mem, data, static_cast<std::uint32_t>(centered));
-        float accel = pad.connected ? pad.accelerator : 0;
-        float brake = pad.connected ? pad.brake : 0;
-        if (accel < 0) accel = 0;
-        if (accel > 1) accel = 1;
-        if (brake < 0) brake = 0;
-        if (brake > 1) brake = 1;
-        st32(c.mem, data + 4, static_cast<std::uint32_t>(accel * 65535.0f));
-        st32(c.mem, data + 24, static_cast<std::uint32_t>(brake * 65535.0f));
-        for (std::uint32_t i = 0; i < 4; ++i) st32(c.mem, data + 32 + i * 4, 0xFFFFFFFFu);
-        auto press = [&](unsigned button, std::uint32_t bit) {
-            if (pad.connected && (pad.buttons & bit) != 0) c.mem[data + 48 + button] = 0x80;
+        const bool on = pad.connected;
+        st32(c.mem, data + 0, static_cast<std::uint32_t>(axis_value(0, on ? pad.steering : 0.0f, true)));  // lX
+        st32(c.mem, data + 4, static_cast<std::uint32_t>(axis_value(1, 0.0f, true)));                        // lY
+        st32(c.mem, data + 8, static_cast<std::uint32_t>(axis_value(2, on ? pad.brake : 0.0f, false)));     // lZ
+        st32(c.mem, data + 12, static_cast<std::uint32_t>(axis_value(3, on ? pad.accelerator : 0.0f, false)));  // lRx
+        for (std::uint32_t i = 0; i < 4; ++i) st32(c.mem, data + 32 + i * 4, 0xFFFFFFFFu);  // POVs centred
+        static const struct {
+            unsigned button;
+            std::uint32_t bit;
+        } board[] = {
+            {0, dcusa::PadSnapshot::Start},     {8, dcusa::PadSnapshot::View1},     {9, dcusa::PadSnapshot::View2},
+            {10, dcusa::PadSnapshot::View3},    {11, dcusa::PadSnapshot::View4},    {3, dcusa::PadSnapshot::ShiftUp},
+            {4, dcusa::PadSnapshot::ShiftDown}, {1, dcusa::PadSnapshot::Gear1},     {2, dcusa::PadSnapshot::Gear2},
+            {6, dcusa::PadSnapshot::Gear3},     {7, dcusa::PadSnapshot::Gear4},
         };
-        press(0, dcusa::PadSnapshot::Start);
-        press(1, dcusa::PadSnapshot::View1);
-        press(2, dcusa::PadSnapshot::ShiftUp);
-        press(3, dcusa::PadSnapshot::ShiftDown);
-        press(4, dcusa::PadSnapshot::Test);
-        press(5, dcusa::PadSnapshot::Service);
-        press(6, dcusa::PadSnapshot::Coin);
+        if (on)
+            for (const auto& b : board)
+                if ((pad.buttons & b.bit) != 0) c.mem[data + 48 + b.button] = 0x80;
     }
+    // One credit per press of the coin button.
+    const bool coin = pad.connected && (pad.buttons & dcusa::PadSnapshot::Coin) != 0;
+    if (coin && !coin_held) shell_insert_coin(c.mem);
+    coin_held = coin;
     ret_stdcall(c, kSOk, 12);
 }
 
@@ -2420,7 +2585,7 @@ std::vector<ShaderBind> parse_shader(const std::uint8_t* mem, std::uint32_t src,
 }
 
 void note_shader(std::uint32_t shader) {
-    if (shader == 0 || std::getenv("DCUSA_STATS") == nullptr) return;
+    if (shader == 0 || !stats_on()) return;
     const auto code = shader_code.find(shader);
     if (code == shader_code.end()) return;
     const auto found = shader_binds.find(code->second);
@@ -2923,7 +3088,7 @@ void D3DCompile(Cpu& c) {
     } else {
         binds = parse_shader(c.mem, arg(c, 0), arg(c, 1));
         ++g_unprepared;
-        if (shader_dir() != nullptr && std::getenv("DCUSA_STATS") != nullptr)
+        if (shader_dir() != nullptr && stats_on())
             std::fprintf(stderr, "shader %s (%s %s) not translated yet\n", key_text(request.key).c_str(),
                          request.name.c_str(), request.target.c_str());
     }
@@ -2931,7 +3096,7 @@ void D3DCompile(Cpu& c) {
     if (!binds.empty()) {
         shader_binds[obj + 32] = binds;
         static int shown = 0;
-        if (std::getenv("DCUSA_STATS") != nullptr && shown < 6) {
+        if (stats_on() && shown < 6) {
             ++shown;
             std::fprintf(stderr, "shader %d binds %zu", shown, binds.size());
             for (std::size_t i = 0; i < binds.size() && i < 6; ++i)

@@ -27,9 +27,9 @@ int 0x29 is __fastfail. Each site calls IsProcessorFeaturePresent(23) first
 (2019: 0xC98942, 2017: 0xC93142) and skips the interrupt when that returns 0.
 It is a crash path either way, so it stays a trap.
 
-fnsave / frstor are the CRT x87 exception helper (2019: 0xC3946D, 2017:
-0xC33C5D), reached only after a special value fails the status check. Left as
-a trap.
+fnsave / frstor in the CRT x87 exception helper (2019: 0xC3946D, 2017:
+0xC33C5D) are translated (x87.py, fpu_save / fpu_restore); attract mode
+reaches the helper after about 14,000 frames.
 
 translate.py fails if a trap is missing from this list or a listed address is
 no longer trapped.
@@ -48,8 +48,6 @@ ALLOW = {
         0x008B8E52: 'pblendvb',
         0x008B8F29: 'pblendvb',
         0x00C377C6: 'int',
-        0x00C3957D: 'x87 fnsave (DD /6)',
-        0x00C39589: 'x87 frstor (DD /4)',
         0x00C42F1E: 'int',
         0x00C1E2D4: 'int',
         0x00C1E3D9: 'int',
@@ -128,8 +126,6 @@ ALLOW = {
         0x008B3829: 'pblendvb',
         0x0099AB8D: 'pmulld',
         0x00C31FB6: 'int',
-        0x00C33D6D: 'x87 fnsave (DD /6)',
-        0x00C33D79: 'x87 frstor (DD /4)',
         0x00C3D70E: 'int',
         0x0093133C: 'pmulld',
         0x00A17CD9: 'vbroadcastss',

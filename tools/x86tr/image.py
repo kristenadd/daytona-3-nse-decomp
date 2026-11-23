@@ -49,7 +49,15 @@ class Image:
             vsize, rva, raw_size = struct.unpack_from('<III', self.data, s + 8 - self.base)
             ch = self.u32(s + 36)
             self.sections.append(Section(name, self.base + rva, vsize, min(vsize, raw_size), ch))
-        self.text = next(s for s in self.sections if s.name == '.text')
+        # Code is every executable section: .text, and in both editions a small
+        # second one (PSFD00, about 8 KB of library code reached through data
+        # pointers). `text` spans them all, so per-byte coverage stays one array;
+        # in_text() is true only inside an executable section, not the padding
+        # between them.
+        self.code_sections = [s for s in self.sections if s.executable]
+        first = min(s.va for s in self.code_sections)
+        last = max(s.va + s.file_backed for s in self.code_sections)
+        self.text = Section('.text', first, last - first, last - first, 0x60000020)
 
     def section_of(self, va):
         for s in self.sections:
@@ -82,7 +90,12 @@ class Image:
         return self.data[o:end if end >= 0 else o + limit]
 
     def in_text(self, va):
-        return self.text.va <= va < self.text.va + self.text.file_backed
+        if not self.text.va <= va < self.text.va + self.text.file_backed:
+            return False
+        for s in self.code_sections:
+            if s.va <= va < s.va + s.file_backed:
+                return True
+        return False
 
     def imports(self):
         """{iat slot va: (dll, name)} from the import directory."""

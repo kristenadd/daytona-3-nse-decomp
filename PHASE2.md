@@ -494,8 +494,10 @@ by a handler yet.
   `_ftol2`, `memcpy` variants) that might pass flags or play stack tricks.
   Done for the 2019 reachable set (51,796 functions disassembled). There is no `call $+5`.
   Three calls in the gap function `0xBA1AF0` target `0x116A4B0` (twice) and `0x116A4D0`,
-  which are real callees in the `PSFD00` section and are not function entries. Nothing else
-  calls outside the entry set. `_chkstk` (`0xC21430`) and `_ftol` (`0xC21230`) use flags only
+  which are real callees in the `PSFD00` section. They are entries now: discovery treats
+  every executable section as code (`image.py` `code_sections`), which adds the 21
+  functions of `PSFD00`; starting a race reached `0x116A4B0`. Nothing else calls outside
+  the entry set. `_chkstk` (`0xC21430`) and `_ftol` (`0xC21230`) use flags only
   inside themselves; `_ftol` aligns `esp` and undoes it with `leave`.
   Flags are copied through `Cpu` on every call (`PROLOGUE` / `SYNC` / `RELOAD`). A compare
   whose only reader the liveness pass can see is a local branch does not update those flag

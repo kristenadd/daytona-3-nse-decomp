@@ -44,7 +44,9 @@ dcusa_warnings(dcusa_system)
 
 # ---- runtime: fail-closed reporting and the platform contract ----
 add_library(dcusa_runtime STATIC
-    src/runtime/fail_closed.cpp)
+    src/runtime/fail_closed.cpp
+    src/runtime/pad_mapping.cpp
+    src/runtime/pad_script.cpp)
 target_include_directories(dcusa_runtime PUBLIC src)
 dcusa_warnings(dcusa_runtime)
 
@@ -162,8 +164,9 @@ if(dcusa_generated_dir)
     # guest instruction by instruction) and no debug info (it would run to gigabytes).
     target_compile_options(dcusa_generated PRIVATE -w -O2 -g0 -ffp-contract=off -fno-fast-math)
 
-    add_executable(dcrun tools/dcrun/main.cpp)
-    target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system)
+    add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm)
+    set_source_files_properties(src/platform/macos/gamecontroller_pad.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system "-framework GameController")
     dcusa_warnings(dcrun)
 endif()
 
@@ -193,6 +196,7 @@ dcusa_test(test_imports)
 dcusa_test(test_threads)
 dcusa_test(test_metal)
 dcusa_test(test_shell)
+dcusa_test(test_pad)
 
 # Prepared MSL compiles with the system Metal device. The shaders come from the
 # player's executable (tools/shaderprep), so the test skips where none exist.

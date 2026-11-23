@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <unordered_map>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -176,7 +177,27 @@ Parsed parse_path(std::string_view in, bool keep_spec) {
     return p;
 }
 
+// The install is read-only, so a lookup there is the same for the whole run.
+// Without this memo every guest open listed each directory on its path; after
+// boot the game opens files often enough that this took most of every frame.
+std::unordered_map<std::string, std::optional<fs::path>> g_install_lookups;
+
+std::optional<fs::path> descend_uncached(const fs::path& root, const std::vector<std::string>& parts);
+
 std::optional<fs::path> descend(const fs::path& root, const std::vector<std::string>& parts) {
+    if (root.empty() || root != g_readable) return descend_uncached(root, parts);
+    std::string key;
+    for (const std::string& part : parts) {
+        for (char ch : part) key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        key.push_back('/');
+    }
+    if (const auto it = g_install_lookups.find(key); it != g_install_lookups.end()) return it->second;
+    auto found = descend_uncached(root, parts);
+    g_install_lookups.emplace(std::move(key), found);
+    return found;
+}
+
+std::optional<fs::path> descend_uncached(const fs::path& root, const std::vector<std::string>& parts) {
     if (root.empty()) return std::nullopt;
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return std::nullopt;
@@ -336,6 +357,7 @@ std::string read_whole(const fs::path& path) {
 
 void set_guest_files(fs::path readable, std::string cwd_relative, fs::path writable) {
     g_readable = std::move(readable);
+    g_install_lookups.clear();
     g_writable = std::move(writable);
     g_cwd.clear();
     Parsed cwd = parse_path(cwd_relative, false);

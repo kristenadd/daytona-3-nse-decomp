@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 
 #include <cstdio>
+#include <deque>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -16,6 +17,7 @@ namespace {
 // Metal buffer indices: constant buffers keep their b# slot (0-13), vertex
 // streams follow.
 constexpr NSUInteger kStreamBase = 16;
+constexpr NSUInteger kArenaSize = 8u << 20;  // upload arena; larger uploads get a buffer of their own
 
 struct Texture {
     id<MTLTexture> tex = nil;
@@ -46,10 +48,20 @@ struct StageUse {
     std::uint32_t textures = 0;  // bit per texture index
     std::uint32_t depth = 0;     // of those, the depth2d ones
     std::uint32_t samplers = 0;
+    // Bytes the function reads from each constant buffer.
+    std::uint32_t buffer_size[kBuffers] = {};
 };
 struct Pipeline {
     id<MTLRenderPipelineState> state = nil;
     StageUse vs, ps;
+};
+
+// A buffer's current bytes: a range of an upload arena, or a buffer of its own
+// for large uploads.
+struct BufferRef {
+    id<MTLBuffer> buf = nil;
+    NSUInteger off = 0, len = 0;
+    const void* contents() const { return static_cast<const std::uint8_t*>(buf.contents) + off; }
 };
 
 struct Device {
@@ -61,14 +73,26 @@ struct Device {
     std::uint32_t enc_dsv = 0;
     std::string shader_dir;
     std::unordered_map<std::uint32_t, Texture> textures;
-    std::unordered_map<std::uint32_t, id<MTLBuffer>> buffers;
+    std::unordered_map<std::uint32_t, BufferRef> buffers;
+    // Upload arenas: buffer updates are copied into the current arena, so a
+    // draw already encoded keeps the bytes it was given. A full arena waits in
+    // `retired` until the command buffer that read it completes, then is reused.
+    id<MTLBuffer> arena = nil;
+    NSUInteger arena_used = 0;
+    std::vector<id<MTLBuffer>> retired, spare_arenas;
+    // Per arena, how many buffers' current bytes are in it. An arena the GPU is
+    // done with is reused only at zero; until then it waits in `parked`.
+    std::unordered_map<void*, unsigned> arena_live;
+    std::vector<id<MTLBuffer>> parked;
+    // Frames committed without waiting, each with the arenas it retired.
+    std::deque<std::pair<id<MTLCommandBuffer>, std::vector<id<MTLBuffer>>>> in_flight;
     std::unordered_map<std::uint32_t, id<MTLSamplerState>> samplers;
     std::unordered_map<std::uint64_t, Program> programs;
     std::unordered_map<std::string, Pipeline> pipelines;
     id<MTLBuffer> zero_buffer = nil;
     id<MTLTexture> zero_texture = nil, zero_depth = nil;
     id<MTLSamplerState> default_sampler = nil;
-    std::unordered_map<std::string, id<MTLDepthStencilState>> depth_states;
+    std::unordered_map<std::uint32_t, id<MTLDepthStencilState>> depth_states;
     std::unordered_map<std::string, bool> reported;
     Stats stats;
 };
@@ -89,9 +113,9 @@ void trace_draw(const DrawState& s, const char* kind, std::uint32_t count, const
     std::fprintf(stderr, " cb %06x %06x: %s", s.ps_cb[0], s.vs_cb[0], result);
     auto b = g_dev->buffers.find(s.ps_cb[0]);
     if (s.ps_cb[0] && b != g_dev->buffers.end()) {
-        const float* f = static_cast<const float*>(b->second.contents);
-        std::fprintf(stderr, " ps_cb[%lu]", static_cast<unsigned long>(b->second.length));
-        for (NSUInteger i = 0; i < std::min<NSUInteger>(24, b->second.length / 4); ++i) std::fprintf(stderr, " %.3g", f[i]);
+        const float* f = static_cast<const float*>(b->second.contents());
+        std::fprintf(stderr, " ps_cb[%lu]", static_cast<unsigned long>(b->second.len));
+        for (NSUInteger i = 0; i < std::min<NSUInteger>(24, b->second.len / 4); ++i) std::fprintf(stderr, " %.3g", f[i]);
     } else if (s.ps_cb[0]) {
         std::fprintf(stderr, " ps_cb never uploaded");
     }
@@ -100,15 +124,18 @@ void trace_draw(const DrawState& s, const char* kind, std::uint32_t count, const
         for (unsigned slot = 1; slot < kBuffers; ++slot) {
             auto cb = g_dev->buffers.find(s.ps_cb[slot]);
             if (!s.ps_cb[slot] || cb == g_dev->buffers.end()) continue;
-            const float* f = static_cast<const float*>(cb->second.contents);
-            std::fprintf(stderr, "    ps_cb%u[%lu]", slot, static_cast<unsigned long>(cb->second.length));
-            for (NSUInteger i = 0; i < std::min<NSUInteger>(128, cb->second.length / 4); ++i) std::fprintf(stderr, " %.3g", f[i]);
+            const float* f = static_cast<const float*>(cb->second.contents());
+            std::fprintf(stderr, "    ps_cb%u[%lu]", slot, static_cast<unsigned long>(cb->second.len));
+            for (NSUInteger i = 0; i < std::min<NSUInteger>(128, cb->second.len / 4); ++i) std::fprintf(stderr, " %.3g", f[i]);
             std::fprintf(stderr, "\n");
         }
     }
 }
 
-bool verbose() { return std::getenv("DCUSA_STATS") != nullptr; }
+bool verbose() {
+    static const bool on = std::getenv("DCUSA_STATS") != nullptr;
+    return on;
+}
 
 void problem(const std::string& what) {
     Device& d = *g_dev;
@@ -312,6 +339,97 @@ void end_pass() {
     }
 }
 
+// A committed frame the GPU has not finished.
+bool gpu_busy() {
+    for (auto& entry : g_dev->in_flight)
+        if (entry.first.status < MTLCommandBufferStatusCompleted) return true;
+    return false;
+}
+
+void check_completed(id<MTLCommandBuffer> cmd) {
+    if (cmd.status == MTLCommandBufferStatusError)
+        problem(std::string("command buffer failed: ") + (cmd.error ? cmd.error.localizedDescription.UTF8String : "?"));
+}
+
+// `size` bytes in the current upload arena (size <= kArenaSize).
+BufferRef arena_alloc(NSUInteger size) {
+    Device& d = *g_dev;
+    // 256 bytes: the strictest offset alignment Metal asks of a constant buffer.
+    NSUInteger off = (d.arena_used + 255) & ~NSUInteger(255);
+    if (d.arena == nil || off + size > kArenaSize) {
+        if (d.arena != nil) d.retired.push_back(d.arena);
+        if (!d.spare_arenas.empty()) {
+            d.arena = d.spare_arenas.back();
+            d.spare_arenas.pop_back();
+        } else {
+            d.arena = [d.dev newBufferWithLength:kArenaSize options:MTLResourceStorageModeShared];
+            d.arena_live[(__bridge void*)d.arena] = 0;
+        }
+        off = 0;
+    }
+    d.arena_used = off + size;
+    return {d.arena, off, size};
+}
+
+// A constant buffer as a function reads it. D3D11 reads zeros past the end of a
+// bound constant buffer; a shorter buffer gets a zero-padded copy, since past
+// its end in an arena is the next upload's data.
+BufferRef constant_view(const BufferRef& b, std::uint32_t wanted) {
+    if (wanted <= b.len || wanted > kArenaSize) return b;
+    BufferRef r = arena_alloc(wanted);
+    auto* dst = static_cast<std::uint8_t*>(const_cast<void*>(r.contents()));
+    std::memcpy(dst, b.contents(), b.len);
+    std::memset(dst + b.len, 0, wanted - b.len);
+    return r;
+}
+
+// The GPU is done with these arenas: reuse the ones no buffer still lives in.
+void release_arenas(const std::vector<id<MTLBuffer>>& arenas) {
+    Device& d = *g_dev;
+    for (id<MTLBuffer> a : arenas) {
+        if (d.arena_live[(__bridge void*)a] == 0) d.spare_arenas.push_back(a);
+        else d.parked.push_back(a);
+    }
+}
+
+// Parked arenas whose last buffer has moved on.
+void unpark_arenas() {
+    Device& d = *g_dev;
+    auto keep = d.parked.begin();
+    for (id<MTLBuffer> a : d.parked) {
+        if (d.arena_live[(__bridge void*)a] == 0) d.spare_arenas.push_back(a);
+        else *keep++ = a;
+    }
+    d.parked.erase(keep, d.parked.end());
+}
+
+// A buffer's bytes are now `r` (or gone, when r.buf is nil).
+void set_buffer(std::uint32_t key, const BufferRef& r) {
+    Device& d = *g_dev;
+    auto it = d.buffers.find(key);
+    if (it != d.buffers.end()) {
+        if (auto live = d.arena_live.find((__bridge void*)it->second.buf); live != d.arena_live.end()) --live->second;
+        if (r.buf == nil) d.buffers.erase(it);
+    }
+    if (r.buf == nil) return;
+    if (auto live = d.arena_live.find((__bridge void*)r.buf); live != d.arena_live.end()) ++live->second;
+    d.buffers[key] = r;
+}
+
+// Every command buffer committed so far has completed (one queue completes in
+// order): every retired arena the GPU read is free of draws.
+void recycle_arenas() {
+    Device& d = *g_dev;
+    for (auto& [cmd, arenas] : d.in_flight) {
+        check_completed(cmd);
+        release_arenas(arenas);
+    }
+    d.in_flight.clear();
+    release_arenas(d.retired);
+    d.retired.clear();
+    unpark_arenas();
+}
+
 id<MTLCommandBuffer> command_buffer() {
     Device& d = *g_dev;
     if (d.cmd == nil) d.cmd = [d.queue commandBuffer];
@@ -374,7 +492,10 @@ void note_use(NSArray<id<MTLBinding>>* bindings, StageUse* use) {
     for (id<MTLBinding> b in bindings) {
         if (!b.used || b.index >= 32) continue;
         const std::uint32_t bit = 1u << b.index;
-        if (b.type == MTLBindingTypeBuffer && b.index < kBuffers) use->buffers |= bit;
+        if (b.type == MTLBindingTypeBuffer && b.index < kBuffers) {
+            use->buffers |= bit;
+            use->buffer_size[b.index] = static_cast<std::uint32_t>(static_cast<id<MTLBufferBinding>>(b).bufferDataSize);
+        }
         if (b.type == MTLBindingTypeTexture) {
             use->textures |= bit;
             if (static_cast<id<MTLTextureBinding>>(b).isDepthTexture) use->depth |= bit;
@@ -385,23 +506,32 @@ void note_use(NSArray<id<MTLBinding>>* bindings, StageUse* use) {
 
 const Pipeline* pipeline(const DrawState& s, Program& vs, Program& ps) {
     Device& d = *g_dev;
-    // The key covers everything the descriptor reads.
-    std::ostringstream key;
-    key << key_text(s.vs) << '/' << key_text(s.ps);
-    for (const VertexElement& e : s.layout)
-        key << '|' << e.semantic << e.index << ':' << e.format << ',' << e.slot << ',' << e.offset << ',' << e.instance
-            << e.step;
-    for (unsigned i = 0; i < kStreams; ++i) key << '|' << s.stride[i];
+    // The key covers everything the descriptor reads, as raw bytes: this runs
+    // on every draw, and formatting it as text was most of the draw's cost.
+    static std::string k;
+    k.clear();
+    auto put = [](std::uint64_t v) { k.append(reinterpret_cast<const char*>(&v), sizeof v); };
+    put(s.vs);
+    put(s.ps);
+    for (const VertexElement& e : s.layout) {
+        k.append(e.semantic);
+        k.push_back('\0');
+        put(std::uint64_t(e.index) | std::uint64_t(e.format) << 32);
+        put(std::uint64_t(e.slot) | std::uint64_t(e.offset) << 32);
+        put(std::uint64_t(e.instance) | std::uint64_t(e.step) << 32);
+    }
+    k.push_back('\1');
+    for (unsigned i = 0; i < kStreams; ++i) put(s.stride[i]);
     for (unsigned i = 0; i < kTargets; ++i) {
         Texture* t = s.rtv[i] ? texture(s.rtv[i]) : nullptr;
-        key << "|t" << (t ? static_cast<unsigned>(t->format) : 0u);
+        put(t ? static_cast<std::uint64_t>(t->format) : 0u);
         const BlendTarget& b = s.blend[i];
-        key << ',' << b.enable << b.src << '.' << b.dst << '.' << b.op << '.' << b.src_alpha << '.' << b.dst_alpha << '.'
-            << b.op_alpha << '.' << b.write_mask;
+        put(std::uint64_t(b.enable) | std::uint64_t(b.src) << 8 | std::uint64_t(b.dst) << 16 | std::uint64_t(b.op) << 24 |
+            std::uint64_t(b.src_alpha) << 32 | std::uint64_t(b.dst_alpha) << 40 | std::uint64_t(b.op_alpha) << 48 |
+            std::uint64_t(b.write_mask) << 56);
     }
     Texture* dt = s.dsv ? texture(s.dsv) : nullptr;
-    key << "|d" << (dt ? static_cast<unsigned>(dt->format) : 0u);
-    const std::string k = key.str();
+    put(dt ? static_cast<std::uint64_t>(dt->format) : 0u);
     if (auto it = d.pipelines.find(k); it != d.pipelines.end()) return it->second.state ? &it->second : nullptr;
 
     MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
@@ -513,7 +643,7 @@ void stand_ins() {
 
 id<MTLDepthStencilState> depth_state(const DepthDesc& dd) {
     Device& d = *g_dev;
-    const std::string k = std::to_string(dd.enable) + std::to_string(dd.write) + std::to_string(dd.func);
+    const std::uint32_t k = std::uint32_t(dd.enable) | std::uint32_t(dd.write) << 1 | dd.func << 2;
     if (auto it = d.depth_states.find(k); it != d.depth_states.end()) return it->second;
     MTLDepthStencilDescriptor* desc = [MTLDepthStencilDescriptor new];
     desc.depthCompareFunction = dd.enable ? compare(dd.func) : MTLCompareFunctionAlways;
@@ -638,15 +768,22 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
     for (unsigned i = 0; i < kBuffers; ++i) {
         const std::uint32_t bit = 1u << i;
         auto vb = d.buffers.find(s.vs_cb[i]);
-        if (s.vs_cb[i] && vb != d.buffers.end()) [e setVertexBuffer:vb->second offset:0 atIndex:i];
+        if (s.vs_cb[i] && vb != d.buffers.end()) {
+            const BufferRef r = constant_view(vb->second, pl->vs.buffer_size[i]);
+            [e setVertexBuffer:r.buf offset:r.off atIndex:i];
+        }
         else if (pl->vs.buffers & bit) [e setVertexBuffer:d.zero_buffer offset:0 atIndex:i];
         auto pb = d.buffers.find(s.ps_cb[i]);
-        if (s.ps_cb[i] && pb != d.buffers.end()) [e setFragmentBuffer:pb->second offset:0 atIndex:i];
+        if (s.ps_cb[i] && pb != d.buffers.end()) {
+            const BufferRef r = constant_view(pb->second, pl->ps.buffer_size[i]);
+            [e setFragmentBuffer:r.buf offset:r.off atIndex:i];
+        }
         else if (pl->ps.buffers & bit) [e setFragmentBuffer:d.zero_buffer offset:0 atIndex:i];
     }
     for (unsigned i = 0; i < kStreams; ++i) {
         auto b = d.buffers.find(s.vb[i]);
-        if (s.vb[i] && b != d.buffers.end()) [e setVertexBuffer:b->second offset:s.voff[i] atIndex:kStreamBase + i];
+        if (s.vb[i] && b != d.buffers.end())
+            [e setVertexBuffer:b->second.buf offset:b->second.off + s.voff[i] atIndex:kStreamBase + i];
     }
     // A texture the function reads as depth2d needs a depth texture, and
     // texture2d a colour one: a mismatch gets the zero stand-in of the right kind.
@@ -765,7 +902,9 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
             destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
     } else {
-        if (g_dev->cmd != nil) t.tex = new_texture(t.desc, t.format, false, static_cast<std::uint32_t>(t.tex.mipmapLevelCount));
+        // A draw still recorded or still on the GPU may read the old bytes.
+        if (g_dev->cmd != nil || gpu_busy())
+            t.tex = new_texture(t.desc, t.format, false, static_cast<std::uint32_t>(t.tex.mipmapLevelCount));
         [t.tex replaceRegion:MTLRegionMake2D(0, 0, t.desc.width, t.desc.height) mipmapLevel:0 withBytes:bytes
                  bytesPerRow:row_pitch];
     }
@@ -784,8 +923,23 @@ void generate_mips(std::uint32_t key) {
 
 void upload_buffer(std::uint32_t key, const std::uint8_t* bytes, std::size_t size) {
     if (!enabled() || bytes == nullptr || size == 0) return;
-    // Always a new buffer: draws already encoded keep the bytes they were given.
-    g_dev->buffers[key] = [g_dev->dev newBufferWithBytes:bytes length:size options:MTLResourceStorageModeShared];
+    // Always new storage: draws already encoded keep the bytes they were given.
+    Device& d = *g_dev;
+    static const bool no_arena = [] {
+        const char* v = std::getenv("DCUSA_ARENA");
+        return v != nullptr && std::strcmp(v, "0") == 0;
+    }();
+    // The first bytes a buffer gets (static meshes, index buffers, constants set
+    // once) take a buffer of their own; only buffers the game updates again
+    // (per-frame constants, dynamic vertices) use the arena.
+    const bool first = d.buffers.find(key) == d.buffers.end();
+    if (no_arena || first || size > kArenaSize / 8) {
+        set_buffer(key, {[d.dev newBufferWithBytes:bytes length:size options:MTLResourceStorageModeShared], 0, size});
+    } else {
+        BufferRef r = arena_alloc(size);
+        std::memcpy(const_cast<void*>(r.contents()), bytes, size);
+        set_buffer(key, r);
+    }
     ++g_dev->stats.uploads;
 }
 
@@ -814,7 +968,7 @@ void create_sampler(std::uint32_t key, const SamplerDesc& desc) {
 void destroy(std::uint32_t key) {
     if (!enabled()) return;
     g_dev->textures.erase(key);
-    g_dev->buffers.erase(key);
+    set_buffer(key, {});
     g_dev->samplers.erase(key);
 }
 
@@ -868,14 +1022,14 @@ void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, 
     const bool wide = s.ib_format == 42;
     const NSUInteger size = wide ? 4 : 2;
     const NSUInteger offset = s.ib_off + static_cast<NSUInteger>(start) * size;
-    if (offset + count * size > ib->second.length) {
+    if (offset + count * size > ib->second.len) {
         ++g_dev->stats.skipped;
         problem("index range outside the index buffer");
         return;
     }
     trace_draw(s, "indexed", count, "drawn");
     [e drawIndexedPrimitives:prim indexCount:count indexType:wide ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
-                 indexBuffer:ib->second indexBufferOffset:offset instanceCount:1 baseVertex:base baseInstance:0];
+                 indexBuffer:ib->second.buf indexBufferOffset:ib->second.off + offset instanceCount:1 baseVertex:base baseInstance:0];
     ++g_dev->stats.draws;
 }
 
@@ -890,6 +1044,28 @@ void draw(const DrawState& s, std::uint32_t count, std::uint32_t start) {
     trace_draw(s, "plain", count, "drawn");
     [e drawPrimitives:prim vertexStart:start vertexCount:count];
     ++g_dev->stats.draws;
+}
+
+void submit() {
+    if (!enabled()) return;
+    Device& d = *g_dev;
+    end_pass();
+    if (d.cmd == nil) return;
+    [d.cmd commit];
+    d.in_flight.emplace_back(d.cmd, std::move(d.retired));
+    d.retired.clear();
+    d.cmd = nil;
+    ++d.stats.frames;
+    // At most two frames queued: the guest runs ahead of the GPU by one frame.
+    while (!d.in_flight.empty()) {
+        auto& [cmd, arenas] = d.in_flight.front();
+        if (d.in_flight.size() > 2) [cmd waitUntilCompleted];
+        else if (cmd.status < MTLCommandBufferStatusCompleted) break;
+        check_completed(cmd);
+        release_arenas(arenas);
+        d.in_flight.pop_front();
+    }
+    unpark_arenas();
 }
 
 bool read_rgba8(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height) {
@@ -910,10 +1086,8 @@ bool read_rgba8(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t
     g_dev->cmd = nil;
     [cmd commit];
     [cmd waitUntilCompleted];
-    if (cmd.status == MTLCommandBufferStatusError) {
-        problem(std::string("command buffer failed: ") +
-                (cmd.error ? cmd.error.localizedDescription.UTF8String : "?"));
-    }
+    check_completed(cmd);
+    recycle_arenas();
     out->resize(row * h);
     std::memcpy(out->data(), staging.contents, row * h);
     if (t->format == MTLPixelFormatBGRA8Unorm || t->format == MTLPixelFormatBGRA8Unorm_sRGB)
@@ -933,6 +1107,7 @@ void scan_targets() {
         [g_dev->cmd commit];
         [g_dev->cmd waitUntilCompleted];
         g_dev->cmd = nil;
+        recycle_arenas();
     }
     for (auto& [key, t] : g_dev->textures) {
         if (t.tex == nil || (t.desc.bind & 0x60u) == 0 || t.depth) continue;
