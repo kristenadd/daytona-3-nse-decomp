@@ -16,11 +16,23 @@ namespace {
 std::span<const GuestEntry> g_entries;
 std::span<const ImportSlot> g_imports;
 
+// Virtual calls go to a few hundred targets over and over; the binary search
+// over ~100,000 entries was 15% of the main thread in a race. A direct-mapped
+// cache in front of it. Guest threads run one at a time, so it needs no lock.
+struct CachedEntry {
+    std::uint32_t address = 0;
+    GuestFn fn = nullptr;
+};
+constexpr std::uint32_t kEntryCacheSize = 1u << 14;
+CachedEntry g_entry_cache[kEntryCacheSize];
+
+
 }
 
 void dispatch_install(std::span<const GuestEntry> entries, std::span<const ImportSlot> imports) {
     g_entries = entries;
     g_imports = imports;
+    for (auto& slot : g_entry_cache) slot = {};
 }
 
 GuestFn find_entry(std::uint32_t target) {
@@ -28,6 +40,18 @@ GuestFn find_entry(std::uint32_t target) {
                                [](const GuestEntry& e, std::uint32_t a) { return e.address < a; });
     return it != g_entries.end() && it->address == target ? it->fn : nullptr;
 }
+
+namespace {
+
+GuestFn find_entry_cached(std::uint32_t target) {
+    CachedEntry& slot = g_entry_cache[(target ^ (target >> 14)) & (kEntryCacheSize - 1)];
+    if (slot.address == target && slot.fn != nullptr) return slot.fn;
+    GuestFn fn = find_entry(target);
+    if (fn != nullptr) slot = {target, fn};
+    return fn;
+}
+
+}  // namespace
 
 void call_indirect(Cpu& c, std::uint32_t target) {
     if (target >= ImportBase) {
@@ -67,7 +91,7 @@ void call_indirect(Cpu& c, std::uint32_t target) {
         c.fpu.at(0) = std::atan2(y, x);
         return;
     }
-    if (GuestFn fn = find_entry(target)) return fn(c);
+    if (GuestFn fn = find_entry_cached(target)) return fn(c);
     fail_closed(Unported::Function, target, "indirect call to an address with no translated function");
 }
 

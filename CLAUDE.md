@@ -36,8 +36,13 @@ agreed to this).
 4. **Movies.** **Verified** (see below). Sofdec plays through the translated
    CRI code. The two AVIs belong to the camera feature (OpenCV capture, off
    by default) and stay fail-closed.
-5. **Frame rate.** Heavy race scenes dip to about 38 fps; needs a GPU-side
-   profile.
+5. **Frame rate.** Improved, not finished. GPU time is at most about 12 ms;
+   the CPU limits. The heaviest dusk seconds of the attract race went from 35
+   to 40 fps to 48 to 52, and the rest runs at 60 (PHASE3, "Frame-rate
+   profile"). The remaining cost is guest code (about 53% of the main thread)
+   and guest threads serialised by the cooperative scheduler. To revisit after
+   items 6 and 7: run independent guest threads in parallel, or speed up the
+   translated code.
 6. **Cabinet settings.** Credits vs free play (`ShellData.ini [Credit]
    Freeplay`), Test / Service buttons and the operator menu.
 7. **Phase 5.** An automated autoplay-and-compare test against the Windows

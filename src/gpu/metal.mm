@@ -5,6 +5,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <cstdio>
+#include <atomic>
 #include <deque>
 #include <cstdlib>
 #include <cstring>
@@ -75,6 +76,20 @@ struct Device {
     id<MTLCommandBuffer> cmd = nil;
     id<MTLRenderCommandEncoder> enc = nil;
     std::uint32_t enc_rtv[kTargets]{};
+    // What is bound on the current encoder, so a draw only sets what changed.
+    // Cleared whenever a new encoder starts.
+    struct Bound {
+        void* pipeline = nullptr;
+        void* depth = nullptr;
+        double viewport[6] = {-1, -1, -1, -1, -1, -1};
+        NSUInteger scissor[4] = {~0ul, ~0ul, ~0ul, ~0ul};
+        int cull = -1, winding = -1;
+        float blend[4] = {-1, -1, -1, -1};
+        void* buf[2][kStreamBase + kStreams] = {};
+        NSUInteger off[2][kStreamBase + kStreams] = {};
+        void* tex[2][kSlots] = {};
+        void* samp[2][kSlots] = {};
+    } bound;
     std::uint8_t enc_mip[kTargets]{};
     std::uint32_t enc_dsv = 0;
     std::string shader_dir;
@@ -516,6 +531,7 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
     }
     if (!any) return false;
     d.enc = [command_buffer() renderCommandEncoderWithDescriptor:pass];
+    d.bound = Device::Bound{};
     std::memcpy(d.enc_rtv, rtv, sizeof d.enc_rtv);
     std::memcpy(d.enc_mip, mip, sizeof d.enc_mip);
     d.enc_dsv = dsv;
@@ -775,12 +791,22 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
         return nil;
     }
     id<MTLRenderCommandEncoder> e = d.enc;
-    [e setRenderPipelineState:state];
+    Device::Bound& b = d.bound;
+    if (b.pipeline != (__bridge void*)state) {
+        [e setRenderPipelineState:state];
+        b.pipeline = (__bridge void*)state;
+    }
     DepthDesc dd = s.depth;
     if (dt_bound(s) == nullptr) dd.enable = false;  // no depth attachment: nothing to test or write
-    [e setDepthStencilState:depth_state(dd)];
-    MTLViewport vp = {s.viewport[0], s.viewport[1], s.viewport[2], s.viewport[3], s.viewport[4], s.viewport[5]};
-    [e setViewport:vp];
+    if (id<MTLDepthStencilState> ds = depth_state(dd); b.depth != (__bridge void*)ds) {
+        [e setDepthStencilState:ds];
+        b.depth = (__bridge void*)ds;
+    }
+    const double vpd[6] = {s.viewport[0], s.viewport[1], s.viewport[2], s.viewport[3], s.viewport[4], s.viewport[5]};
+    if (std::memcmp(vpd, b.viewport, sizeof vpd) != 0) {
+        [e setViewport:MTLViewport{vpd[0], vpd[1], vpd[2], vpd[3], vpd[4], vpd[5]}];
+        std::memcpy(b.viewport, vpd, sizeof vpd);
+    }
     // The target size bounds the scissor; without ScissorEnable it is the whole target.
     Texture* first = nullptr;
     for (unsigned i = 0; i < kTargets && first == nullptr; ++i) first = s.rtv[i] ? texture(s.rtv[i]) : nullptr;
@@ -794,56 +820,94 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
         y1 = std::max(y0, std::min(s.scissor[3], th));
     }
     if (x1 <= x0 || y1 <= y0) return nil;  // nothing passes the scissor
-    [e setScissorRect:MTLScissorRect{static_cast<NSUInteger>(x0), static_cast<NSUInteger>(y0),
-                                     static_cast<NSUInteger>(x1 - x0), static_cast<NSUInteger>(y1 - y0)}];
-    [e setCullMode:s.raster.cull == 2 ? MTLCullModeFront : s.raster.cull == 3 ? MTLCullModeBack : MTLCullModeNone];
-    [e setFrontFacingWinding:s.raster.front_ccw ? MTLWindingCounterClockwise : MTLWindingClockwise];
-    [e setBlendColorRed:s.blend_factor[0] green:s.blend_factor[1] blue:s.blend_factor[2] alpha:s.blend_factor[3]];
-    for (unsigned i = 0; i < kBuffers; ++i) {
-        const std::uint32_t bit = 1u << i;
-        auto vb = d.buffers.find(s.vs_cb[i]);
-        if (s.vs_cb[i] && vb != d.buffers.end()) {
-            const BufferRef r = constant_view(vb->second, pl->vs.buffer_size[i]);
-            [e setVertexBuffer:r.buf offset:r.off atIndex:i];
-        }
-        else if (pl->vs.buffers & bit) [e setVertexBuffer:d.zero_buffer offset:0 atIndex:i];
-        auto pb = d.buffers.find(s.ps_cb[i]);
-        if (s.ps_cb[i] && pb != d.buffers.end()) {
-            const BufferRef r = constant_view(pb->second, pl->ps.buffer_size[i]);
-            [e setFragmentBuffer:r.buf offset:r.off atIndex:i];
-        }
-        else if (pl->ps.buffers & bit) [e setFragmentBuffer:d.zero_buffer offset:0 atIndex:i];
+    const NSUInteger sc[4] = {static_cast<NSUInteger>(x0), static_cast<NSUInteger>(y0), static_cast<NSUInteger>(x1 - x0),
+                              static_cast<NSUInteger>(y1 - y0)};
+    if (std::memcmp(sc, b.scissor, sizeof sc) != 0) {
+        [e setScissorRect:MTLScissorRect{sc[0], sc[1], sc[2], sc[3]}];
+        std::memcpy(b.scissor, sc, sizeof sc);
     }
-    for (unsigned i = 0; i < kStreams; ++i) {
-        auto b = d.buffers.find(s.vb[i]);
-        if (s.vb[i] && b != d.buffers.end())
-            [e setVertexBuffer:b->second.buf offset:b->second.off + s.voff[i] atIndex:kStreamBase + i];
+    const int cull = s.raster.cull == 2 ? int(MTLCullModeFront) : s.raster.cull == 3 ? int(MTLCullModeBack) : int(MTLCullModeNone);
+    if (cull != b.cull) {
+        [e setCullMode:static_cast<MTLCullMode>(cull)];
+        b.cull = cull;
+    }
+    const int winding = s.raster.front_ccw ? int(MTLWindingCounterClockwise) : int(MTLWindingClockwise);
+    if (winding != b.winding) {
+        [e setFrontFacingWinding:static_cast<MTLWinding>(winding)];
+        b.winding = winding;
+    }
+    if (std::memcmp(s.blend_factor, b.blend, sizeof b.blend) != 0) {
+        [e setBlendColorRed:s.blend_factor[0] green:s.blend_factor[1] blue:s.blend_factor[2] alpha:s.blend_factor[3]];
+        std::memcpy(b.blend, s.blend_factor, sizeof b.blend);
+    }
+    // Only what the functions read is bound (the reflection's bitmasks); D3D
+    // slots a shader ignores do not matter.
+    auto set_buffer_at = [&](int stage, unsigned index, id<MTLBuffer> buf, NSUInteger off) {
+        if (b.buf[stage][index] == (__bridge void*)buf && b.off[stage][index] == off) return;
+        if (stage == 0) [e setVertexBuffer:buf offset:off atIndex:index];
+        else [e setFragmentBuffer:buf offset:off atIndex:index];
+        b.buf[stage][index] = (__bridge void*)buf;
+        b.off[stage][index] = off;
+    };
+    const std::uint32_t* cbs[2] = {s.vs_cb, s.ps_cb};
+    const StageUse* uses[2] = {&pl->vs, &pl->ps};
+    for (int stage = 0; stage < 2; ++stage)
+        for (std::uint32_t m = uses[stage]->buffers; m != 0; m &= m - 1) {
+            const unsigned i = static_cast<unsigned>(__builtin_ctz(m));
+            if (i >= kBuffers) break;
+            auto it = cbs[stage][i] ? d.buffers.find(cbs[stage][i]) : d.buffers.end();
+            if (it != d.buffers.end()) {
+                const BufferRef r = constant_view(it->second, uses[stage]->buffer_size[i]);
+                set_buffer_at(stage, i, r.buf, r.off);
+            } else {
+                set_buffer_at(stage, i, d.zero_buffer, 0);
+            }
+        }
+    std::uint32_t streams = 0;
+    for (const VertexElement& el : s.layout)
+        if (el.slot < kStreams) streams |= 1u << el.slot;
+    for (std::uint32_t m = streams; m != 0; m &= m - 1) {
+        const unsigned i = static_cast<unsigned>(__builtin_ctz(m));
+        auto it = s.vb[i] ? d.buffers.find(s.vb[i]) : d.buffers.end();
+        if (it != d.buffers.end()) set_buffer_at(0, kStreamBase + i, it->second.buf, it->second.off + s.voff[i]);
     }
     // A texture the function reads as depth2d needs a depth texture, and
     // texture2d a colour one: a mismatch gets the zero stand-in of the right kind.
     auto pick = [&](std::uint32_t id_, std::uint32_t bit, const StageUse& use, id<MTLTexture> converted,
-                    std::uint32_t first, std::uint32_t count) -> id<MTLTexture> {
+                    std::uint32_t first_mip, std::uint32_t count) -> id<MTLTexture> {
         if (converted != nil) return converted;
         const bool want_depth = (use.depth & bit) != 0;
         Texture* t = id_ ? texture(id_) : nullptr;
-        if (t != nullptr && t->depth == want_depth) return mip_view(*t, first, count);
+        if (t != nullptr && t->depth == want_depth) return mip_view(*t, first_mip, count);
         if (t != nullptr) problem(std::string("texture kind mismatch: ") + (t->depth ? "depth" : "colour") +
                                   " bound where the shader reads " + (want_depth ? "depth" : "colour"));
-        if ((use.textures & bit) == 0) return nil;
         return want_depth ? d.zero_depth : d.zero_texture;
     };
-    for (unsigned i = 0; i < kSlots; ++i) {
-        const std::uint32_t bit = 1u << i;
-        if (id<MTLTexture> t = pick(s.ps_srv[i], bit, pl->ps, color_of_depth[1][i], s.ps_srv_mip[i], s.ps_srv_mips[i]))
-            [e setFragmentTexture:t atIndex:i];
-        if (id<MTLTexture> t = pick(s.vs_srv[i], bit, pl->vs, color_of_depth[0][i], s.vs_srv_mip[i], s.vs_srv_mips[i]))
-            [e setVertexTexture:t atIndex:i];
-        auto ps_s = d.samplers.find(s.ps_samp[i]);
-        if (s.ps_samp[i] && ps_s != d.samplers.end()) [e setFragmentSamplerState:ps_s->second atIndex:i];
-        else if (pl->ps.samplers & bit) [e setFragmentSamplerState:d.default_sampler atIndex:i];
-        auto vs_s = d.samplers.find(s.vs_samp[i]);
-        if (s.vs_samp[i] && vs_s != d.samplers.end()) [e setVertexSamplerState:vs_s->second atIndex:i];
-        else if (pl->vs.samplers & bit) [e setVertexSamplerState:d.default_sampler atIndex:i];
+    const std::uint32_t* srvs[2] = {s.vs_srv, s.ps_srv};
+    const std::uint8_t* mips[2] = {s.vs_srv_mip, s.ps_srv_mip};
+    const std::uint8_t* counts[2] = {s.vs_srv_mips, s.ps_srv_mips};
+    const std::uint32_t* samps[2] = {s.vs_samp, s.ps_samp};
+    for (int stage = 0; stage < 2; ++stage) {
+        for (std::uint32_t m = uses[stage]->textures; m != 0; m &= m - 1) {
+            const unsigned i = static_cast<unsigned>(__builtin_ctz(m));
+            if (i >= kSlots) break;
+            id<MTLTexture> t = pick(srvs[stage][i], 1u << i, *uses[stage], color_of_depth[stage][i], mips[stage][i],
+                                    counts[stage][i]);
+            if (b.tex[stage][i] == (__bridge void*)t) continue;
+            if (stage == 0) [e setVertexTexture:t atIndex:i];
+            else [e setFragmentTexture:t atIndex:i];
+            b.tex[stage][i] = (__bridge void*)t;
+        }
+        for (std::uint32_t m = uses[stage]->samplers; m != 0; m &= m - 1) {
+            const unsigned i = static_cast<unsigned>(__builtin_ctz(m));
+            if (i >= kSlots) break;
+            auto it = samps[stage][i] ? d.samplers.find(samps[stage][i]) : d.samplers.end();
+            id<MTLSamplerState> st = it != d.samplers.end() ? it->second : d.default_sampler;
+            if (b.samp[stage][i] == (__bridge void*)st) continue;
+            if (stage == 0) [e setVertexSamplerState:st atIndex:i];
+            else [e setFragmentSamplerState:st atIndex:i];
+            b.samp[stage][i] = (__bridge void*)st;
+        }
     }
     return e;
 }
@@ -1181,11 +1245,25 @@ void show(std::uint32_t key) {
     [command_buffer() presentDrawable:drawable];
 }
 
+// GPU time per command buffer, accumulated from the completion handler (Metal's
+// thread) and read on the guest's: an atomic sum in microseconds.
+std::atomic<std::uint64_t> g_gpu_us{0};
+std::atomic<unsigned> g_gpu_buffers{0};
+
+void time_gpu(id<MTLCommandBuffer> cmd) {
+    [cmd addCompletedHandler:^(id<MTLCommandBuffer> done) {
+        const double s = done.GPUEndTime - done.GPUStartTime;
+        if (s > 0) g_gpu_us += static_cast<std::uint64_t>(s * 1e6);
+        ++g_gpu_buffers;
+    }];
+}
+
 void submit() {
     if (!enabled()) return;
     Device& d = *g_dev;
     end_pass();
     if (d.cmd == nil) return;
+    time_gpu(d.cmd);
     [d.cmd commit];
     d.in_flight.emplace_back(d.cmd, std::move(d.retired));
     d.retired.clear();
@@ -1316,7 +1394,10 @@ void scan_targets() {
 
 const Stats& stats() {
     static Stats none;
-    return g_dev ? g_dev->stats : none;
+    if (g_dev == nullptr) return none;
+    g_dev->stats.gpu_seconds = static_cast<double>(g_gpu_us.load()) / 1e6;
+    g_dev->stats.gpu_buffers = g_gpu_buffers.load();
+    return g_dev->stats;
 }
 
 }  // namespace dcusa::gpu

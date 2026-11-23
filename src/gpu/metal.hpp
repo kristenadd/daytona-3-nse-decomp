@@ -121,6 +121,10 @@ struct Stats {
     unsigned draws = 0, skipped = 0, pipelines = 0, pipeline_failures = 0, textures = 0, uploads = 0, clears = 0;
     unsigned frames = 0;
     std::string last_problem;
+    // GPU execution time of committed command buffers (GPUEndTime -
+    // GPUStartTime), summed, and how many completed: the frame-rate profile.
+    double gpu_seconds = 0;
+    unsigned gpu_buffers = 0;
 };
 const Stats& stats();
 

@@ -824,12 +824,15 @@ void draw_triangles(std::uint32_t count, std::uint32_t start, std::int32_t base_
     }
 }
 
-void publish_frame(std::uint32_t resource) {
+// `fresh`: the stored bytes hold this frame. With Metal they are only read back
+// for the frames DCUSA_FRAME writes; copying 8 MB of stale bytes every present
+// cost about 2% of the main thread.
+void publish_frame(std::uint32_t resource, bool fresh) {
     const auto it = stored.find(resource);
     if (it == stored.end() || it->second.row < 4 || it->second.bytes.empty()) return;
     g_frame_w = it->second.row / 4u;
     g_frame_h = static_cast<std::uint32_t>(it->second.bytes.size() / it->second.row);
-    g_frame = it->second.bytes;
+    if (fresh) g_frame = it->second.bytes;
     static int seen = 0;
     ++seen;
     if (stats_on() && seen == 1) {
@@ -864,6 +867,28 @@ void publish_frame(std::uint32_t resource) {
                      "present %d draws %u painted %u skipped %u binds %u meshes %u tex %u textures %u target %u back %u rgba %u/%u first %u\n",
                      seen, g_draws, g_drawn, g_skipped, g_binds, g_meshes, pipe.texture, g_textures, resource, g_back_draws,
                      g_rgba_back, g_rgba_draws, g_rgba_tex);
+        // The frame-rate profile since the last report: wall time and GPU time per
+        // frame, and draws per frame.
+        if (gpu::enabled()) {
+            static auto last_t = std::chrono::steady_clock::now();
+            static double last_gpu = 0;
+            static unsigned last_buffers = 0, last_draws = 0;
+            static int last_seen = 0;
+            const gpu::Stats& m = gpu::stats();
+            const auto now = std::chrono::steady_clock::now();
+            const int frames = seen - last_seen;
+            if (frames > 0 && m.gpu_buffers > last_buffers) {
+                const double wall = std::chrono::duration<double, std::milli>(now - last_t).count() / frames;
+                const double gpu_ms = (m.gpu_seconds - last_gpu) * 1000.0 / (m.gpu_buffers - last_buffers);
+                std::fprintf(stderr, "frame %.2f ms (%.1f fps), gpu %.2f ms per frame, %u draws per frame\n", wall,
+                             1000.0 / wall, gpu_ms, (m.draws - last_draws) / static_cast<unsigned>(frames));
+            }
+            last_t = now;
+            last_gpu = m.gpu_seconds;
+            last_buffers = m.gpu_buffers;
+            last_draws = m.draws;
+            last_seen = seen;
+        }
         std::fprintf(stderr, "srvs %u shaders translated %u not %u reflected buffers %u variables %u types %u\n", g_srvs,
                      g_prepared, g_unprepared, g_refl_buffers, g_refl_vars, g_refl_types);
         if (gpu::enabled()) {
@@ -1724,12 +1749,12 @@ void present(Cpu& c) {
         std::uint32_t w = 0, h = 0;
         if (!wanted) gpu::submit();
         else if (gpu::read_rgba8(pipe.backbuffer, &stored[pipe.backbuffer].bytes, &w, &h)) stored[pipe.backbuffer].row = w * 4u;
-        publish_frame(pipe.backbuffer);
+        publish_frame(pipe.backbuffer, wanted);
         if (g_presenter != nullptr) g_presenter->present();
         ret_stdcall(c, kSOk, 12);
         return;
     }
-    publish_frame(pipe.target != 0 ? pipe.target : pipe.backbuffer);
+    publish_frame(pipe.target != 0 ? pipe.target : pipe.backbuffer, true);
     ret_stdcall(c, kSOk, 12);
 }
 
@@ -2008,11 +2033,15 @@ void map_resource(Cpu& c) {
     const std::uint32_t resource = arg(c, 1);
     const std::uint32_t type = arg(c, 3);
     const std::uint32_t out = arg(c, 5);
-    const std::uint64_t page = GuestMemory::PageSize;
-    const std::uint64_t lo = kMapScratch & ~(page - 1);
-    const std::uint64_t hi = (kMapScratch + kMapBytes + page - 1) & ~(page - 1);
-    if (mprotect(c.mem + lo, static_cast<std::size_t>(hi - lo), PROT_READ | PROT_WRITE) != 0)
-        fail_closed(Unported::Service, kMapScratch, "D3D11 map memory");
+    static bool committed = false;  // once: a system call per Map was 3% of a race frame
+    if (!committed) {
+        const std::uint64_t page = GuestMemory::PageSize;
+        const std::uint64_t lo = kMapScratch & ~(page - 1);
+        const std::uint64_t hi = (kMapScratch + kMapBytes + page - 1) & ~(page - 1);
+        if (mprotect(c.mem + lo, static_cast<std::size_t>(hi - lo), PROT_READ | PROT_WRITE) != 0)
+            fail_closed(Unported::Service, kMapScratch, "D3D11 map memory");
+        committed = true;
+    }
     std::uint32_t size = 0;
     std::uint32_t pitch = 0;
     auto it = stored.find(resource);
@@ -2025,8 +2054,12 @@ void map_resource(Cpu& c) {
     if (scratch_used + size > kMapBytes) scratch_used = 0;
     const std::uint32_t at = kMapScratch + scratch_used;
     if (size != 0) {
-        if (it != stored.end()) std::memcpy(c.mem + at, it->second.bytes.data(), size);
-        else std::memset(c.mem + at, 0, size);
+        // D3D11_MAP_WRITE_DISCARD (4) leaves the contents undefined, and the game
+        // rewrites them, so only the other kinds copy the current bytes in.
+        if (type != 4u) {
+            if (it != stored.end()) std::memcpy(c.mem + at, it->second.bytes.data(), size);
+            else std::memset(c.mem + at, 0, size);
+        }
         scratch_used += (size + 15u) & ~15u;
     }
     live_maps.push_back(LiveMap{resource, at, size, type != 1u});

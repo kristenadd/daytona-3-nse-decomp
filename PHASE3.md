@@ -212,8 +212,30 @@ machine's saved times. The "YOU" box on the live camera card is black there
 (no camera) and shows the default helmet here.
 
 A 10-minute attract run now completes without a fail-closed stop. Boot reaches
-attract in about 7,500 presents (125 s at 60 Hz). The race runs at 50 to 60
-frames a second, dropping to about 38 in its heaviest scenes, on an M3 Max.
+attract in about 7,500 presents (125 s at 60 Hz).
+
+**Frame-rate profile.** `DCUSA_STATS` now prints, per report interval, the
+wall time per frame, the GPU time per frame (from each command buffer's
+`GPUStartTime` / `GPUEndTime`), and draws per frame. The GPU never limits the
+frame rate: at most about 12 ms in the heaviest dusk scenes (1,500 to 1,750
+draws). The CPU does, and fixing it took four changes:
+
+- Indirect and virtual calls did a binary search over about 107,000 entries,
+  15% of the main thread. A 16,384-entry direct-mapped cache now sits in front
+  of it (`find_entry_cached`).
+- Each draw bound every constant buffer, texture and sampler slot. Now only the
+  slots the functions read are bound (the reflection bitmasks), and nothing
+  already bound on the encoder is set again (`Device::bound`).
+- `publish_frame` copied the 8 MB back buffer every present. It now copies
+  only on frames that are read back.
+- `Map` called `mprotect` on every map, and copied old contents in for
+  `WRITE_DISCARD`. Now the region is committed once and discards skip the copy.
+
+The heaviest dusk seconds of the attract race went from 24 to 29 ms to 19 to
+21 ms (35 to 40 fps became 48 to 52). The rest of the loop runs at 60. What
+remains on the main thread is guest code itself (about 53%), plus guest threads
+that run one at a time: another thread's game work (`0x426890`) waits its turn
+instead of running on another core.
 
 `dcrun --content <folder>` mounts that install and stays in the frame loop.
 `DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
