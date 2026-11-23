@@ -459,6 +459,12 @@ Together the first two took about 7% off a race frame.
 
 These two took about 8% off a race frame.
 
+- `SYNC_TO(target)` before a direct call becomes `SYNC_R()` (registers only)
+  when the target was translated in this run and reads no flags on entry,
+  `SYNC()` otherwise; left unresolved (semantics tests) it is `SYNC()`. Part 0 of
+  a function that reads no flags on entry starts with `PROLOGUE_NF()`. Neutral
+  in measurement.
+
 ### 7. Static initializers
 
 The restricted evaluator is dropped. Initializers run translated, through the CRT's own walk.

@@ -310,6 +310,35 @@ heavy intervals from 17.3 to 15.7 ms mean (worst 18.6 to 16.9). Those heavy
 seconds now fit in 16.7 ms on the Mac; for the phone and headset budgets the
 guest's per-draw cost is still the limit.
 
+**Per-draw CPU cost**, a third pass. In a heavy scene, of the main thread:
+the engine's render walk (`0x43FA90`) 71%, its draw-list walk (`0x733490`,
+`0x76D510`) 42%, the draw call itself (`0x6CFDB0`) 23%; and 9% in the
+cooperative scheduler.
+
+- Preemption (a 2 ms timer, honoured at loop back-edges) gave every other
+  guest thread a turn, and nearly all of them sit in waits: each turn was a
+  condition-variable hand-off to a thread that found nothing to do. Now a
+  thread blocked in a wait is parked (`pick_after` in threads.cpp) until
+  something that can end a wait happens (event set, semaphore or mutex
+  released, critical section left, timer fired, thread finished or resumed,
+  handle closed: `g_version`) or its timeout comes, with a turn at least every
+  20 ms as a safety net. The scheduler's share went from 9% to 3.5%; race
+  frames 10.6 to 10.1 ms mean, heavy 15.4 to 15.0 ms. Attract audio recorded
+  with and without it has the same levels and the same gaps.
+- A direct call writes the flags back only when the callee reads flags on
+  entry (`SYNC_TO`, resolved when the shards are written), and a function
+  that reads none on entry does not load them (`PROLOGUE_NF`). Measured as
+  neutral; kept, since it is six stores per call and six loads per entry less.
+- Profile-guided optimisation of the generated code and runtime
+  (`DCUSA_PGO=generate`, a run with `DCUSA_EXIT_AT=<presents>` and
+  `LLVM_PROFILE_FILE`, `llvm-profdata merge`, then `DCUSA_PGO=<profdata>`):
+  heavy 14.7 vs 14.6 ms, race 10.4 vs 10.3 ms. Within noise, so not used by
+  default; the option stays.
+- Guest code is now 82% of the main thread in a heavy scene, spread over the
+  engine's functions with no single hot spot; host D3D handling is 7%,
+  dispatch 2%. What is left is the translated code doing the engine's work:
+  about 6 us per draw.
+
 `dcrun --content <folder>` mounts that install and stays in the frame loop.
 `DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
 `DCUSA_FRAME=<path>` writes present 1, 30, and every `DCUSA_EVERY`th as PPM.

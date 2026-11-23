@@ -1715,11 +1715,31 @@ void selftest_math(Cpu& c) {
     }
 }
 
+#if DCUSA_PGO_GENERATE
+extern "C" int __llvm_profile_write_file(void);  // the profile runtime's
+#endif
+
 void present(Cpu& c) {
     selftest_math(c);
     {
         static int all_presents = 0;
         print_watch(c.mem, ++all_presents);
+        // DCUSA_EXIT_AT=<n>: a clean exit after n presents (atexit handlers run,
+        // so an instrumented build writes its profile).
+        static const int exit_at = [] {
+            const char* v = std::getenv("DCUSA_EXIT_AT");
+            return v ? std::atoi(v) : 0;
+        }();
+        if (exit_at > 0 && all_presents >= exit_at) {
+            std::fprintf(stderr, "DCUSA_EXIT_AT: exit after %d presents\n", all_presents);
+            // Not std::exit: static destructors would run under the other
+            // threads. An instrumented build's profile is written first.
+#if DCUSA_PGO_GENERATE
+            __llvm_profile_write_file();
+#endif
+            std::fflush(nullptr);
+            std::_Exit(0);
+        }
         print_pad_trace(c.mem, all_presents);
     }
     if (static bool shown = false; !shown && stats_on()) {

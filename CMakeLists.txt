@@ -167,6 +167,20 @@ if(dcusa_generated_dir)
     # Same floating-point rules as the runtime; no warnings (the code mirrors the
     # guest instruction by instruction) and no debug info (it would run to gigabytes).
     target_compile_options(dcusa_generated PRIVATE -w -O2 -g0 -ffp-contract=off -fno-fast-math)
+    # Profile-guided optimisation of the translated code and the runtime (PHASE3
+    # "Frame-rate profile"): DCUSA_PGO=generate builds an instrumented dcrun, whose
+    # run writes LLVM_PROFILE_FILE; DCUSA_PGO=<merged .profdata> builds with it.
+    set(DCUSA_PGO "" CACHE STRING "generate, or a merged .profdata to optimise with")
+    if(DCUSA_PGO STREQUAL "generate")
+        target_compile_options(dcusa_generated PRIVATE -fprofile-instr-generate)
+        target_compile_options(dcusa_recomp PRIVATE -fprofile-instr-generate)
+        target_compile_definitions(dcusa_recomp PRIVATE DCUSA_PGO_GENERATE=1)
+        target_link_options(dcusa_generated INTERFACE -fprofile-instr-generate)
+    elseif(DCUSA_PGO)
+        target_compile_options(dcusa_generated PRIVATE "-fprofile-instr-use=${DCUSA_PGO}")
+        target_compile_options(dcusa_recomp PRIVATE "-fprofile-instr-use=${DCUSA_PGO}" -Wno-profile-instr-unprofiled
+                               -Wno-profile-instr-out-of-date)
+    endif()
 
     add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm
                          src/platform/macos/game_window.mm src/platform/macos/core_audio_output.mm)

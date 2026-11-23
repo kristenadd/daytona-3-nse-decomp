@@ -68,6 +68,9 @@ bool sched_reset_event(std::uint32_t handle);
 bool sched_release_semaphore(std::uint32_t handle, std::uint32_t count, std::uint32_t* previous);
 bool sched_release_mutex(Cpu& c, std::uint32_t handle);
 bool sched_is_object(std::uint32_t handle);
+// Something a sched_block_until condition reads changed (a critical section was
+// left): threads parked on it get a turn again.
+void sched_wake_waiters();
 bool sched_close(std::uint32_t handle);
 
 // timeSetEvent with an event callback: `event` is set every `delay` ms (once

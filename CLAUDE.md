@@ -37,13 +37,16 @@ agreed to this).
    Decoding it is not done.
 5. **Frame rate.** Mostly done; the target is now iOS and Vision Pro, so
    lower is still better. Metal encodes on a render thread, the translator
-   inlines small functions and the cookie check, and clears fold into the
-   next pass (PHASE3, "Frame-rate profile"). Unthrottled, race frames are
-   about 10.5 ms mean, and the heaviest scenes (2,300+ draws) 15.7 ms, down
-   from 17.3, within 60 Hz. Those are CPU-bound: the engine's per-draw guest
-   code, about 6 us a draw. A heavy frame is about 7 ms of GPU time on this
-   Mac (`DCUSA_GPU_PASSES`). Left: per-draw guest cost, and one-second stalls
-   at scene changes (21 to 28 ms, GPU idle, not profiled).
+   inlines small functions and the cookie check, clears fold into the next
+   pass, and waiting guest threads are parked instead of woken at every
+   preemption (PHASE3, "Frame-rate profile"). Unthrottled, race frames are
+   about 10.1 ms mean and the heaviest scenes (2,300+ draws) about 15 ms,
+   within 60 Hz. Those are CPU-bound: the engine's translated per-draw code
+   (82% of the main thread, about 6 us a draw, no single hot spot). PGO was
+   tried and gained nothing measurable. A heavy frame is about 7 ms of GPU
+   time on this Mac (`DCUSA_GPU_PASSES`). Left: per-draw guest cost needs a
+   different approach (a native engine draw path, or translator register
+   allocation across calls), and one-second stalls at scene changes.
 6. **Cabinet settings.** **Verified** for credits (see below). Operator
    settings go through `dcrun --shell-setting Section.Key=Value`, since the
    operator menu is the shell's, and in this release the game has no input path

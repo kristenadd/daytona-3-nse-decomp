@@ -439,6 +439,7 @@ void LeaveCriticalSection(Cpu& c) {
         st32(c.mem, cs + 8, 0);
         st32(c.mem, cs + 12, 0);
         st32(c.mem, cs + 4, 0xFFFFFFFFu);
+        sched_wake_waiters();
     }
     ret_stdcall(c, 0, 4);
 }
@@ -452,6 +453,7 @@ void TryEnterCriticalSection(Cpu& c) {
 
 void DeleteCriticalSection(Cpu& c) {
     std::memset(c.mem + arg(c, 0), 0, 24);
+    sched_wake_waiters();
     ret_stdcall(c, 0, 4);
 }
 

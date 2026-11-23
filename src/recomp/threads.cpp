@@ -99,6 +99,10 @@ struct Slot {
     bool started = false;
     bool terminate = false;
     bool waiting_forever = false;
+    // Parked: blocked in a wait that cannot have ended (see pick_after).
+    bool parked = false;
+    std::uint64_t parked_version = 0;
+    Clock::time_point wake_at;
     std::uint32_t suspend = 0;
     std::uint32_t id = 0;
     std::uint32_t handle = 0;
@@ -130,6 +134,15 @@ struct Sched {
     std::exception_ptr failure;
     bool ready = false;
 };
+
+// Bumped by everything that can end a wait: an event set, a semaphore or mutex
+// released, a critical section left, a timer fired, a thread finished, resumed
+// or terminated, a handle closed. A parked thread is passed over until it
+// changes or the thread's timeout comes.
+std::uint64_t g_version = 0;
+// Even then a parked thread gets a turn this often, so a release that does not
+// bump g_version delays the waiter instead of deadlocking it.
+constexpr auto kParkedTurn = std::chrono::milliseconds(20);
 
 // Never destroyed: host threads parked on the condition variable outlive main.
 Sched& S() {
@@ -187,7 +200,10 @@ void fire_timers() {
             ++i;
             continue;
         }
-        if (Object* e = object(t.event); e && e->kind == Kind::Event) e->signaled = true;
+        if (Object* e = object(t.event); e && e->kind == Kind::Event) {
+            e->signaled = true;
+            ++g_version;
+        }
         if (!t.periodic) {
             s.timers.erase(s.timers.begin() + static_cast<std::ptrdiff_t>(i));
             continue;
@@ -228,8 +244,21 @@ void switch_to(unsigned me, unsigned next) {
     resumed(me);
 }
 
+// The next thread to run after `me`. Threads parked in a wait nothing has
+// touched are passed over: preemption at loop back-edges (every 2 ms) used to
+// wake each of the game's dozen sleeping threads in turn, about a tenth of the
+// main thread in a race.
 unsigned pick_after(unsigned me) {
+    const auto now = Clock::now();
     for (unsigned k = 1; k <= kSlots; ++k) {
+        const unsigned i = (me + k) % kSlots;
+        if (!runnable(i)) continue;
+        const Slot& t = S().slots[i];
+        if (i != me && t.parked && t.parked_version == g_version && now < t.wake_at) continue;
+        return i;
+    }
+    if (runnable(me)) return me;
+    for (unsigned k = 1; k <= kSlots; ++k) {  // `me` cannot go on: any runnable thread
         const unsigned i = (me + k) % kSlots;
         if (runnable(i)) return i;
     }
@@ -282,7 +311,13 @@ template <class Ready> bool block(Cpu& c, Ready ready, std::uint32_t ms, bool co
             std::this_thread::sleep_for(std::chrono::microseconds(500));
             s.idle = 0;
         }
+        Slot& self = s.slots[me];
+        self.parked = true;
+        self.parked_version = g_version;
+        const auto turn = Clock::now() + kParkedTurn;
+        self.wake_at = ms != kInfinite && deadline < turn ? deadline : turn;
         switch_to(me, pick_after(me));
+        self.parked = false;
     }
 }
 
@@ -331,6 +366,7 @@ void finish(unsigned slot, std::uint32_t code) {
             o.owner = 0;
             o.recursion = 0;
         }
+    ++g_version;
     if (stats()) std::fprintf(stderr, "thread %u (%08X) exit %u\n", t.id, t.start, code);
     t.used = false;
     t.started = false;
@@ -469,6 +505,7 @@ std::uint32_t sched_resume(std::uint32_t handle) {
     Slot& t = S().slots[o->slot];
     const std::uint32_t previous = t.suspend;
     if (t.suspend > 0) --t.suspend;
+    ++g_version;
     return previous;
 }
 
@@ -501,6 +538,8 @@ bool sched_terminate(Cpu& c, std::uint32_t handle, std::uint32_t code) {
     t.terminate = true;
     t.terminate_code = code;
     t.suspend = 0;
+    t.parked = false;
+    ++g_version;
     return true;
 }
 
@@ -634,6 +673,7 @@ bool sched_set_event(std::uint32_t handle) {
     Object* o = object(handle);
     if (!o || o->kind != Kind::Event) return false;
     o->signaled = true;
+    ++g_version;
     return true;
 }
 
@@ -650,6 +690,7 @@ bool sched_release_semaphore(std::uint32_t handle, std::uint32_t count, std::uin
     if (previous) *previous = o->count;
     if (std::uint64_t(o->count) + count > o->maximum) return false;
     o->count += count;
+    ++g_version;
     return true;
 }
 
@@ -658,10 +699,13 @@ bool sched_release_mutex(Cpu& c, std::uint32_t handle) {
     Object* o = object(handle);
     if (!o || o->kind != Kind::Mutex || o->owner != self_id()) return false;
     if (--o->recursion == 0) o->owner = 0;
+    ++g_version;
     return true;
 }
 
 bool sched_is_object(std::uint32_t handle) { return object(handle) != nullptr; }
+
+void sched_wake_waiters() { ++g_version; }
 
 bool sched_close(std::uint32_t handle) {
     Object* o = object(handle);
@@ -669,6 +713,7 @@ bool sched_close(std::uint32_t handle) {
     // A running thread keeps its object; closing the handle does not stop it.
     if (o->kind == Kind::Thread && !o->finished) return true;
     *o = Object{};
+    ++g_version;
     return true;
 }
 

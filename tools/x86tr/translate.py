@@ -227,6 +227,13 @@ class FunctionTranslator(X87Mixin, SseMixin):
         return True
 
     # ---------------- control flow ----------------
+    def sync_to(self, target):
+        """The write-back before a direct call to `target`. SYNC_TO is resolved
+        when the shards are written (resolve_sync_to): without the flags unless
+        the target reads flags on entry. Code compiled for x86 passes no flags
+        into a call, so this drops six stores per call."""
+        return 'SYNC_TO(%s)' % h(target) if target in self.tr.entries else 'SYNC()'
+
     def call_expr(self, target):
         if target in self.tr.entries:
             self.refs.add(target)
@@ -301,7 +308,9 @@ class FunctionTranslator(X87Mixin, SseMixin):
         for p in range(len(bounds) - 1):
             lines.append(('void %s(Cpu& c) {' % name) if p == 0 else ('static void %s_p%d(Cpu& c) {' % (name, p)))
             start = len(lines)
-            lines.append('    PROLOGUE();')
+            # A function that reads no flags before writing them need not load them.
+            no_flags = p == 0 and not (self.live_in.get(self.entry, F.ALL) & F.ALL)
+            lines.append('    PROLOGUE_NF();' if no_flags else '    PROLOGUE();')
             if p == 0:
                 lines.extend('    ' + site[0] for site_va, site in sorted(self.site_overrides.items())
                              if site[0] and site_va in self.insns)
@@ -318,7 +327,7 @@ class FunctionTranslator(X87Mixin, SseMixin):
         return '\n'.join(lines)
 
     XMM_REF = re.compile(r'\bxm([0-7])_')
-    SYNC_CALL = re.compile(r'\b(SYNC|SYNC_R|RELOAD)\(\)')
+    SYNC_CALL = re.compile(r'\b(SYNC|SYNC_R|RELOAD)\(\)|\bSYNC_TO\(0x[0-9A-F]+u\)')
 
     def keep_xmm_local(self, body):
         """The xmm registers a function uses live in locals, like the GPRs.
@@ -336,8 +345,8 @@ class FunctionTranslator(X87Mixin, SseMixin):
         out.append('#define XS_() (%s)' % ', '.join('c.xmm[%d] = xm%d_' % (n, n) for n in used))
         out.append('#define XR_() (%s)' % ', '.join('xm%d_ = c.xmm[%d]' % (n, n) for n in used))
         for line in body[1:]:
-            out.append(self.SYNC_CALL.sub(lambda m: '(%s(), %s())' % (m.group(1), 'XR_' if m.group(1) == 'RELOAD' else 'XS_'),
-                                          line))
+            out.append(self.SYNC_CALL.sub(lambda m: '(%s, %s())' % (
+                m.group(0), 'XR_' if m.group(1) == 'RELOAD' else 'XS_'), line))
         out.append('#undef XS_')
         out.append('#undef XR_')
         return out
@@ -1229,10 +1238,10 @@ class FunctionTranslator(X87Mixin, SseMixin):
                 # register, so the call's SYNC / RELOAD (and the callee's own)
                 # are skipped. The flags it sets are dead here; the return
                 # address stays below esp as the real call leaves it.
-                s.append('if (ecx == ld32(M, %s)) { esp += 4; } else { SYNC(); %s; RELOAD(); }' % (
-                    h(cookie[0]), self.call_expr(t)))
+                s.append('if (ecx == ld32(M, %s)) { esp += 4; } else { %s; %s; RELOAD(); }' % (
+                    h(cookie[0]), self.sync_to(t), self.call_expr(t)))
             else:
-                s.append('SYNC(); %s; RELOAD();' % self.call_expr(t))
+                s.append('%s; %s; RELOAD();' % (self.sync_to(t), self.call_expr(t)))
         elif self.inline_import(insn, op, ret, s):
             pass
         else:
@@ -1404,6 +1413,7 @@ class Translator:
         self.flags_live_at_exit = flags_live_at_exit
         self.flags_returned = set()  # see find_flag_returning
         self.inline_cache = {}
+        self.entry_reads_flags = set()
         self.imports = image.imports()
         self.functions = {fn['entry']: fn for fn in data['functions']}
         self.entries = set(self.functions)
@@ -1456,7 +1466,20 @@ class Translator:
     def translate(self, entry):
         fn = self.walker.walk(entry)
         ft = FunctionTranslator(self, fn)
-        return ft.translate(), ft.refs, len(fn.insns), ft.trapped
+        text = ft.translate()
+        if ft.live_in.get(entry, F.ALL) & F.ALL:
+            self.entry_reads_flags.add(entry)
+        return text, ft.refs, len(fn.insns), ft.trapped
+
+    SYNC_TO = re.compile(r'\bSYNC_TO\(0x([0-9A-F]+)u\)')
+
+    def resolve_sync_to(self, text, translated):
+        """SYNC_TO(target) becomes SYNC_R() when `target` is a function this run
+        translated and its entry reads no flags; SYNC() otherwise."""
+        def one(m):
+            t = int(m.group(1), 16)
+            return 'SYNC_R()' if t in translated and t not in self.entry_reads_flags else 'SYNC()'
+        return self.SYNC_TO.sub(one, text)
 
 
 def find_flag_returning(tr, entries):
@@ -1589,6 +1612,7 @@ def main():
         return start
 
     stubs = []
+    translated_set = set()
     trap_reasons = collections.Counter()
     trap_samples = collections.defaultdict(list)
     trap_sites = []
@@ -1622,6 +1646,7 @@ def main():
             failed += 1
             continue
         bodies[start].append(text)
+        translated_set.add(entry)
         refs_of[start] |= refs
         translated += 1
         insns_done += n
@@ -1633,8 +1658,8 @@ def main():
             continue
         name = 'tr_%08X.cpp' % start
         decls = ['void f_%08X(Cpu&);' % r for r in sorted(refs_of[start])]
-        write_if_changed(os.path.join(args.out, name),
-                         HEADER + '\n'.join(decls) + '\n\n' + '\n\n'.join(bodies[start]) + '\n')
+        body = tr.resolve_sync_to('\n\n'.join(bodies[start]), translated_set)
+        write_if_changed(os.path.join(args.out, name), HEADER + '\n'.join(decls) + '\n\n' + body + '\n')
         shards.append(name)
     keep = set(shards)
     for name in os.listdir(args.out):

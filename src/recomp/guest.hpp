@@ -225,6 +225,17 @@ using namespace dcusa::recomp;
     std::uint8_t cf = c.cf, pf = c.pf, af = c.af, zf = c.zf, sf = c.sf, of = c.of;                   \
     std::uint32_t ta = 0, tb = 0;                                                                    \
     (void)M; (void)ta; (void)tb
+// PROLOGUE for a function that reads no flags before writing them.
+#define PROLOGUE_NF()                                                                                \
+    std::uint8_t* const M = c.mem;                                                                   \
+    std::uint32_t eax = c.r[0], ecx = c.r[1], edx = c.r[2], ebx = c.r[3], esp = c.r[4], ebp = c.r[5], \
+                  esi = c.r[6], edi = c.r[7];                                                        \
+    std::uint8_t cf = 0, pf = 0, af = 0, zf = 0, sf = 0, of = 0;                                     \
+    std::uint32_t ta = 0, tb = 0;                                                                    \
+    (void)M; (void)ta; (void)tb; (void)cf; (void)pf; (void)af; (void)zf; (void)sf; (void)of
+// The write-back before a direct call. translate.py replaces each with SYNC_R
+// or SYNC; left unresolved (the semantics tests) it is the full SYNC.
+#define SYNC_TO(target) SYNC()
 #define GUEST_PREEMPT()                                                                      \
     do {                                                                                     \
         if (__builtin_expect(::dcusa::recomp::g_preempt.load(std::memory_order_relaxed), 0)) \
