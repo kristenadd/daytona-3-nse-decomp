@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "audio/ds_mixer.hpp"
@@ -141,6 +142,7 @@ struct ShaderObjects {
     std::uint32_t vs = 0, ps = 0;
 } bound_shaders;
 std::unordered_map<std::uint32_t, gpu::BlendTarget[gpu::kTargets]> blend_states;
+std::unordered_set<std::uint32_t> alpha_to_coverage_states;  // blend states with AlphaToCoverageEnable
 std::unordered_map<std::uint32_t, gpu::DepthDesc> depth_states;
 std::unordered_map<std::uint32_t, gpu::RasterDesc> raster_states;
 std::unordered_map<std::uint32_t, std::vector<gpu::VertexElement>> gpu_layouts;
@@ -1263,6 +1265,7 @@ void create_blend(Cpu& c) {
     const std::uint32_t out = arg(c, 2);
     const std::uint32_t obj = spawn(c.mem, Blend);
     if (desc != 0) {
+        if (ld32(c.mem, desc) != 0) alpha_to_coverage_states.insert(obj);
         const bool independent = ld32(c.mem, desc + 4) != 0;
         for (unsigned i = 0; i < gpu::kTargets; ++i) {
             const std::uint32_t at = desc + 8 + 32 * (independent ? i : 0u);
@@ -2339,6 +2342,7 @@ void vs_set_samplers(Cpu& c) {                                     // +0x68  0x6
 void om_set_blend(Cpu& c) {                                        // +0x8C  0x6D06E6, state, factor, mask
     const auto it = blend_states.find(arg(c, 1));
     for (unsigned i = 0; i < gpu::kTargets; ++i) gs.blend[i] = it != blend_states.end() ? it->second[i] : gpu::BlendTarget{};
+    gs.alpha_to_coverage = alpha_to_coverage_states.count(arg(c, 1)) != 0;
     if (arg(c, 2) != 0) std::memcpy(gs.blend_factor, c.mem + arg(c, 2), 16);
     else for (float& f : gs.blend_factor) f = 1;
     ret_stdcall(c, kSOk, 16);
@@ -3146,6 +3150,7 @@ void destroy(std::uint8_t* mem, std::uint32_t obj) {
     layouts.erase(obj);
     gpu_layouts.erase(obj);
     blend_states.erase(obj);
+    alpha_to_coverage_states.erase(obj);
     depth_states.erase(obj);
     raster_states.erase(obj);
     shader_code.erase(obj);

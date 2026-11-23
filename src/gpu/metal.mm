@@ -836,6 +836,7 @@ const Pipeline* pipeline(const DrawState& s, Program& vs, Program& ps) {
     }
     Texture* dt = s.dsv ? texture(s.dsv) : nullptr;
     put(dt ? static_cast<std::uint64_t>(dt->format) : 0u);
+    put(s.alpha_to_coverage ? 1u : 0u);
     if (auto it = d.pipelines.find(k); it != d.pipelines.end()) return it->second.state ? &it->second : nullptr;
 
     MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
@@ -889,6 +890,9 @@ const Pipeline* pipeline(const DrawState& s, Program& vs, Program& ps) {
         if (b.write_mask & 8) m |= MTLColorWriteMaskAlpha;
         ca.writeMask = m;
     }
+    // With one sample a pixel, alpha to coverage is an alpha test at 0.5, as in
+    // D3D11: the leaves of the trees are cut-out cards that relied on it.
+    pd.alphaToCoverageEnabled = s.alpha_to_coverage;
     if (dt != nullptr && dt->depth) {
         pd.depthAttachmentPixelFormat = dt->format;
         if (has_stencil(dt->format)) pd.stencilAttachmentPixelFormat = dt->format;

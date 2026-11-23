@@ -91,6 +91,7 @@ struct DrawState {
     float viewport[6] = {0, 0, 1920, 1080, 0, 1};
     int scissor[4] = {0, 0, 1920, 1080};
     BlendTarget blend[kTargets];
+    bool alpha_to_coverage = false;  // D3D11_BLEND_DESC.AlphaToCoverageEnable: foliage cut-outs
     float blend_factor[4] = {1, 1, 1, 1};
     DepthDesc depth;
     RasterDesc raster;

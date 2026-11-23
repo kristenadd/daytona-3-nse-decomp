@@ -230,7 +230,10 @@ cube. 2D textures created with initial data now get all their mip levels
 too (they used to get level 0 only, so distant fences, signs and markings
 shimmered with moire); `UpdateSubresource` of a level other than 0 goes
 straight to that level, and a texture replaced while the GPU still reads it
-carries its smaller levels over.
+carries its smaller levels over. Blend states with `AlphaToCoverageEnable`
+(eight of them, the foliage cards among them) now turn on the pipeline's
+alpha to coverage; with one sample a pixel that is an alpha test at 0.5, as in
+D3D11. Without it the trees were solid green cards.
 `DCUSA_FRAME_RANGE=<a>-<b>` writes every present in a range, and
 `DCUSA_METAL_TRACE_FRAMES=<k>` traces k frames, which is how it was found.
 
