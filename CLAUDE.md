@@ -30,19 +30,16 @@ agreed to this).
    stereo buffer; native decoding was not needed. **Verified** for music (see
    below). Voice lines in a race come through CRI Atom (item 3).
 3. **CSB sound effects.** `SE.csb` cues play through the translated CRI Atom
-   mixer into the game's 5.1 stream. Status: working by measurement (sane
-   levels, no NaN, no clipping, race clip sent for a listening check). Not
-   yet checked by ear: engine pitch with RPM, tyres, crashes and announcer.
+   mixer into the game's 5.1 stream. **Verified** (see below).
 4. **Movies.** **Verified** (see below). Sofdec plays through the translated
    CRI code. The two AVIs belong to the camera feature (OpenCV capture, off
    by default) and stay fail-closed.
-5. **Frame rate.** Improved, not finished. GPU time is at most about 12 ms;
-   the CPU limits. The heaviest dusk seconds of the attract race went from 35
-   to 40 fps to 48 to 52, and the rest runs at 60 (PHASE3, "Frame-rate
-   profile"). The remaining cost is guest code (about 53% of the main thread)
-   and guest threads serialised by the cooperative scheduler. To revisit after
-   items 6 and 7: run independent guest threads in parallel, or speed up the
-   translated code.
+5. **Frame rate.** Mostly done; two cases left. Metal encoding now runs on
+   a render thread and the translator emits faster code. The unthrottled race
+   frame went from 15.0 to 9.7 ms mean (PHASE3, "Frame-rate profile"). Paced,
+   370 of 383 one-second race intervals hold 58 to 60 fps. Left: the heaviest
+   scenes (2,300+ draws) are GPU-bound at 15 to 16 ms (54 to 57 fps), and
+   scene changes stall for a second at 21 to 28 ms with the GPU idle.
 6. **Cabinet settings.** **Verified** for credits (see below). Operator
    settings go through `dcrun --shell-setting Section.Key=Value`, since the
    operator menu is the shell's, and in this release the game has no input path
@@ -68,6 +65,9 @@ agreed to this).
   and PHASE2 have the details.
 - **ADX music** (item 2). The attract music buffer, set against the decoded
   `d1a_bgm08_adv.adx`: correlation 0.92, level within 0.3 dB.
+- **CSB sound effects** (item 3). Race levels about -14 dBFS RMS, no NaN,
+  0.005% clipped; the user listened to the recorded race clips and they
+  sounded right.
 - **Movies** (item 4). In a scripted run to track select, the game opens
   `d1a_new_bgn_1.sfd` and `_2.sfd`. The fly-over plays behind the course cards
   (the background changes between frames), and a full-size frame is clean.

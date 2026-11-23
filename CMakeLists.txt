@@ -64,11 +64,12 @@ add_library(dcusa_recomp STATIC
     src/recomp/d3d11.cpp
     src/audio/ds_mixer.cpp
     src/audio/null_output.cpp
-    src/gpu/metal.mm)
+    src/gpu/metal.mm
+    src/gpu/gpu_queue.mm)
 target_include_directories(dcusa_recomp PUBLIC src)
 target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal" "-framework QuartzCore"
                       "-framework CoreGraphics")
-set_source_files_properties(src/gpu/metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+set_source_files_properties(src/gpu/metal.mm src/gpu/gpu_queue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 # d3d11.cpp runs tools/shaderprep on a shader it has no translation for (DCUSA_TRANSLATE=1).
 set_source_files_properties(src/recomp/d3d11.cpp PROPERTIES COMPILE_DEFINITIONS "DCUSA_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
 dcusa_warnings(dcusa_recomp)

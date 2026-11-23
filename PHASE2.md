@@ -430,6 +430,22 @@ exception-status converter (`0xC3A376`), the `fnsave` / `frstor` helper (`0xC394
 The lock-free audit (item 3) did not ask for another override. The m2e hot loop stays a Phase 5
 candidate.
 
+**Speed-ups in the emitted code** (frame-rate work, PHASE3 "Frame-rate profile"):
+
+- `__security_check_cookie` (2019 `0xC1BDD4`, 2017 `0xC165B4`, in `COOKIE_CHECKS`) is
+  inlined at its 12,425 direct call sites: `if (ecx == [cookie]) esp += 4; else` the real
+  call. The common case writes back and reloads no registers. Only sites where the flags are
+  dead after the call are inlined, and the translator checks the entry's bytes are
+  `cmp ecx, [cookie]`. It had been 7% of the main thread.
+- xmm registers live in locals (`xm0_` … `xm7_`) like the GPRs, for the registers a
+  function names: loaded after `PROLOGUE`, written back at every `SYNC` and read again at
+  every `RELOAD` (`keep_xmm_local`). In `c.xmm` they had to be reloaded after every guest
+  store, which goes through the byte pointer `M` and may alias the `Cpu`.
+- A `ret` in a function that returns no flags writes back only the registers (`SYNC_R`).
+  Measured as neutral; kept because it is the same rule the flag liveness already applies.
+
+Together the first two took about 7% off a race frame.
+
 ### 7. Static initializers
 
 The restricted evaluator is dropped. Initializers run translated, through the CRT's own walk.

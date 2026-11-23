@@ -17,6 +17,7 @@ pops it.
     PYTHONPATH=build/pylib python3 tools/x86tr/translate.py \\
         build/mac-host/prepared/DCUSA2019.cache build/x86tr/2019/functions.json build/x86tr/2019/gen
 """
+import re
 import argparse
 import bisect
 import collections
@@ -280,6 +281,7 @@ class FunctionTranslator(X87Mixin, SseMixin):
         bounds = [0] + cuts + [len(blocks)]
         for p in range(len(bounds) - 1):
             lines.append(('void %s(Cpu& c) {' % name) if p == 0 else ('static void %s_p%d(Cpu& c) {' % (name, p)))
+            start = len(lines)
             lines.append('    PROLOGUE();')
             if p == 0:
                 lines.extend('    ' + site[0] for site_va, site in sorted(self.site_overrides.items())
@@ -292,8 +294,34 @@ class FunctionTranslator(X87Mixin, SseMixin):
                              '    // %08X %s %s' % (va, insn.mnemonic, insn.op_str))
             if p + 1 < len(bounds) - 1 and self.falls_through(blocks[bounds[p + 1] - 1][1]):
                 lines.append('    SYNC(); %s_p%d(c); return;' % (name, p + 1))
+            lines[start:] = self.keep_xmm_local(lines[start:])
             lines.append('}')
         return '\n'.join(lines)
+
+    XMM_REF = re.compile(r'\bxm([0-7])_')
+    SYNC_CALL = re.compile(r'\b(SYNC|SYNC_R|RELOAD)\(\)')
+
+    def keep_xmm_local(self, body):
+        """The xmm registers a function uses live in locals, like the GPRs.
+
+        In c.xmm they could not stay in host registers: every guest store goes
+        through M (a byte pointer) and may alias the Cpu, so each access was a
+        reload. The used registers are loaded after PROLOGUE and written back
+        wherever the GPRs are (SYNC) and read again after calls (RELOAD);
+        registers the function never names stay in c.xmm untouched."""
+        used = sorted({int(n) for line in body for n in self.XMM_REF.findall(line)})
+        if not used:
+            return body
+        out = [body[0]]
+        out.append('    Xmm %s;' % ', '.join('xm%d_ = c.xmm[%d]' % (n, n) for n in used))
+        out.append('#define XS_() (%s)' % ', '.join('c.xmm[%d] = xm%d_' % (n, n) for n in used))
+        out.append('#define XR_() (%s)' % ', '.join('xm%d_ = c.xmm[%d]' % (n, n) for n in used))
+        for line in body[1:]:
+            out.append(self.SYNC_CALL.sub(lambda m: '(%s(), %s())' % (m.group(1), 'XR_' if m.group(1) == 'RELOAD' else 'XS_'),
+                                          line))
+        out.append('#undef XS_')
+        out.append('#undef XR_')
+        return out
 
     SPLIT_INSNS = 2000
 
@@ -1166,7 +1194,18 @@ class FunctionTranslator(X87Mixin, SseMixin):
                 self.out.append('esp -= 4; st32(M, esp, %s);' % h(ret))  # call $+5: pushes its own address
                 return
             s.append('esp -= 4; st32(M, esp, %s);' % h(ret))
-            s.append('SYNC(); %s; RELOAD();' % self.call_expr(t))
+            cookie = COOKIE_CHECKS.get(getattr(self.tr.img, 'edition', None), {}).get(t)
+            if cookie and self.tr.img.bytes(t, 6) != b'\x3b\x0d' + cookie[0].to_bytes(4, 'little'):
+                raise ValueError('COOKIE_CHECKS: %08X is not cmp ecx, [%08X]' % (t, cookie[0]))
+            if cookie and not self.need(insn):
+                # __security_check_cookie inline: the common case touches no
+                # register, so the call's SYNC / RELOAD (and the callee's own)
+                # are skipped. The flags it sets are dead here; the return
+                # address stays below esp as the real call leaves it.
+                s.append('if (ecx == ld32(M, %s)) { esp += 4; } else { SYNC(); %s; RELOAD(); }' % (
+                    h(cookie[0]), self.call_expr(t)))
+            else:
+                s.append('SYNC(); %s; RELOAD();' % self.call_expr(t))
         else:
             s.append('{ uint32_t t_ = %s; esp -= 4; st32(M, esp, %s); SYNC(); call_indirect(c, t_); RELOAD(); }' % (
                 self.read(insn, op, 4), h(ret)))
@@ -1176,7 +1215,8 @@ class FunctionTranslator(X87Mixin, SseMixin):
 
     def i_ret(self, insn):
         n = insn.operands[0].imm & 0xFFFF if insn.operands else 0
-        self.out.append('esp += %du; SYNC(); return;' % (4 + n))
+        keep_flags = self.tr.flags_live_at_exit or self.entry in self.tr.flags_returned
+        self.out.append('esp += %du; %s; return;' % (4 + n, 'SYNC()' if keep_flags else 'SYNC_R()'))
 
     def i_jmp(self, insn):
         op = insn.operands[0]
@@ -1272,6 +1312,14 @@ SITE_OVERRIDES = {
         0xC45035: ('const uint32_t kept_ebx = ebx;',
                    'SYNC(); native_crt_unary(c); ebx = kept_ebx; esp += 4; SYNC(); return;'),
     },
+}
+
+# __security_check_cookie (`cmp ecx, [cookie]; jne fail; repz ret`), inlined
+# at every direct call whose flags are dead after it: entry -> (cookie,).
+# Called at the end of most functions, it was 7% of the main thread.
+COOKIE_CHECKS = {
+    2019: {0xC1BDD4: (0x1582B68,)},
+    2017: {0xC165B4: (0x15708F8,)},
 }
 
 OVERRIDES = {

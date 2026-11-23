@@ -68,7 +68,7 @@ class SseMixin:
             return None
         r = self.rn(insn, op.reg)
         if r.startswith('xmm'):
-            return 'c.xmm[%s]' % r[3:]
+            return 'xm%s_' % r[3:]  # a local, see FunctionTranslator.keep_xmm_local
         if r.startswith('mm'):
             return 'c.mm[%s]' % r[2:]
         return None

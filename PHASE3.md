@@ -237,6 +237,35 @@ remains on the main thread is guest code itself (about 53%), plus guest threads
 that run one at a time: another thread's game work (`0x426890`) waits its turn
 instead of running on another core.
 
+A second pass, profiled unthrottled (`DCUSA_NOPACE=1`) in the attract race:
+the main thread was busy 93% of the time, the other guest threads together
+about 10%, so running them in parallel would gain little. Of the main thread,
+translated code was 60%, Metal encoding 19%, indirect-call dispatch 6%. Three
+changes:
+
+- The translator inlines `__security_check_cookie` and keeps xmm registers in
+  locals (PHASE2 "Native overrides"): about 7%.
+- Metal runs on a render thread (`src/gpu/gpu_queue.mm`). The guest's `gpu::`
+  calls are recorded with copies of the bytes and draw state they point at,
+  and handed over at `submit()`; the render thread replays them through
+  `gpu::direct` (metal.mm) in order while the guest runs the next frame. The
+  guest stays at most one frame ahead of the encoder. `read_rgba8`,
+  `scan_targets` and `stats` wait for the render thread to go idle first.
+  `DCUSA_GPU_THREAD=0` runs everything on the guest's thread as before.
+
+Unthrottled, the mean race frame went from 15.0 ms to 9.7 ms, the 90th
+percentile from 20.0 to 14.1 ms, the worst from 26 to 19 ms. At the normal
+60 Hz pacing, 370 of the 383 one-second intervals of the attract race hold 58
+to 60 fps. The 13 that don't are two kinds:
+
+- The heaviest scenes, 2,300 to 2,600 draws, where the GPU now takes 15 to
+  16 ms a frame: 54 to 57 fps, GPU-bound.
+- Scene changes, 500 to 1,400 draws at 21 to 28 ms with the GPU at 5 to 7 ms:
+  one-off stalls while a scene loads (not profiled yet).
+
+Both Phase 5 tests pass with the render thread (attract colour p95 0.471,
+median 0.216).
+
 `dcrun --content <folder>` mounts that install and stays in the frame loop.
 `DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
 `DCUSA_FRAME=<path>` writes present 1, 30, and every `DCUSA_EVERY`th as PPM.

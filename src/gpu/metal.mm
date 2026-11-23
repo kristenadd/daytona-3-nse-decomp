@@ -1,4 +1,5 @@
 #include "gpu/metal.hpp"
+#include "gpu/metal_direct.hpp"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -935,6 +936,10 @@ bool enabled() {
     return true;
 }
 
+// The device itself. gpu_queue.mm runs these on the render thread, in the
+// order the guest called them.
+namespace direct {
+
 void create_texture(std::uint32_t key, const TextureDesc& desc) {
     if (!enabled()) return;
     bool depth = false;
@@ -1400,4 +1405,5 @@ const Stats& stats() {
     return g_dev->stats;
 }
 
+}  // namespace direct
 }  // namespace dcusa::gpu

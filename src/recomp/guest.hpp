@@ -233,6 +233,11 @@ using namespace dcusa::recomp;
 #define SYNC()                                                                                       \
     (c.r[0] = eax, c.r[1] = ecx, c.r[2] = edx, c.r[3] = ebx, c.r[4] = esp, c.r[5] = ebp, c.r[6] = esi, \
      c.r[7] = edi, c.cf = cf, c.pf = pf, c.af = af, c.zf = zf, c.sf = sf, c.of = of)
+// SYNC without the flags: a ret whose flags no caller reads (translate.py
+// find_flag_returning decides which do).
+#define SYNC_R()                                                                                     \
+    (c.r[0] = eax, c.r[1] = ecx, c.r[2] = edx, c.r[3] = ebx, c.r[4] = esp, c.r[5] = ebp, c.r[6] = esi, \
+     c.r[7] = edi)
 #define RELOAD()                                                                                     \
     (eax = c.r[0], ecx = c.r[1], edx = c.r[2], ebx = c.r[3], esp = c.r[4], ebp = c.r[5], esi = c.r[6], \
      edi = c.r[7], cf = c.cf, pf = c.pf, af = c.af, zf = c.zf, sf = c.sf, of = c.of)
