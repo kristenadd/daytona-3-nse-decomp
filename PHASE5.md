@@ -40,8 +40,10 @@ the most similar reference frame, using 32×18 thumbnails:
 The single worst frame is not the main measure. A few camera shots, such as a
 wheel filling the frame, have no counterpart in a capture sampled every 2 s,
 and they score about 0.6 to 0.7 with correct colours. The 95th percentile
-separates the builds: 0.45 for the matching build, 0.81 for the magenta one. `report.json` holds every frame's numbers, and
-`worst.png` sets the six worst frames beside their reference matches.
+separates the builds: 0.45 for the matching build, 0.81 for the magenta one.
+
+`report.json` holds every frame's numbers, and `worst.png` sets the six worst
+frames beside their reference matches.
 
 ## phase5_controls
 
