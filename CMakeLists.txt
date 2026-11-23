@@ -64,7 +64,8 @@ add_library(dcusa_recomp STATIC
     src/recomp/d3d11.cpp
     src/gpu/metal.mm)
 target_include_directories(dcusa_recomp PUBLIC src)
-target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal")
+target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal" "-framework QuartzCore"
+                      "-framework CoreGraphics")
 set_source_files_properties(src/gpu/metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 # d3d11.cpp runs tools/shaderprep on a shader it has no translation for (DCUSA_TRANSLATE=1).
 set_source_files_properties(src/recomp/d3d11.cpp PROPERTIES COMPILE_DEFINITIONS "DCUSA_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
@@ -164,9 +165,12 @@ if(dcusa_generated_dir)
     # guest instruction by instruction) and no debug info (it would run to gigabytes).
     target_compile_options(dcusa_generated PRIVATE -w -O2 -g0 -ffp-contract=off -fno-fast-math)
 
-    add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm)
-    set_source_files_properties(src/platform/macos/gamecontroller_pad.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system "-framework GameController")
+    add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm
+                         src/platform/macos/game_window.mm)
+    set_source_files_properties(src/platform/macos/gamecontroller_pad.mm src/platform/macos/game_window.mm
+                                PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system "-framework GameController" "-framework AppKit"
+                                        "-framework QuartzCore")
     dcusa_warnings(dcrun)
 endif()
 

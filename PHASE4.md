@@ -345,5 +345,8 @@ Camera, HTTP, NetBIOS, and linked play stay fail-closed.
 ## Out of this phase
 
 - Pixels. Phase 3.
-- A window, a controller UI, and haptics. Phases 7 and 8.
+- A controller UI and haptics. Phases 7 and 8. A window landed early: `dcrun`
+  opens one (`src/platform/macos/game_window.mm`, a `CAMetalLayer` the
+  Metal device draws each frame into with `gpu::show`; AppKit events are
+  drained once per frame from Present, since the game keeps the main thread).
 - Opening a socket.

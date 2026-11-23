@@ -9,8 +9,9 @@
 // saw: the D3D11 behaviour for constant buffers rewritten between draws.
 //
 // Shaders are the translated MSL in $DCUSA_SHADERS/msl (tools/shaderprep),
-// looked up by compile request key. Nothing is drawn into a window: the back
-// buffer is read back at Present for the frame image (PHASE3 item 4).
+// looked up by compile request key. With a layer attached (set_layer), Present
+// draws the back buffer into it; otherwise the device is offscreen and the back
+// buffer is read back only for the frames DCUSA_FRAME writes.
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -99,6 +100,13 @@ void draw(const DrawState& s, std::uint32_t count, std::uint32_t start);
 
 // Commits the frame without waiting for it (at most two frames stay queued).
 void submit();
+
+// A CAMetalLayer (as void*, so C++ callers need no Objective-C) that show()
+// draws into; nullptr detaches it.
+void set_layer(void* ca_metal_layer);
+// Draws `texture` (the back buffer) into the layer's next drawable, scaled to
+// fit with black bars, and presents it with the frame. Call before submit().
+void show(std::uint32_t texture);
 
 // Commits the frame, waits, and copies `texture` (an RGBA8 or BGRA8 target) out
 // as RGBA8 rows. False when it has no Metal texture.

@@ -28,6 +28,7 @@
 namespace dcusa::recomp {
 
 std::vector<std::uint8_t> g_frame;
+dcusa::Presenter* g_presenter = nullptr;
 std::uint32_t g_frame_w = 0;
 std::uint32_t g_frame_h = 0;
 
@@ -1670,10 +1671,12 @@ void present(Cpu& c) {
             return e ? std::atoi(e) : 0;
         }();
         const bool wanted = every_frame || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
+        gpu::show(pipe.backbuffer);  // into the window, when there is one
         std::uint32_t w = 0, h = 0;
         if (!wanted) gpu::submit();
         else if (gpu::read_rgba8(pipe.backbuffer, &stored[pipe.backbuffer].bytes, &w, &h)) stored[pipe.backbuffer].row = w * 4u;
         publish_frame(pipe.backbuffer);
+        if (g_presenter != nullptr) g_presenter->present();
         ret_stdcall(c, kSOk, 12);
         return;
     }
@@ -2889,6 +2892,8 @@ void plain_call(Cpu& c, Kind kind, std::uint32_t slot) {
 }
 
 }  // namespace
+
+void set_presenter(dcusa::Presenter* presenter) { g_presenter = presenter; }
 
 bool presented_frame(std::uint32_t* width, std::uint32_t* height, const std::uint8_t** rgba) {
     if (g_frame.empty() || g_frame_w == 0) return false;

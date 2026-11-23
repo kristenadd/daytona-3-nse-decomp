@@ -14,6 +14,9 @@
 #include <optional>
 #include <string>
 
+#include "gpu/metal.hpp"
+#include "platform/macos/game_window.hpp"
+#include "recomp/d3d11.hpp"
 #include "recomp/generated.hpp"
 #include "recomp/host_files.hpp"
 #include "recomp/loader.hpp"
@@ -68,7 +71,22 @@ void install_fault_report(const std::uint8_t* base) {
 }
 
 void usage() {
-    std::fprintf(stderr, "usage: dcrun [--edition 2017|2019] [--content <folder>] <prepared-cache>\n");
+    std::fprintf(stderr,
+                 "usage: dcrun [--edition 2017|2019] [--content <folder>] [--headless] <prepared-cache>\n"
+                 "  Opens a window and plays; --headless (or DCUSA_WINDOW=0) runs offscreen.\n");
+}
+
+// A windowed run needs Metal, a shader folder and translation of the shaders
+// it has not seen; each is on unless the environment already says otherwise.
+// The shader folder is <cache folder>/shaders: the game's HLSL is captured
+// there on first use and translated during the run.
+void windowed_defaults(const char* cache) {
+    setenv("DCUSA_METAL", "1", 0);
+    setenv("DCUSA_TRANSLATE", "1", 0);
+    const std::filesystem::path shaders = std::filesystem::absolute(cache).parent_path() / "shaders";
+    std::error_code ec;
+    std::filesystem::create_directories(shaders, ec);
+    if (!ec) setenv("DCUSA_SHADERS", shaders.c_str(), 0);
 }
 
 }
@@ -77,9 +95,13 @@ int main(int argc, char** argv) {
     std::optional<dcusa::Edition> want;
     const char* path = nullptr;
     const char* content = nullptr;
+    bool headless = false;
+    if (const char* w = std::getenv("DCUSA_WINDOW"); w != nullptr && std::string(w) == "0") headless = true;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--content") {
+        if (arg == "--headless") {
+            headless = true;
+        } else if (arg == "--content") {
             if (i + 1 >= argc) {
                 usage();
                 return 2;
@@ -106,6 +128,7 @@ int main(int argc, char** argv) {
         usage();
         return 2;
     }
+    if (!headless) windowed_defaults(path);
 
     dcusa::ExeImage image;
     std::string error;
@@ -166,6 +189,16 @@ int main(int argc, char** argv) {
         pad = dcusa::make_gamecontroller_pad();
     }
     dcusa::recomp::set_pad_source(pad.get());
+    std::unique_ptr<dcusa::GameWindow> window;
+    if (!headless) {
+        if (!dcusa::gpu::enabled()) {
+            std::fprintf(stderr, "no Metal device or no translated shaders (DCUSA_SHADERS); use --headless\n");
+            return 1;
+        }
+        window = dcusa::make_game_window("Daytona Championship USA", 1280, 720);
+        dcusa::gpu::set_layer(window->layer());
+        dcusa::recomp::set_presenter(window.get());
+    }
     std::fprintf(stderr, "%.*s entry %08X, %zu imports\n", static_cast<int>(info.id.size()), info.id.data(),
                  static_cast<unsigned>(process.entry()), process.imports().size());
     try {

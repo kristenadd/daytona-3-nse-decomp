@@ -19,12 +19,24 @@ to C++ that builds for arm64. Guest threads run cooperatively on host threads,
 one at a time.
 
 Phases 3 and 4 (in progress): `dcrun --content <folder>` boots the 2019
-executable and plays its attract mode, drawn by an offscreen Metal device from
-the game's HLSL translated to MSL (`DCUSA_METAL=1 DCUSA_SHADERS=<dir>
-DCUSA_TRANSLATE=1`); boot takes about 8,000 frames. Without `DCUSA_METAL` the 2D
-software reference draws instead, and the 3D scene stays black. The frames are
-not yet compared with Windows captures, and there is no audio or video yet.
-See [PHASE3.md](PHASE3.md) and [PHASE4.md](PHASE4.md).
+executable in a window and plays: attract mode, then a race from Start, drawn
+with Metal from the game's HLSL translated to MSL. Boot takes about two minutes.
+An Xbox or PlayStation controller drives it (layout in [PHASE4.md](PHASE4.md)).
+The attract loop's colours match a Windows capture. There is no sound or movie
+playback yet. See [PHASE3.md](PHASE3.md) and [PHASE4.md](PHASE4.md).
+
+## Playing
+
+```bash
+build/mac-host/dcrun --content "<folder>" build/mac-host/prepared/DCUSA2019.cache
+```
+
+This opens a 1280×720 window (resizable; Ctrl-Cmd-F for full screen, Cmd-Q to
+quit). Metal, the shader folder (`build/mac-host/prepared/shaders`) and
+translation of new shaders are on by default. Pad controls: Back coin, Start
+start, right/left trigger gas/brake, left stick steering, right/left shoulder
+shift up/down, Y/X/B/A views 1-4. Menus are confirmed with the gas.
+`--headless` (or `DCUSA_WINDOW=0`) runs without a window, for scripted runs.
 
 ## Building and testing (macOS, Apple silicon)
 
@@ -85,9 +97,9 @@ build/mac-host/mslcheck build/mac-host/prepared/shaders/msl
 ```
 
 Later runs with the same `DCUSA_SHADERS` use the translations' bindings, and
-capture any request they have not seen. Add `DCUSA_METAL=1` to draw with the
-offscreen Metal device instead of the 2D software reference; `DCUSA_FRAME=<path>`
-writes presented frames as PPM. The shader folder holds the player's
+capture any request they have not seen (a windowed run does this by itself).
+Headless, add `DCUSA_METAL=1` to draw with Metal instead of the 2D software
+reference; `DCUSA_FRAME=<path>` writes presented frames as PPM. The shader folder holds the player's
 shader source and stays out of the repository.
 
 ## Layout

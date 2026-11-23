@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "recomp/cpu.hpp"
+#include "runtime/host_platform.hpp"
 
 namespace dcusa::recomp {
 
@@ -20,5 +21,9 @@ void call_com(Cpu& c, std::uint32_t target);
 // The image Present last copied out of the bound render target. The pointer
 // stays valid until the next Present. Returns false before the first one.
 bool presented_frame(std::uint32_t* width, std::uint32_t* height, const std::uint8_t** rgba);
+
+// The window Present shows the frame in (its present() runs once per frame,
+// after the frame is drawn); nullptr runs offscreen.
+void set_presenter(dcusa::Presenter* presenter);
 
 }

@@ -2,6 +2,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 
 #include <cstdio>
 #include <deque>
@@ -1083,6 +1084,101 @@ void draw(const DrawState& s, std::uint32_t count, std::uint32_t start) {
     trace_draw(s, "plain", count, "drawn");
     [e drawPrimitives:prim vertexStart:start vertexCount:count];
     ++g_dev->stats.draws;
+}
+
+namespace {
+
+CAMetalLayer* g_layer = nil;
+id<MTLRenderPipelineState> g_show_pipeline = nil;
+id<MTLSamplerState> g_show_sampler = nil;
+
+// A full-screen triangle that samples the frame; the viewport does the scaling.
+constexpr const char* kShowSource = R"(
+#include <metal_stdlib>
+using namespace metal;
+struct Out { float4 pos [[position]]; float2 uv; };
+vertex Out show_vs(uint id [[vertex_id]]) {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    Out o;
+    o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    o.uv = uv;
+    return o;
+}
+fragment float4 show_fs(Out in [[stage_in]], texture2d<float> frame [[texture(0)]], sampler s [[sampler(0)]]) {
+    return float4(frame.sample(s, in.uv).rgb, 1.0);
+}
+)";
+
+bool make_show_pipeline() {
+    if (g_show_pipeline != nil) return true;
+    Device& d = *g_dev;
+    NSError* error = nil;
+    id<MTLLibrary> lib = [d.dev newLibraryWithSource:@(kShowSource) options:nil error:&error];
+    if (lib == nil) {
+        problem(std::string("show shader: ") + (error ? error.localizedDescription.UTF8String : "?"));
+        return false;
+    }
+    MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [lib newFunctionWithName:@"show_vs"];
+    pd.fragmentFunction = [lib newFunctionWithName:@"show_fs"];
+    pd.colorAttachments[0].pixelFormat = g_layer.pixelFormat;
+    g_show_pipeline = [d.dev newRenderPipelineStateWithDescriptor:pd error:&error];
+    if (g_show_pipeline == nil) {
+        problem(std::string("show pipeline: ") + (error ? error.localizedDescription.UTF8String : "?"));
+        return false;
+    }
+    MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
+    sd.minFilter = MTLSamplerMinMagFilterLinear;
+    sd.magFilter = MTLSamplerMinMagFilterLinear;
+    g_show_sampler = [d.dev newSamplerStateWithDescriptor:sd];
+    return true;
+}
+
+}  // namespace
+
+void set_layer(void* layer) {
+    if (!enabled()) return;
+    g_layer = (__bridge CAMetalLayer*)layer;
+    if (g_layer == nil) return;
+    g_layer.device = g_dev->dev;
+    g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    g_layer.framebufferOnly = YES;
+    // The game's frame is sRGB-encoded; tag it so the display converts it.
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    g_layer.colorspace = srgb;
+    CGColorSpaceRelease(srgb);
+    g_show_pipeline = nil;
+}
+
+void show(std::uint32_t key) {
+    if (!enabled() || g_layer == nil) return;
+    Texture* t = texture(key);
+    if (t == nullptr || t->tex == nil || t->depth || !make_show_pipeline()) return;
+    end_pass();
+    // Follow the window: the drawable is the layer's size in pixels.
+    const CGSize points = g_layer.bounds.size;
+    const CGFloat scale = g_layer.contentsScale;
+    const CGSize pixels = CGSizeMake(std::max<CGFloat>(1, points.width * scale), std::max<CGFloat>(1, points.height * scale));
+    if (!CGSizeEqualToSize(g_layer.drawableSize, pixels)) g_layer.drawableSize = pixels;
+    id<CAMetalDrawable> drawable = [g_layer nextDrawable];
+    if (drawable == nil) return;
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = drawable.texture;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    id<MTLRenderCommandEncoder> e = [command_buffer() renderCommandEncoderWithDescriptor:pass];
+    // Fit the frame's aspect ratio inside the drawable, centred.
+    const double fw = t->desc.width, fh = t->desc.height;
+    const double s = std::min(pixels.width / fw, pixels.height / fh);
+    const double w = fw * s, h = fh * s;
+    [e setViewport:MTLViewport{(pixels.width - w) / 2, (pixels.height - h) / 2, w, h, 0, 1}];
+    [e setRenderPipelineState:g_show_pipeline];
+    [e setFragmentTexture:mip_view(*t, 0, 1) atIndex:0];
+    [e setFragmentSamplerState:g_show_sampler atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    [command_buffer() presentDrawable:drawable];
 }
 
 void submit() {
