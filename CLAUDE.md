@@ -88,5 +88,9 @@ agreed to this).
   current build (95th-percentile colour distance 0.451, medians within
   tolerance) and fails on the magenta-bloom build (0.808, 32 magenta frames).
   `phase5_controls` passes all 15 checks.
+- **Cube maps** (car reflections). Cars flashed from frame to frame because
+  cube maps were created as 2D textures. Consecutive headless frames now keep
+  the cars' shading, Phase 5 passes (colour p95 0.432), and the user
+  confirmed in the window that the flashing is gone. PHASE3 "Cube maps".
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.
