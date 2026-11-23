@@ -335,10 +335,23 @@ Checks:
 ### 5. Video
 
 Movies are `rom/movie/`: 24 Sofdec `.sfd` files (MPEG program stream, 481 MB)
-and 2 AVI files (173 MB). Sofdec is the `mwPly` boundary from item 4, decoded
-to a texture Phase 3 can sample. AVI and VFW (`AVIFIL32`, `MSVFW32`) are the
-same idea for the two AVI files: open, decode a frame, close. `ICDecompress`
-fails closed until that decoder exists.
+and 2 AVI files (173 MB).
+
+**Landed: Sofdec plays as translated code.** At track select, CRI's thread opens
+`d1a_new_bgn_1.sfd` and the next one (the course fly-overs behind the course
+cards), decodes them, and uploads the frames to a texture the menu draws. A
+scripted run shows the background moving from frame to frame: infield, then pit
+lane. The image is clean at full size, with no block errors and the right
+colours. The 24 files are four fly-overs for each of the six course and
+difficulty sets (`bgn` / `int` / `exp`, old and `new`).
+
+**The AVIs are camera stand-ins.** `screen demo.avi` (432×240, Microsoft
+Video 1) and `cmn_rslt_name_entry_chara.avi` (1644×196) are opened only by the
+OpenCV Video-for-Windows capture code (`0xA56B20`, `0xA56FB0`; thunks at
+`0xA7ED00`–`0xA7ED44`) in `OpenCVMgrImpl`, the cabinet camera manager, which
+runs only with capture enabled (`m_bEnableCapture`). It is off by default, as on
+the cabinet the capture came from, whose "YOU" box is black. `AVIFIL32` and
+`MSVFW32` stay fail-closed. The camera feature is out of scope (PHASE0).
 
 ### 6. Left fail-closed on purpose
 

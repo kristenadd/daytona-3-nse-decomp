@@ -33,7 +33,9 @@ agreed to this).
    mixer into the game's 5.1 stream. Status: working by measurement (sane
    levels, no NaN, no clipping, race clip sent for a listening check). Not
    yet checked by ear: engine pitch with RPM, tyres, crashes and announcer.
-4. **Movies.** Sofdec video, used as backgrounds on some screens.
+4. **Movies.** **Verified** (see below). Sofdec plays through the translated
+   CRI code. The two AVIs belong to the camera feature (OpenCV capture, off
+   by default) and stay fail-closed.
 5. **Frame rate.** Heavy race scenes dip to about 38 fps; needs a GPU-side
    profile.
 6. **Cabinet settings.** Credits vs free play (`ShellData.ini [Credit]
@@ -53,5 +55,9 @@ agreed to this).
   and PHASE2 have the details.
 - **ADX music** (item 2). The attract music buffer, set against the decoded
   `d1a_bgm08_adv.adx`: correlation 0.92, level within 0.3 dB.
+- **Movies** (item 4). In a scripted run to track select, the game opens
+  `d1a_new_bgn_1.sfd` and `_2.sfd`. The fly-over plays behind the course cards
+  (the background changes between frames), and a full-size frame is clean.
+  PHASE4 "Video" has the details.
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.
