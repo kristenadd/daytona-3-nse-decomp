@@ -1,5 +1,6 @@
 #include "gpu/metal.hpp"
 #include "gpu/metal_direct.hpp"
+#include "runtime/hitch.hpp"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -335,6 +336,7 @@ Program& program(std::uint64_t key, bool vertex) {
     // D3D11 min / max rules in the translated shaders rely on (translate_shaders.py).
     options.mathMode = MTLMathModeRelaxed;
     NSError* error = nil;
+    hitch::Timer compile_timer(hitch::Pipeline);
     id<MTLLibrary> lib = [d.dev newLibraryWithSource:source options:options error:&error];
     p.fn = lib ? [lib newFunctionWithName:@"main0"] : nil;
     if (p.fn == nil) {
@@ -875,6 +877,7 @@ const Pipeline* pipeline(const DrawState& s, Program& vs, Program& ps) {
     }
     NSError* error = nil;
     MTLRenderPipelineReflection* reflection = nil;
+    hitch::Timer build_timer(hitch::Pipeline);
     id<MTLRenderPipelineState> state = [d.dev newRenderPipelineStateWithDescriptor:pd
                                                                            options:MTLPipelineOptionBindingInfo
                                                                         reflection:&reflection

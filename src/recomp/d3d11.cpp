@@ -1,4 +1,5 @@
 #include "recomp/d3d11.hpp"
+#include "runtime/hitch.hpp"
 
 #include <sys/mman.h>
 
@@ -39,6 +40,8 @@ std::uint32_t g_frame_w = 0;
 std::uint32_t g_frame_h = 0;
 
 namespace {
+
+int g_frames_after_hitch = 0;  // report_hitch: frames to write out after a hitch
 
 // Environment switches, read once: getenv walks the whole environment and
 // several of these sit on per-draw paths.
@@ -899,7 +902,8 @@ void publish_frame(std::uint32_t resource, bool fresh) {
         }
     }
     if (const char* path = std::getenv("DCUSA_FRAME")) {
-        if (seen != 1 && seen != 30 && !periodic) return;
+        if (seen != 1 && seen != 30 && !periodic && g_frames_after_hitch == 0) return;
+        if (g_frames_after_hitch > 0) --g_frames_after_hitch;
         char file[512];
         std::snprintf(file, sizeof file, "%s.%d.ppm", path, seen);
         std::ofstream out(file, std::ios::binary);
@@ -1210,6 +1214,7 @@ std::uint32_t spawn(std::uint8_t* mem, Kind kind) {
 // 0x6D62A3. A negative HRESULT fails the load. E_OUTOFMEMORY and E_INVALIDARG are logged
 // the same way, so success is a buffer pointer and S_OK.
 void create_buffer(Cpu& c) {
+    hitch::Timer timer(hitch::Buffer);
     const std::uint32_t desc = arg(c, 1);
     const std::uint32_t out = arg(c, 3);
     if (desc == 0) fail_closed(Unported::Service, desc, "CreateBuffer");
@@ -1309,6 +1314,7 @@ void create_rasterizer(Cpu& c) {
 
 // 0x792DD6. CreateInputLayout. 0x792DDE returns success when EAX is non-negative.
 void create_layout(Cpu& c) {
+    hitch::Timer timer(hitch::Shader);
     const std::uint32_t descs = arg(c, 1);
     const std::uint32_t count = arg(c, 2);
     const std::uint32_t out = arg(c, 5);
@@ -1370,6 +1376,7 @@ void create_query(Cpu& c) {
 }
 
 void create_shader(Cpu& c) {
+    hitch::Timer timer(hitch::Shader);
     const std::uint32_t out = arg(c, 4);
     const std::uint32_t obj = spawn(c.mem, Shader);
     shader_code[obj] = arg(c, 1);
@@ -1433,6 +1440,7 @@ void create_srv(Cpu& c) {
 }
 
 void create_texture(Cpu& c) {
+    hitch::Timer timer(hitch::Texture);
     const std::uint32_t desc = arg(c, 1);
     const std::uint32_t out = arg(c, 3);
     if (desc == 0) fail_closed(Unported::Service, desc, "CreateTexture2D");
@@ -1719,6 +1727,33 @@ void selftest_math(Cpu& c) {
 extern "C" int __llvm_profile_write_file(void);  // the profile runtime's
 #endif
 
+// DCUSA_HITCH=<ms> (runtime/hitch.hpp): one line for each frame that took
+// longer, with the time host code spent in each slot during it.
+void report_hitch(int present_no) {
+    if (!hitch::enabled()) return;
+    using clock = std::chrono::steady_clock;
+    static const double limit = std::atof(std::getenv("DCUSA_HITCH"));
+    static clock::time_point last{};
+    const auto now = clock::now();
+    const double ms = last.time_since_epoch().count() ? std::chrono::duration<double, std::milli>(now - last).count() : 0;
+    last = now;
+    static const char* const names[hitch::Count] = {"io", "wait", "texture", "buffer", "shader", "render-thread", "pipeline"};
+    if (ms > limit) {
+        // With DCUSA_FRAME set, the frames presented right after a hitch are
+        // written too: what was on screen when it happened.
+        if (std::getenv("DCUSA_FRAME") != nullptr && ms > 2 * limit) g_frames_after_hitch = 2;
+        std::fprintf(stderr, "hitch present %d: %.1f ms |", present_no, ms);
+        for (int i = 0; i < hitch::Count; ++i)
+            if (hitch::g_calls[i])
+                std::fprintf(stderr, " %s %.1f ms (%u)", names[i], hitch::g_ns[i] / 1e6, hitch::g_calls[i].load());
+        std::fprintf(stderr, "\n");
+    }
+    for (int i = 0; i < hitch::Count; ++i) {
+        hitch::g_ns[i] = 0;
+        hitch::g_calls[i] = 0;
+    }
+}
+
 void present(Cpu& c) {
     selftest_math(c);
     {
@@ -1741,6 +1776,7 @@ void present(Cpu& c) {
             std::_Exit(0);
         }
         print_pad_trace(c.mem, all_presents);
+        report_hitch(all_presents);
     }
     if (static bool shown = false; !shown && stats_on()) {
         shown = true;
@@ -1764,7 +1800,7 @@ void present(Cpu& c) {
             const char* e = std::getenv("DCUSA_EVERY");
             return e ? std::atoi(e) : 0;
         }();
-        const bool wanted = every_frame || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
+        const bool wanted = every_frame || g_frames_after_hitch > 0 || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
         gpu::show(pipe.backbuffer);  // into the window, when there is one
         std::uint32_t w = 0, h = 0;
         if (!wanted) gpu::submit();
@@ -1844,6 +1880,7 @@ void get_buffer(Cpu& c) {
 // than written over it. A D3D11_BOX {left, top, front, right, bottom, back}
 // updates that part only, and the source holds just that part.
 void update_subresource(Cpu& c) {
+    hitch::Timer timer(hitch::Texture);
     const std::uint32_t res = arg(c, 1);
     const std::uint32_t sub = arg(c, 2);
     const std::uint32_t box = arg(c, 3);

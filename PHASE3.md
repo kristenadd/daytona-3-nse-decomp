@@ -363,6 +363,30 @@ Two directions were then measured and set aside:
   9.89 ms, heavy intervals at about 2,600 draws 15.5 vs 15.6 ms. No gain: the
   draw path's cost is its memory work, not its calls. The table is empty.
 
+**Scene-change stalls.** `DCUSA_HITCH=<ms>` prints every frame longer than
+that, with the time host code spent in it on file reads, the main thread's
+guest waits, texture and buffer creation, shader creation, waiting for the
+render thread, and MSL compiles and pipeline builds (`runtime/hitch.hpp`).
+With `DCUSA_FRAME` set it also writes out the two frames presented after
+any hitch over twice the limit. Over a paced attract loop:
+
+- Each segment change has a few slow frames: one of 100 to 260 ms with no
+  host time in it, one of 240 to 380 ms in which the game creates 6,700 to
+  12,000 textures and 9,000 to 16,000 buffers (about 5 ms of it host time),
+  and one or two of about 100 to 140 ms. Boot has a 1.0 to 1.3 s load.
+- The time is the game's own scene setup on the main thread: in one such
+  frame, 37% of a one-second sample was `0x459580` called for object after
+  object, each first touch of an object a cache miss.
+- Every frame captured right after these hitches is a static screen: the
+  "Data Loading" text at boot, black, a white fade, or the CRIWARE logo. The
+  pauses happen while nothing moves, so they do not show as stutter, and
+  there is nothing to fix in the frame loop.
+- Two things were ruled out on the way. Running the loader's LZ decompressor
+  (`0x426890`) on its own core while the main thread kept the CPU barely ever
+  overlapped (17 times, at most 1.2 ms in a loop) and was removed. A
+  two-second run of 50 to 110 ms frames seen once was caused by the profiler
+  (`sample` suspends the process); unprofiled runs do not show it.
+
 `dcrun --content <folder>` mounts that install and stays in the frame loop.
 `DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
 `DCUSA_FRAME=<path>` writes present 1, 30, and every `DCUSA_EVERY`th as PPM.

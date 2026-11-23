@@ -1,4 +1,5 @@
 #include "recomp/host_files.hpp"
+#include "runtime/hitch.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -552,6 +553,7 @@ std::uint32_t guest_close_file(std::uint32_t handle) {
 }
 
 std::uint32_t guest_read_file(std::uint32_t handle, std::uint8_t* dst, std::uint32_t n, std::uint32_t* got) {
+    hitch::Timer timer(hitch::Io);
     *got = 0;
     OpenFile* f = file_at(handle);
     if (!f || f->fd < 0) return kErrorInvalidHandle;

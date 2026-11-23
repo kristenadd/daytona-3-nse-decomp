@@ -13,6 +13,7 @@
 // DCUSA_GPU_THREAD=0 runs every call directly on the caller's thread.
 #include "gpu/metal.hpp"
 #include "gpu/metal_direct.hpp"
+#include "runtime/hitch.hpp"
 
 #import <Foundation/Foundation.h>
 
@@ -133,6 +134,7 @@ void render_thread() {
 
 // Waits for the render thread to finish the previous batch, then gives it this one.
 void hand_over() {
+    hitch::Timer timer(hitch::Handover);
     Queue& q = Q();
     std::unique_lock<std::mutex> lk(q.mu);
     if (!q.started) {

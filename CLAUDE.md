@@ -46,8 +46,9 @@ agreed to this).
    tried and gained nothing measurable. A heavy frame is about 7 ms of GPU
    time on this Mac (`DCUSA_GPU_PASSES`). Code layout and size (order file,
    `-Os`) and inlining the whole draw path were also neutral: the remaining
-   cost is the engine's memory work. Left: one-second stalls at scene
-   changes.
+   cost is the engine's memory work. The scene-change stalls (100 to 380 ms
+   frames, `DCUSA_HITCH`) all fall on static loading screens (white fade,
+   CRIWARE logo, "Data Loading"), so they do not show as stutter.
 6. **Cabinet settings.** **Verified** for credits (see below). Operator
    settings go through `dcrun --shell-setting Section.Key=Value`, since the
    operator menu is the shell's, and in this release the game has no input path

@@ -22,6 +22,7 @@
 #include "recomp/guest_memory.hpp"
 #include "recomp/x86ops.hpp"
 #include "runtime/fail_closed.hpp"
+#include "runtime/hitch.hpp"
 
 namespace dcusa::recomp {
 namespace {
@@ -284,6 +285,7 @@ template <class Ready> bool block(Cpu& c, Ready ready, std::uint32_t ms, bool co
     ensure(c);
     Sched& s = S();
     const unsigned me = s.current;
+    hitch::Timer timer(hitch::Wait, me == 0);  // the main thread's waits stall its frame
     const auto deadline = Clock::now() + std::chrono::milliseconds(ms == kInfinite ? 0 : ms);
     for (;;) {
         fire_timers();
