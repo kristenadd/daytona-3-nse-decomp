@@ -1447,6 +1447,10 @@ void create_texture(Cpu& c) {
     const std::uint32_t out = arg(c, 3);
     if (desc == 0) fail_closed(Unported::Service, desc, "CreateTexture2D");
     const std::uint32_t obj = spawn(c.mem, Texture);
+    if (stats_on() && ld32(c.mem, desc + 20) > 1)
+        std::fprintf(stderr, "MSAA texture %08x %ux%u fmt %u samples %u bind %x from %08x\n", obj, ld32(c.mem, desc),
+                     ld32(c.mem, desc + 4), ld32(c.mem, desc + 16), ld32(c.mem, desc + 20), ld32(c.mem, desc + 32),
+                     ld32(c.mem, c.r[Cpu::ESP]));
     st32(c.mem, obj, kVt + static_cast<std::uint32_t>(Texture) * kVtStride);
     st32(c.mem, obj + 4, Texture);
     st32(c.mem, obj + 8, 1);
@@ -1474,16 +1478,20 @@ void create_texture(Cpu& c) {
         td.format = ld32(c.mem, desc + 16);
         td.bind = ld32(c.mem, desc + 32);
         td.misc = ld32(c.mem, desc + 40);
+        td.initial = arg(c, 2) != 0;
         gpu::create_texture(obj, td);
     }
     const std::uint32_t initial = arg(c, 2);
-    const std::uint32_t mips = std::max(1u, ld32(c.mem, desc + 8)), slices = std::max(1u, ld32(c.mem, desc + 12));
+    std::uint32_t mips = ld32(c.mem, desc + 8);
+    const std::uint32_t slices = std::max(1u, ld32(c.mem, desc + 12));
+    if (mips == 0)  // MipLevels 0: the full chain
+        for (std::uint32_t w = std::max(ld32(c.mem, desc), ld32(c.mem, desc + 4)); w > 0; w >>= 1) ++mips;
     if (initial != 0) {
         copy_from_guest(obj, c.mem, ld32(c.mem, initial), ld32(c.mem, initial + 4));
-        if (slices == 1) {
+        if (slices == 1 && mips == 1) {
             sync_gpu(c.mem, obj);
         } else if (gpu::enabled()) {
-            // An array or cube texture: every subresource, D3D11_SUBRESOURCE_DATA
+            // Mip levels, array slices or cube faces: every subresource, D3D11_SUBRESOURCE_DATA
             // {pSysMem, SysMemPitch, SysMemSlicePitch} in the order mip + slice * mips.
             const std::uint32_t w = ld32(c.mem, desc), h = ld32(c.mem, desc + 4), format = ld32(c.mem, desc + 16);
             for (std::uint32_t slice = 0; slice < slices; ++slice) {
@@ -1525,7 +1533,9 @@ void texture_desc(Cpu& c) {
 void check_msaa(Cpu& c) {
     const std::uint32_t count = arg(c, 2);
     const std::uint32_t out = arg(c, 3);
-    if (out != 0) st32(c.mem, out, count == 1 ? 1u : 0u);
+    static const bool msaa = std::getenv("DCUSA_MSAA") != nullptr;
+    if (stats_on()) std::fprintf(stderr, "CheckMultisampleQualityLevels format %u count %u\n", arg(c, 1), count);
+    if (out != 0) st32(c.mem, out, count == 1 || (msaa && (count == 2 || count == 4)) ? 1u : 0u);
     ret_stdcall(c, kSOk, 16);
 }
 
@@ -1922,6 +1932,19 @@ void update_subresource(Cpu& c) {
     const std::uint32_t src = arg(c, 4);
     const std::uint32_t src_row = arg(c, 5);
     auto it = stored.find(res);
+    if (sub != 0 && src != 0 && box == 0 && gpu::enabled() && ld32(c.mem, res + 4) == Texture) {
+        // A smaller level (or another slice) of a texture: straight to the GPU.
+        const std::uint32_t mips = std::max(1u, ld32(c.mem, res + 24)), mip = sub % mips;
+        std::uint32_t row = 0;
+        const std::uint32_t bytes = texture_bytes(std::max(1u, ld32(c.mem, res + 12) >> mip),
+                                                  std::max(1u, ld32(c.mem, res + 16) >> mip), ld32(c.mem, res + 20), &row);
+        if (bytes != 0 && row != 0) {
+            const std::uint32_t pitch = src_row != 0 ? src_row : row;
+            gpu::upload_texture_sub(res, sub / mips, mip, c.mem + src, static_cast<std::size_t>(pitch) * (bytes / row), pitch);
+        }
+        ret_stdcall(c, kSOk, 28);
+        return;
+    }
     if (sub != 0 || src == 0 || it == stored.end() || it->second.bytes.empty()) {
         ret_stdcall(c, kSOk, 28);
         return;

@@ -226,7 +226,11 @@ with `MISC_TEXTURECUBE` and a multiple of six slices is an `MTLTextureTypeCube`
 subresource (`upload_texture_sub`); a `TEXTURE2DARRAY` render target view
 keeps its first slice (view +20, `DrawState::rtv_slice`) for draws and clears;
 mip views keep all six faces; and an empty `texturecube` slot gets a 1x1 zero
-cube. Other 2D textures are unchanged (still only level 0 uploaded).
+cube. 2D textures created with initial data now get all their mip levels
+too (they used to get level 0 only, so distant fences, signs and markings
+shimmered with moire); `UpdateSubresource` of a level other than 0 goes
+straight to that level, and a texture replaced while the GPU still reads it
+carries its smaller levels over.
 `DCUSA_FRAME_RANGE=<a>-<b>` writes every present in a range, and
 `DCUSA_METAL_TRACE_FRAMES=<k>` traces k frames, which is how it was found.
 

@@ -1232,8 +1232,10 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
     std::uint32_t full = 1;
     for (std::uint32_t w = std::max(desc.width, desc.height); w > 1; w >>= 1) ++full;
     if (chain) levels = desc.mips > 1 ? std::min(full, desc.mips) : full;
-    // A cube map's faces and levels all arrive from the guest (upload_texture_sub).
-    if (t.cube && desc.mips != 1) levels = desc.mips == 0 ? full : std::min(full, desc.mips);
+    // A cube map's faces and levels, and a texture created with initial data
+    // for all its levels, arrive from the guest (upload_texture_sub). Without
+    // the smaller levels, distant fences and signs shimmered.
+    if ((t.cube || (desc.initial && !chain)) && desc.mips != 1) levels = desc.mips == 0 ? full : std::min(full, desc.mips);
     t.tex = new_texture(desc, format, depth, levels);
     ++g_dev->stats.textures;
     g_dev->textures[key] = t;
@@ -1289,8 +1291,19 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
         [blit endEncoding];
     } else {
         // A draw still recorded or still on the GPU may read the old bytes.
-        if (g_dev->cmd != nil || gpu_busy())
+        if (g_dev->cmd != nil || gpu_busy()) {
+            id<MTLTexture> old = t.tex;
             t.tex = new_texture(t.desc, t.format, false, static_cast<std::uint32_t>(t.tex.mipmapLevelCount));
+            // The smaller levels carry over (only level 0 is replaced below).
+            if (old.mipmapLevelCount > 1) {
+                end_pass();
+                id<MTLBlitCommandEncoder> blit = blit_encoder("mip carry-over");
+                for (NSUInteger level = 1; level < old.mipmapLevelCount; ++level)
+                    [blit copyFromTexture:old sourceSlice:0 sourceLevel:level toTexture:t.tex destinationSlice:0
+                         destinationLevel:level sliceCount:1 levelCount:1];
+                [blit endEncoding];
+            }
+        }
         [t.tex replaceRegion:MTLRegionMake2D(0, 0, t.desc.width, t.desc.height) mipmapLevel:0 withBytes:bytes
                  bytesPerRow:row_pitch];
     }

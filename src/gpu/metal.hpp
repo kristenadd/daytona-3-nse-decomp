@@ -27,6 +27,7 @@ struct TextureDesc {
     std::uint32_t format = 0;  // DXGI_FORMAT
     std::uint32_t bind = 0;    // D3D11_BIND_*: 0x8 shader resource, 0x20 render target, 0x40 depth stencil
     std::uint32_t misc = 0;    // D3D11_RESOURCE_MISC_*: 0x1 generate mips, 0x4 texture cube
+    bool initial = false;      // created with initial data for every subresource (all its mip levels)
 };
 void create_texture(std::uint32_t id, const TextureDesc& desc);
 // Mip 0 of slice 0, rows `row_pitch` bytes apart (block rows for BCn).
