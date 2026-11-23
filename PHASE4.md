@@ -291,11 +291,46 @@ DirectSound is ordinal 11, `DirectSoundCreate8`, under CRI ADX 10.71c and CRI
 CSB. Sound is `rom/sound/`: 58 ADX streams and `SE.csb` (a `@UTF` table, 15.8
 MB). WinMM `timeSetEvent` is the mixer tick.
 
-The CRI entry points (`ADXT_*`, `mwPly*` for pictures, the cue player) are
-native, found by address, the same way the CRT copies are. The translated CRI
-and its threads are not on the path that plays a buffer. ADX is decoded to the
-`AudioOutput` buffer. CSB cues trigger those decodes. `timeSetEvent` posts to
-the queue on the host tick instead of starting a guest thread.
+That plan (native CRI entry points) turned out not to be needed: the
+translated CRI runs correctly, so emulating DirectSound faithfully is enough.
+
+**Landed.** The game makes three secondary buffers, all 48 kHz 16-bit:
+
+- A 48 KB 5.1 stream (`WAVE_FORMAT_EXTENSIBLE`, mask `0x3F`). The game's
+  stream object (`0x59E660`) calls CRI Atom's mixer (`0xBC4CA0`, which
+  decodes `SE.csb` cues) through a callback, converts its floats to int16,
+  and keeps the ring fed from `GetCurrentPosition`.
+- A 128 KB stereo buffer: CRI ADX's own output, music and the rest of the ADX
+  streams, played at 44.1 kHz (`SetFrequency`) with `SetVolume(-380)`.
+- A 64 KB mono buffer CRI starts and leaves silent.
+
+`src/audio/ds_mixer` gives each buffer guest memory (`Lock` hands out the
+range, split where it wraps), a play cursor that advances as the output takes
+samples (the write cursor 10 ms ahead), looping and one-shot play, volume, pan
+and frequency (linear resampling), and folds 5.1 to stereo. The fold-down is
+normalised so a full-scale mix cannot clip. A windowed `dcrun` plays through
+Core Audio (`src/platform/macos/core_audio_output.mm`). Headless runs and
+`DCUSA_AUDIO=0` use a device-less output paced in real time (`src/audio/null_output`);
+`DCUSA_AUDIO_WAV=<file>` records it. `DCUSA_AUDIO_STATS=1` prints each buffer's
+level every 10 s; `DCUSA_AUDIO_DUMP=<dir>` writes their memory; and
+`DCUSA_DSOUND_TRACE=1` logs the DirectSound calls.
+
+Checks:
+
+- **Attract music.** The ADX buffer, resampled to 44.1 kHz, correlates 0.92
+  with `d1a_bgm08_adv.adx` decoded on its own, and matches it within 0.3 dB.
+  CRI mixes about 3.8 dB hot (the source touches full scale) and then sets the
+  buffer to -3.8 dB.
+- **Race.** Before the fix, the 5.1 stream was all -32768: CRI Atom's ADX
+  decoder (`0xBFF940`) overflowed to NaN. Its prediction coefficients come from
+  `0xC00050` (`√2 − cos(…)` and a square root), and the CRT's sqrt returned its
+  argument because of returned flags (PHASE2: `find_flag_returning`). Now the
+  stream is around -14 dBFS RMS in a race, and the mixed output clips on 0.005%
+  of samples.
+- **CRT maths.** `DCUSA_SELFTEST_MATH=1` runs the translated cos, sin, tan,
+  log, sqrt and pow at the first present against the host's: all exact.
+
+`timeSetEvent` still drives CRI's server thread as before.
 
 ### 5. Video
 

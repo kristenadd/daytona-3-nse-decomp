@@ -5,6 +5,8 @@ disassemblers disagree on which of fsub / fsubr (fdiv / fdivr) names the
 DC / DE E0..FF encodings, so the operation comes from the Intel encoding
 tables directly. ST registers hold doubles (see recomp/cpu.hpp).
 """
+import os
+
 from capstone import x86 as X
 
 from semantics import Unsupported
@@ -25,6 +27,23 @@ FCMOV = {(0xDA, 0): 'cf', (0xDA, 1): 'zf', (0xDA, 2): '(cf | zf)', (0xDA, 3): 'p
 
 def st(i):
     return 'c.fpu.at(%d)' % i
+
+
+# Debugging aid: DCUSA_NAN_TRAP=<lo>-<hi> (hex guest addresses) at translation
+# time makes every x87 store to memory in that range report, once per
+# instruction, the first NaN it writes (nan_trap in recomp/guest.hpp). Unset,
+# the output is unchanged.
+def _nan_trap_range():
+    spec = os.environ.get('DCUSA_NAN_TRAP', '')
+    if '-' not in spec:
+        return None
+    lo, hi = spec.split('-', 1)
+    return int(lo, 16), int(hi, 16)
+
+
+NAN_TRAP = _nan_trap_range()
+# The memory stores that write ST(0) as a float: fst / fstp m32, m64, m80.
+NAN_TRAP_FORMS = {(0xD9, 2), (0xD9, 3), (0xDD, 2), (0xDD, 3), (0xDB, 7)}
 
 
 class X87Mixin:
@@ -83,6 +102,8 @@ class X87Mixin:
         form = forms.get((op, reg))
         if form is None:
             raise self.unsupported('x87 %s (%02X /%d)' % (m, op, reg))
+        if NAN_TRAP and (op, reg) in NAN_TRAP_FORMS and NAN_TRAP[0] <= insn.address < NAN_TRAP[1]:
+            o.append('nan_trap(c, 0x%08Xu, %s);' % (insn.address, st(0)))
         o.append(form.format(a=a, s0=st(0)))
         return True
 

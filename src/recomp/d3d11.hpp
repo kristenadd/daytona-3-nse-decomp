@@ -4,6 +4,7 @@
 // thunks, so a virtual call lands here instead of failing as a missing function.
 #include <cstdint>
 
+#include "audio/ds_mixer.hpp"
 #include "recomp/cpu.hpp"
 #include "runtime/host_platform.hpp"
 
@@ -25,5 +26,9 @@ bool presented_frame(std::uint32_t* width, std::uint32_t* height, const std::uin
 // The window Present shows the frame in (its present() runs once per frame,
 // after the frame is drawn); nullptr runs offscreen.
 void set_presenter(dcusa::Presenter* presenter);
+
+// The DirectSound buffers the game plays, mixed for an AudioOutput to pull
+// (audio::DsMixer::pull with this as `user`).
+audio::DsMixer& sound_mixer();
 
 }

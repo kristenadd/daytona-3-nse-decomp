@@ -30,6 +30,12 @@ extern std::atomic<bool> g_preempt;
 extern std::uint64_t g_probe[8];
 void debug_probe(Cpu& c, std::uint32_t va, std::uint32_t a, std::uint32_t b, std::uint32_t d, std::uint32_t e);
 void guest_preempt(Cpu& c);
+// Debugging aid (DCUSA_NAN_TRAP in tools/x86tr/x87.py): reports the first NaN
+// an x87 store at `site` writes, once per site.
+void nan_trap_report(Cpu& c, std::uint32_t site);
+inline void nan_trap(Cpu& c, std::uint32_t site, double v) {
+    if (v != v) nan_trap_report(c, site);
+}
 std::uint64_t guest_rdtsc();
 
 template <class T, int N, class V, class Op> inline void lanes(V& d, const V& s, Op op) {

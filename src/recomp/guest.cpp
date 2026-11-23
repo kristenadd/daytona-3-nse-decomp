@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <mutex>
+#include <unordered_set>
 
 #include "recomp/threads.hpp"
 #include "runtime/fail_closed.hpp"
@@ -41,6 +43,33 @@ void guest_pause(Cpu& c) { sched_yield(c); }
 
 std::atomic<bool> g_preempt{false};
 std::uint64_t g_probe[8] = {};
+
+// The first time: the x87 stack, the registers (as last written back; a
+// translated function keeps them in locals between calls), and 32 bytes at esi
+// and edi, for the functions that walk their input through those.
+void nan_trap_report(Cpu& c, std::uint32_t site) {
+    static std::mutex m;
+    static std::unordered_set<std::uint32_t> seen;
+    static std::uint64_t order = 0;
+    std::lock_guard<std::mutex> g(m);
+    if (!seen.insert(site).second) return;
+    std::fprintf(stderr, "nan trap #%llu: x87 store at %08X wrote NaN\n", static_cast<unsigned long long>(++order), site);
+    if (order > 12) return;
+    std::fprintf(stderr, "  st:");
+    for (unsigned i = 0; i < 8; ++i) std::fprintf(stderr, " %g", c.fpu.at(i));
+    std::fprintf(stderr, "  top %u tag %04x cw %04x\n", c.fpu.top, c.fpu.tag, c.fpu.control);
+    static const char* names[8] = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
+    std::fprintf(stderr, "  regs:");
+    for (unsigned i = 0; i < 8; ++i) std::fprintf(stderr, " %s %08x", names[i], c.r[i]);
+    std::fprintf(stderr, "\n");
+    for (unsigned r : {6u, 7u}) {
+        const std::uint32_t a = c.r[r];
+        if (a < 0x10000 || a > 0xFFFF0000u) continue;
+        std::fprintf(stderr, "  [%s]:", names[r]);
+        for (unsigned i = 0; i < 32; ++i) std::fprintf(stderr, " %02x", c.mem[a + i]);
+        std::fprintf(stderr, "\n");
+    }
+}
 
 void debug_probe(Cpu& c, std::uint32_t va, std::uint32_t a, std::uint32_t b, std::uint32_t d, std::uint32_t e) {
     std::fprintf(stderr, "probe %08X thread %u: %08X %08X %08X %08X\n", va, c.mem ? *reinterpret_cast<const std::uint32_t*>(c.mem + c.fs_base + 0x24) : 0u, a, b, d, e);

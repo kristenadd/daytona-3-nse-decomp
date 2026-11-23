@@ -62,6 +62,8 @@ add_library(dcusa_recomp STATIC
     src/recomp/shell.cpp
     src/recomp/host_files.cpp
     src/recomp/d3d11.cpp
+    src/audio/ds_mixer.cpp
+    src/audio/null_output.cpp
     src/gpu/metal.mm)
 target_include_directories(dcusa_recomp PUBLIC src)
 target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal" "-framework QuartzCore"
@@ -166,11 +168,11 @@ if(dcusa_generated_dir)
     target_compile_options(dcusa_generated PRIVATE -w -O2 -g0 -ffp-contract=off -fno-fast-math)
 
     add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm
-                         src/platform/macos/game_window.mm)
+                         src/platform/macos/game_window.mm src/platform/macos/core_audio_output.mm)
     set_source_files_properties(src/platform/macos/gamecontroller_pad.mm src/platform/macos/game_window.mm
-                                PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+                                src/platform/macos/core_audio_output.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system "-framework GameController" "-framework AppKit"
-                                        "-framework QuartzCore")
+                                        "-framework QuartzCore" "-framework AudioToolbox")
     dcusa_warnings(dcrun)
 endif()
 
@@ -201,6 +203,7 @@ dcusa_test(test_threads)
 dcusa_test(test_metal)
 dcusa_test(test_shell)
 dcusa_test(test_pad)
+dcusa_test(test_ds_mixer)
 
 # Prepared MSL compiles with the system Metal device. The shaders come from the
 # player's executable (tools/shaderprep), so the test skips where none exist.

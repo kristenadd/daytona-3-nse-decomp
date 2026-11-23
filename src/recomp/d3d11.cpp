@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "audio/ds_mixer.hpp"
 #include "gpu/metal.hpp"
 #include "recomp/guest.hpp"
 #include "recomp/guest_memory.hpp"
@@ -29,6 +30,11 @@ namespace dcusa::recomp {
 
 std::vector<std::uint8_t> g_frame;
 dcusa::Presenter* g_presenter = nullptr;
+
+audio::DsMixer& sound_mixer() {
+    static audio::DsMixer mixer;
+    return mixer;
+}
 std::uint32_t g_frame_w = 0;
 std::uint32_t g_frame_h = 0;
 
@@ -1642,7 +1648,50 @@ void print_pad_trace(const std::uint8_t* mem, int present_no) {
                  mem[0x19C8800u], mem[0x19C8801u], ld32(mem, 0x19C880Cu), mem[0x15278F8u + 7u]);
 }
 
+// DCUSA_SELFTEST_MATH=1: at the first present (the CRT is initialised by then,
+// so its SSE2 / x87 choice is made), runs the translated CRT cos and sqrt
+// wrappers (argument and result in ST(0)) and prints them next to the host's.
+void selftest_math(Cpu& c) {
+    static bool done = false;
+    if (done || std::getenv("DCUSA_SELFTEST_MATH") == nullptr) return;
+    done = true;
+    const struct {
+        const char* name;
+        std::uint32_t fn;
+        double (*host)(double);
+    } fns[] = {{"cos", 0x00C397F0u, [](double x) { return std::cos(x); }},
+               {"sqrt", 0x00C398E0u, [](double x) { return std::sqrt(x); }},
+               {"log?", 0x00C399E0u, [](double x) { return std::log(x); }},
+               {"tan?", 0x00C3AC00u, [](double x) { return std::tan(x); }},
+               {"sin?", 0x00C3AD30u, [](double x) { return std::sin(x); }}};
+    const double args[] = {0.0, 0.0654498, 0.5, 1.0, 2.0, 3.14159265, 10.0, 1000.0};
+    for (const auto& f : fns)
+        for (double x : args) {
+            const unsigned depth = c.fpu.top;
+            c.fpu.push(x);
+            call_guest(c, f.fn, {});
+            const double got = c.fpu.at(0);
+            c.fpu.pop();
+            std::fprintf(stderr, "selftest %s(%.9g) = %.12g, host %.12g%s (fpu top %u -> %u)\n", f.name, x, got, f.host(x),
+                         std::fabs(got - f.host(x)) > 1e-9 ? "  MISMATCH" : "", depth, c.fpu.top);
+        }
+    // _CIpow (0xC39410): x in ST(1), y in ST(0); the result replaces both.
+    const double pairs[][2] = {{2, 0.5}, {10, 2}, {10, -0.19}, {0.5, 3}, {10, 0.05}, {2, -1}, {1.5, 2.2}};
+    for (const auto& p : pairs) {
+        const unsigned depth = c.fpu.top;
+        c.fpu.push(p[0]);
+        c.fpu.push(p[1]);
+        call_guest(c, 0x00C39410u, {});
+        const double got = c.fpu.at(0);
+        c.fpu.pop();
+        const double want = std::pow(p[0], p[1]);
+        std::fprintf(stderr, "selftest pow(%g, %g) = %.12g, host %.12g%s (fpu top %u -> %u)\n", p[0], p[1], got, want,
+                     std::fabs(got - want) > 1e-9 * std::max(1.0, std::fabs(want)) ? "  MISMATCH" : "", depth, c.fpu.top);
+    }
+}
+
 void present(Cpu& c) {
+    selftest_math(c);
     {
         static int all_presents = 0;
         print_watch(c.mem, ++all_presents);
@@ -2369,6 +2418,43 @@ std::array<std::uint8_t, 18> default_wave_format() {
     return f;
 }
 
+// Sound buffer memory: guest bytes Lock hands out, carved from kSoundScratch.
+// A released buffer's bytes go back to a free list by size (the game makes
+// three buffers at start-up; CRI may make and drop more).
+std::uint32_t sound_used = 0;
+std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> sound_free;
+
+std::uint32_t sound_alloc(std::uint8_t* mem, std::uint32_t bytes) {
+    bytes = (bytes + 63u) & ~63u;
+    if (auto it = sound_free.find(bytes); it != sound_free.end() && !it->second.empty()) {
+        const std::uint32_t at = it->second.back();
+        it->second.pop_back();
+        std::memset(mem + at, 0, bytes);
+        return at;
+    }
+    if (sound_used == 0 && mprotect(mem + kSoundScratch, kSoundScratchBytes, PROT_READ | PROT_WRITE) != 0)
+        fail_closed(Unported::Service, kSoundScratch, "DirectSound buffer memory");
+    if (sound_used + bytes > kSoundScratchBytes)
+        fail_closed(Unported::Service, kSoundScratch, "DirectSound buffer memory is full");
+    const std::uint32_t at = kSoundScratch + sound_used;
+    sound_used += bytes;
+    return at;
+}
+
+audio::WaveFormat wave_format(const std::array<std::uint8_t, 18>& f) {
+    audio::WaveFormat w;
+    w.tag = static_cast<std::uint16_t>(f[0] | f[1] << 8);
+    w.channels = static_cast<std::uint16_t>(f[2] | f[3] << 8);
+    w.rate = static_cast<std::uint32_t>(f[4] | f[5] << 8 | f[6] << 16 | f[7] << 24);
+    w.block = static_cast<std::uint16_t>(f[12] | f[13] << 8);
+    w.bits = static_cast<std::uint16_t>(f[14] | f[15] << 8);
+    return w;
+}
+
+// CreateSoundBuffer(desc, out, outer). DSBUFFERDESC: dwSize, dwFlags,
+// dwBufferBytes, dwReserved, lpwfxFormat. The primary buffer (DSBCAPS_PRIMARYBUFFER,
+// 1) only carries the output format; secondary buffers get memory and a voice.
+// The object keeps its size at +12 and its memory at +24.
 void ds_create_buffer(Cpu& c) {
     const std::uint32_t desc = arg(c, 1);
     const std::uint32_t out = arg(c, 2);
@@ -2376,10 +2462,14 @@ void ds_create_buffer(Cpu& c) {
     std::array<std::uint8_t, 18> format = default_wave_format();
     if (desc != 0 && ld32(c.mem, desc + 16) != 0) std::memcpy(format.data(), c.mem + ld32(c.mem, desc + 16), 18);
     sound_formats[obj] = format;
-    std::uint32_t bytes = desc == 0 ? 0u : ld32(c.mem, desc + 8);
-    if (bytes > kSoundScratchBytes) bytes = kSoundScratchBytes;
+    const bool primary = desc != 0 && (ld32(c.mem, desc + 4) & 1u) != 0;
+    const std::uint32_t bytes = desc == 0 || primary ? 0u : ld32(c.mem, desc + 8);
     st32(c.mem, obj + 12, bytes);
-    st32(c.mem, obj + 16, 0);
+    if (bytes != 0) {
+        const std::uint32_t at = sound_alloc(c.mem, bytes);
+        st32(c.mem, obj + 24, at);
+        sound_mixer().create(obj, wave_format(format), c.mem + at, bytes);
+    }
     if (out != 0) st32(c.mem, out, obj);
     ret_stdcall(c, kSOk, 16);
 }
@@ -2398,52 +2488,58 @@ void ds_caps(Cpu& c) {
     if (caps != 0) {
         const std::uint32_t n = ld32(c.mem, caps);
         if (n > 4 && n <= 256) std::memset(c.mem + caps + 4, 0, n - 4);
+        // DSBCAPS: dwSize, dwFlags, dwBufferBytes. The game's streaming code
+        // reads the size back.
+        if (n >= 12 && ld32(c.mem, arg(c, 0) + 4) == DSoundBuf) st32(c.mem, caps + 8, ld32(c.mem, arg(c, 0) + 12));
     }
     ret_stdcall(c, kSOk, 8);
 }
 
+// GetCurrentPosition(play, write): where the output has got to, in bytes.
 void ds_position(Cpu& c) {
-    const std::uint32_t self = arg(c, 0);
-    const std::uint32_t play = arg(c, 1);
-    const std::uint32_t write = arg(c, 2);
-    std::uint32_t bytes = ld32(c.mem, self + 12);
-    if (bytes == 0) bytes = 1;
-    std::uint32_t cursor = ld32(c.mem, self + 16);
-    cursor = (cursor + 256u) % bytes;
-    st32(c.mem, self + 16, cursor);
-    if (play != 0) st32(c.mem, play, cursor);
-    if (write != 0) st32(c.mem, write, cursor);
+    std::uint32_t play = 0, write = 0;
+    sound_mixer().position(arg(c, 0), &play, &write);
+    if (arg(c, 1) != 0) st32(c.mem, arg(c, 1), play);
+    if (arg(c, 2) != 0) st32(c.mem, arg(c, 2), write);
     ret_stdcall(c, kSOk, 12);
 }
 
+// Lock(offset, bytes, *p1, *n1, *p2, *n2, flags): the range in the buffer's
+// memory, split in two where it wraps. DSBLOCK_FROMWRITECURSOR (1) starts at
+// the write cursor; DSBLOCK_ENTIREBUFFER (2) takes all of it.
 void ds_lock(Cpu& c) {
-    const std::uint32_t bytes = arg(c, 2);
-    const std::uint32_t p1 = arg(c, 3);
-    const std::uint32_t n1 = arg(c, 4);
-    const std::uint32_t p2 = arg(c, 5);
-    const std::uint32_t n2 = arg(c, 6);
-    if (mprotect(c.mem + kSoundScratch, kSoundScratchBytes, PROT_READ | PROT_WRITE) != 0)
-        fail_closed(Unported::Service, kSoundScratch, "DirectSound lock");
-    std::uint32_t n = bytes == 0 ? 16u : bytes;
-    if (n > kSoundScratchBytes) n = kSoundScratchBytes;
-    if (p1 != 0) st32(c.mem, p1, kSoundScratch);
-    if (n1 != 0) st32(c.mem, n1, n);
-    if (p2 != 0) st32(c.mem, p2, 0);
-    if (n2 != 0) st32(c.mem, n2, 0);
+    const std::uint32_t self = arg(c, 0);
+    const std::uint32_t size = ld32(c.mem, self + 12);
+    const std::uint32_t base = ld32(c.mem, self + 24);
+    const std::uint32_t p1 = arg(c, 3), n1 = arg(c, 4), p2 = arg(c, 5), n2 = arg(c, 6), flags = arg(c, 7);
+    if (size == 0 || base == 0) {
+        ret_stdcall(c, 0x80070057u, 32);  // E_INVALIDARG: the primary buffer has no memory
+        return;
+    }
+    std::uint32_t offset = arg(c, 1), bytes = arg(c, 2);
+    if ((flags & 1u) != 0) {
+        std::uint32_t play = 0;
+        sound_mixer().position(self, &play, &offset);
+    }
+    if ((flags & 2u) != 0) bytes = size;
+    offset %= size;
+    bytes = std::min(bytes, size);
+    const std::uint32_t first = std::min(bytes, size - offset);
+    if (p1 != 0) st32(c.mem, p1, base + offset);
+    if (n1 != 0) st32(c.mem, n1, first);
+    if (p2 != 0) st32(c.mem, p2, bytes > first ? base : 0u);
+    if (n2 != 0) st32(c.mem, n2, bytes - first);
     ret_stdcall(c, kSOk, 32);
 }
 
-// Play(reserved, priority, flags). DSBPLAY_LOOPING is 1; GetStatus reports
-// DSBSTATUS_PLAYING (1), plus DSBSTATUS_LOOPING (4) for a looping play.
+// Play(reserved, priority, flags). DSBPLAY_LOOPING is 1.
 void ds_play(Cpu& c) {
-    st32(c.mem, arg(c, 0) + 20, (arg(c, 3) & 1u) != 0 ? 5u : 1u);
+    sound_mixer().play(arg(c, 0), (arg(c, 3) & 1u) != 0);
     ret_stdcall(c, kSOk, 16);
 }
 
 void ds_set_position(Cpu& c) {
-    const std::uint32_t self = arg(c, 0);
-    const std::uint32_t bytes = ld32(c.mem, self + 12);
-    st32(c.mem, self + 16, bytes == 0 ? 0u : arg(c, 1) % bytes);
+    sound_mixer().set_position(arg(c, 0), arg(c, 1));
     ret_stdcall(c, kSOk, 8);
 }
 
@@ -2464,25 +2560,64 @@ void ds_set_format(Cpu& c) {
     ret_stdcall(c, kSOk, 8);
 }
 
-// GetVolume, GetPan, GetFrequency: full volume, centred, 44.1 kHz.
+// GetVolume (+0x18), GetPan (+0x1C), GetFrequency (+0x20).
 void ds_get_level(Cpu& c, std::uint32_t slot) {
-    const std::uint32_t out = arg(c, 1);
-    if (out != 0) st32(c.mem, out, slot == 0x20 ? 44100u : 0u);
+    const std::uint32_t self = arg(c, 0), out = arg(c, 1);
+    if (out != 0) {
+        audio::DsMixer& m = sound_mixer();
+        st32(c.mem, out, slot == 0x18 ? static_cast<std::uint32_t>(m.volume(self))
+                         : slot == 0x1C ? static_cast<std::uint32_t>(m.pan(self)) : m.frequency(self));
+    }
     ret_stdcall(c, kSOk, 8);
 }
 
 void ds_stop(Cpu& c) {
-    st32(c.mem, arg(c, 0) + 20, 0);
+    sound_mixer().stop(arg(c, 0));
     ret_stdcall(c, kSOk, 4);
 }
 
 void ds_status(Cpu& c) {
     const std::uint32_t out = arg(c, 1);
-    if (out != 0) st32(c.mem, out, ld32(c.mem, arg(c, 0) + 20));
+    if (out != 0) st32(c.mem, out, sound_mixer().status(arg(c, 0)));
     ret_stdcall(c, kSOk, 8);
 }
 
-void ds_volume(Cpu& c) { ret_stdcall(c, kSOk, 8); }
+// DCUSA_DSOUND_TRACE=1: the first calls of each kind per buffer, with their
+// arguments and caller, and every CreateSoundBuffer in full.
+void ds_trace(Cpu& c, bool device, std::uint32_t slot) {
+    static const bool on = std::getenv("DCUSA_DSOUND_TRACE") != nullptr;
+    if (!on) return;
+    static std::unordered_map<std::uint64_t, unsigned> seen;
+    const std::uint32_t self = arg(c, 0);
+    const unsigned n = ++seen[(std::uint64_t(self) << 16) | slot];
+    if (device && slot == 0x0C) {
+        const std::uint32_t desc = arg(c, 1);
+        const std::uint32_t fmt = desc ? ld32(c.mem, desc + 16) : 0;
+        std::fprintf(stderr, "ds create flags %08x bytes %u fmt %u ch %u rate %u bits %u (caller %08x)\n",
+                     desc ? ld32(c.mem, desc + 4) : 0, desc ? ld32(c.mem, desc + 8) : 0, fmt ? ld16(c.mem, fmt) : 0,
+                     fmt ? ld16(c.mem, fmt + 2) : 0, fmt ? ld32(c.mem, fmt + 4) : 0, fmt ? ld16(c.mem, fmt + 14) : 0,
+                     ld32(c.mem, c.r[Cpu::ESP]));
+        if (fmt != 0) {
+            std::fprintf(stderr, "   format bytes:");
+            for (unsigned i = 0; i < 40; ++i) std::fprintf(stderr, " %02x", c.mem[fmt + i]);
+            std::fprintf(stderr, "\n");
+        }
+        return;
+    }
+    if (n > 6 && n != 100 && n != 1000 && n != 10000) return;
+    std::fprintf(stderr, "ds %s %08x slot %02x #%u args %08x %08x %08x %08x %08x (caller %08x)\n", device ? "dev" : "buf",
+                 self, slot, n, arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), ld32(c.mem, c.r[Cpu::ESP]));
+}
+
+// SetVolume (+0x3C), SetPan (+0x40), SetFrequency (+0x44).
+void ds_set_level(Cpu& c, std::uint32_t slot) {
+    const std::uint32_t self = arg(c, 0), v = arg(c, 1);
+    audio::DsMixer& m = sound_mixer();
+    if (slot == 0x3C) m.set_volume(self, static_cast<std::int32_t>(v));
+    else if (slot == 0x40) m.set_pan(self, static_cast<std::int32_t>(v));
+    else m.set_frequency(self, v);
+    ret_stdcall(c, kSOk, 8);
+}
 void ds_unlock(Cpu& c) { ret_stdcall(c, kSOk, 20); }
 void ds_restore(Cpu& c) { ret_stdcall(c, kSOk, 4); }
 
@@ -2868,6 +3003,12 @@ void destroy(std::uint8_t* mem, std::uint32_t obj) {
     shader_obj_key.erase(obj);
     reflector_source.erase(obj);
     gpu::destroy(obj);
+    if (kind == DSoundBuf) {
+        sound_mixer().remove(obj);
+        sound_formats.erase(obj);
+        if (const std::uint32_t at = ld32(mem, obj + 24); at != 0)
+            sound_free[(ld32(mem, obj + 12) + 63u) & ~63u].push_back(at);
+    }
     if (obj == pipe.backbuffer) pipe.backbuffer = 0;
     st32(mem, obj, 0);  // a call through a stale pointer now fails closed (no vtable)
     free_slots.push_back(obj);
@@ -3242,6 +3383,7 @@ void call_com(Cpu& c, std::uint32_t target) {
     if (kind == DInputDev && slot == 0x2C) return dinput_format(c);
     if (kind == DInputDev && slot == 0x34) return dinput_coop(c);
     if (kind == DInputDev && slot == 0x64) return dinput_acquire(c);
+    if (kind == DSound || kind == DSoundBuf) ds_trace(c, kind == DSound, slot);
     if (kind == DSound && slot == 0x0C) return ds_create_buffer(c);
     if (kind == DSound && slot == 0x10) return ds_caps(c);
     if (kind == DSound && slot == 0x18) return ds_coop(c);
@@ -3256,7 +3398,7 @@ void call_com(Cpu& c, std::uint32_t target) {
     if (kind == DSoundBuf && slot == 0x30) return ds_play(c);
     if (kind == DSoundBuf && slot == 0x34) return ds_set_position(c);
     if (kind == DSoundBuf && slot == 0x38) return ds_set_format(c);
-    if (kind == DSoundBuf && slot >= 0x3C && slot <= 0x44) return ds_volume(c);
+    if (kind == DSoundBuf && slot >= 0x3C && slot <= 0x44) return ds_set_level(c, slot);
     if (kind == DSoundBuf && slot == 0x48) return ds_stop(c);
     if (kind == DSoundBuf && slot == 0x4C) return ds_unlock(c);
     if (kind == DSoundBuf && slot == 0x50) return ds_restore(c);

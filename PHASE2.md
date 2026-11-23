@@ -511,6 +511,15 @@ by a handler yet.
   bodies, or instructions after a throw. None of the stale tails is on the path that
   reaches the frame loop. Fixing it belongs in the liveness pass; a fresh translation
   would also drop the two hand edits.
+  Fixed for returned flags: `find_flag_returning` (translate.py) scans the instructions
+  after every direct call, and a callee whose flags are read before anything writes
+  them, or a call that leads straight into a function reading flags on entry, keeps
+  every flag live at its `ret` (with the pieces it tail-jumps to). The CRT sqrt wrapper
+  `0xC398E0` calls `0xC630C8` (`cmp eax, 0x7ff00000; ret`) and then `0xC398FD`, whose
+  first `je` reads that compare. With the flags dropped, sqrt returned its argument.
+  CRI's ADX coefficients (`0xC00050`, `√2 − cos(…)` and a square root) came out as
+  about −2.0 and −2.8, the sound-effect decoder `0xBFF940` overflowed to NaN, and the
+  game's 5.1 output was all −32768.
 - **More ground-truth cases:**
   - Locked operations under contention wait for a second guest thread. Item 3 decided the
     ordering and did not add that thread, so there is no contention to test.

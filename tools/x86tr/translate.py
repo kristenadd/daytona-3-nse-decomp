@@ -379,7 +379,7 @@ class FunctionTranslator(X87Mixin, SseMixin):
     def flag_effect(self, insn):
         parts = insn.mnemonic.split()
         m = parts[-1]
-        if m == 'ret' and self.tr.flags_live_at_exit:
+        if m == 'ret' and (self.tr.flags_live_at_exit or self.fn.entry in self.tr.flags_returned):
             return 0, F.ALL
         if parts[0] in ('rep', 'repe', 'repne') and m[:4] in ('cmps', 'scas'):
             return F.ALL, F.ALL
@@ -1303,6 +1303,7 @@ class Translator:
         self.cs.detail = True
         self.data = data
         self.flags_live_at_exit = flags_live_at_exit
+        self.flags_returned = set()  # see find_flag_returning
         self.functions = {fn['entry']: fn for fn in data['functions']}
         self.entries = set(self.functions)
         self.walker = Walker(image)
@@ -1314,6 +1315,73 @@ class Translator:
         fn = self.walker.walk(entry)
         ft = FunctionTranslator(self, fn)
         return ft.translate(), ft.refs, len(fn.insns), ft.trapped
+
+
+def find_flag_returning(tr, entries):
+    """Functions whose flags at ret a caller reads.
+
+    Flags normally die at ret. Some compiler and CRT helpers return a result in
+    them: 0xC630C8 ends in `cmp eax, 0x7ff00000; ret`, and the CRT sqrt wrapper
+    then calls 0xC398FD, whose first branch (`je`) reads that compare. With the
+    flags dropped at ret the branch read stale flags and sqrt returned its input.
+
+    For every direct call, the instructions after it are scanned in a straight
+    line: a flag read before anything writes it, or a call to a function that
+    reads flags on entry, makes the callee flag-returning. So are the functions
+    it tail-jumps to, whose ret is its ret."""
+    cs = tr.cs
+    entry_reads = {}
+
+    def decode(va):
+        if not tr.img.contains(va, 16):
+            return None
+        return next(cs.disasm(tr.img.bytes(va, 16), va, 1), None)
+
+    def reads_before_writing(va, depth):
+        defined = 0
+        for _ in range(16):
+            insn = decode(va)
+            if insn is None:
+                return False
+            m = insn.mnemonic.split()[-1]
+            if m == 'call':
+                op = insn.operands[0] if insn.operands else None
+                if op is not None and op.type == X.X86_OP_IMM and depth < 2:
+                    t = op.imm & 0xFFFFFFFF
+                    if t not in entry_reads:
+                        entry_reads[t] = reads_before_writing(t, depth + 1)
+                    return entry_reads[t]
+                return False
+            d, u = F.flags_of(m, True)
+            if u & ~defined:
+                return True
+            defined |= d
+            if defined == F.ALL or m in ('ret', 'retf', 'jmp', 'int3', 'ud2', 'hlt'):
+                return False
+            va += insn.size
+        return False
+
+    marked = set()
+    for entry in entries:
+        fn = tr.walker.walk(entry)
+        for va in sorted(fn.insns):
+            insn = fn.insns[va]  # cfg.Insn: va, size, mnem, ops
+            if insn.mnem != 'call':
+                continue
+            target = insn.direct_target()
+            if target is None or target in marked or target not in tr.functions:
+                continue
+            if reads_before_writing(insn.next, 0):
+                marked.add(target)
+    # A function's ret may be in a piece it tail-jumps to.
+    todo = list(marked)
+    while todo:
+        f = tr.functions.get(todo.pop())
+        for t in (f or {}).get('tail_calls', []):
+            if t not in marked and t in tr.functions:
+                marked.add(t)
+                todo.append(t)
+    return marked
 
 
 STUB = 'void f_%08X(Cpu& c) { guest_unported(c, 0x%08Xu, "%s"); }'
@@ -1362,6 +1430,8 @@ def main():
     if args.limit:
         selected = selected[:args.limit]
     chosen = set(selected)
+    tr.flags_returned = find_flag_returning(tr, selected)
+    print('%d functions return flags to their callers (%.0fs)' % (len(tr.flags_returned), time.time() - t0), flush=True)
 
     reasons = collections.Counter()
     samples = collections.defaultdict(list)

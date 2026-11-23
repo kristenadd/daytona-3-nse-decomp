@@ -1346,8 +1346,13 @@ int main() {
     pad = {};
     set_pad_snapshot(pad);
 
+    // DSBUFFERDESC: dwSize, dwFlags (0: a secondary buffer), dwBufferBytes,
+    // dwReserved, lpwfxFormat (0: the default format).
     st32(m, Buf + 16, 36);
+    st32(m, Buf + 20, 0);
     st32(m, Buf + 24, 256);
+    st32(m, Buf + 28, 0);
+    st32(m, Buf + 32, 0);
     c = make_cpu(mem);
     call(c, "DSOUND.dll!#11", {0u, Buf + 8, 0u});
     CHECK(c.r[Cpu::EAX] == 0);

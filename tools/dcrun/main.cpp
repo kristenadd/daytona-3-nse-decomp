@@ -14,7 +14,9 @@
 #include <optional>
 #include <string>
 
+#include "audio/null_output.hpp"
 #include "gpu/metal.hpp"
+#include "platform/macos/core_audio_output.hpp"
 #include "platform/macos/game_window.hpp"
 #include "recomp/d3d11.hpp"
 #include "recomp/generated.hpp"
@@ -198,6 +200,25 @@ int main(int argc, char** argv) {
         window = dcusa::make_game_window("Daytona Championship USA", 1280, 720);
         dcusa::gpu::set_layer(window->layer());
         dcusa::recomp::set_presenter(window.get());
+    }
+    // Sound: the speakers for a windowed run. Headless, DCUSA_AUDIO=0 or
+    // DCUSA_AUDIO_WAV=<file> use a device-less output paced in real time (the
+    // last also records what the game played).
+    std::unique_ptr<dcusa::AudioOutput> audio;
+    {
+        const char* wav = std::getenv("DCUSA_AUDIO_WAV");
+        const char* on = std::getenv("DCUSA_AUDIO");
+        const bool speakers = !headless && wav == nullptr && !(on != nullptr && std::string(on) == "0");
+        if (speakers) {
+            audio = dcusa::make_core_audio_output();
+            if (!audio->start(dcusa::audio::DsMixer::kOutputRate, dcusa::audio::DsMixer::pull,
+                              &dcusa::recomp::sound_mixer()))
+                audio.reset();
+        }
+        if (!audio) {
+            audio = dcusa::audio::make_null_output(wav != nullptr ? wav : "");
+            audio->start(dcusa::audio::DsMixer::kOutputRate, dcusa::audio::DsMixer::pull, &dcusa::recomp::sound_mixer());
+        }
     }
     std::fprintf(stderr, "%.*s entry %08X, %zu imports\n", static_cast<int>(info.id.size()), info.id.data(),
                  static_cast<unsigned>(process.entry()), process.imports().size());
