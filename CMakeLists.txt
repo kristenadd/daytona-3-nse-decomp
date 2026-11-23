@@ -166,10 +166,17 @@ if(dcusa_generated_dir)
     endif()
     # Same floating-point rules as the runtime; no warnings (the code mirrors the
     # guest instruction by instruction) and no debug info (it would run to gigabytes).
-    target_compile_options(dcusa_generated PRIVATE -w -O2 -g0 -ffp-contract=off -fno-fast-math)
+    set(DCUSA_GENERATED_OPT "-O2" CACHE STRING "optimisation level for the translated code")
+    target_compile_options(dcusa_generated PRIVATE -w ${DCUSA_GENERATED_OPT} -g0 -ffp-contract=off -fno-fast-math)
     # Profile-guided optimisation of the translated code and the runtime (PHASE3
     # "Frame-rate profile"): DCUSA_PGO=generate builds an instrumented dcrun, whose
     # run writes LLVM_PROFILE_FILE; DCUSA_PGO=<merged .profdata> builds with it.
+    # A linker order file (one symbol per line) puts the functions a run used
+    # next to each other, for the instruction cache and TLB (PHASE3).
+    set(DCUSA_ORDER_FILE "" CACHE FILEPATH "linker order file for dcrun")
+    if(DCUSA_ORDER_FILE)
+        target_link_options(dcusa_generated INTERFACE "LINKER:-order_file,${DCUSA_ORDER_FILE}")
+    endif()
     set(DCUSA_PGO "" CACHE STRING "generate, or a merged .profdata to optimise with")
     if(DCUSA_PGO STREQUAL "generate")
         target_compile_options(dcusa_generated PRIVATE -fprofile-instr-generate)

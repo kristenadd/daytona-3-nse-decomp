@@ -339,6 +339,25 @@ cooperative scheduler.
   dispatch 2%. What is left is the translated code doing the engine's work:
   about 6 us per draw.
 
+Two directions were then measured and set aside:
+
+- **A native draw path.** The draw path is the engine's material system:
+  `0x76D510` walks render items with a virtual call each, `0x733490` runs a
+  pass per material (a virtual call, `0x458BC0`, 15% of the main thread; the
+  draw `0x6CFDB0`, 21%; then a virtual setter per parameter, `0x735260` /
+  `0x735380` / `0x735430`, 16%). `0x6CFDB0` alone reaches 318 functions and
+  about 17,000 instructions by direct calls. A faithful native port is far
+  larger than its likely gain; a native fast path for `0x6CFDB0`'s common
+  case remains an option.
+- **Smaller or better-placed code.** A linker order file of the functions a
+  run executes (`DCUSA_ORDER_FILE`, 26,305 functions from the PGO profile) and
+  `-Os` for the generated code (`DCUSA_GENERATED_OPT`, text 38.9 to 38.0 MB)
+  were both within noise. Instruments' CPU Counters, checked against a
+  compute loop and a pointer chase, put about a quarter of the main thread in
+  memory stalls and under a tenth in mispredictions, with no sign that
+  instruction fetch is the limit on this Mac. Both options stay in the build
+  for devices with smaller caches.
+
 `dcrun --content <folder>` mounts that install and stays in the frame loop.
 `DCUSA_STATS=1 DCUSA_EVERY=100` prints draw counts every 100 presents.
 `DCUSA_FRAME=<path>` writes present 1, 30, and every `DCUSA_EVERY`th as PPM.
