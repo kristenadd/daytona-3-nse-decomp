@@ -69,6 +69,31 @@ buffer keeps its `WAVEFORMATEX`), `QueryInterface` for `IDirectSoundBuffer8`,
 region reusable, and the heap continues at `0x80000000` past its two fixed
 regions.
 
+## Operator settings (landed)
+
+The cabinet's Test and Service buttons open the shell's operator menu
+(`Shell.exe` with `shell/GameTest*.ini` and `GameAdvancedTest*.ini`), which
+does not run here. The game's own path for them is closed in this release.
+No device profile maps actions 0 / 1 (Test / Service) or `0x12` / `0x13`
+(SW1 / SW2); the keyboard source `0x47CB80` returns false; and no shell message
+sets them. So the game's test-mode classes are unreachable, as on the cabinet
+without the shell.
+
+What the menu changes is `ShellData.ini`, which the game reads itself:
+`[Credit] Freeplay`, `[Audio]` volumes, `[CalibrationData]`. `dcrun
+--shell-setting Section.Key=Value` (repeatable) edits the container's copy,
+made from the install's the first time, and the game reads that copy in place
+of the install's. Checked with `Credit.Freeplay=0` and a pad script:
+
+- Attract shows "INSERT CREDIT(S) TO START / CREDIT(S) 0", as in the Windows
+  capture.
+- Start with no credit is ignored.
+- A coin (`SHELL_MSG_SETCREDIT`) shows "CREDIT(S) 1" and "PRESS START BUTTON".
+- Start then opens Single Player.
+
+`Credit.Freeplay=1` restores free play. The setting stays in the container
+until it is changed.
+
 ## Controls (landed)
 
 The cabinet's controls are a USB IO board the game reads through DirectInput.

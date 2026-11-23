@@ -13,6 +13,7 @@
 #include <sstream>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "audio/null_output.hpp"
 #include "gpu/metal.hpp"
@@ -72,14 +73,82 @@ void install_fault_report(const std::uint8_t* base) {
     sigaction(SIGSEGV, &sa, nullptr);
 }
 
-void usage() {
-    std::fprintf(stderr,
-                 "usage: dcrun [--edition 2017|2019] [--content <folder>] [--headless] <prepared-cache>\n"
-                 "  Opens a window and plays; --headless (or DCUSA_WINDOW=0) runs offscreen.\n");
+// The cabinet's operator menu belongs to the shell (Shell.exe), which does not
+// run here; what it changes is ShellData.ini (credits / free play, volumes,
+// calibration). --shell-setting Section.Key=Value edits the container's copy
+// (made from the install's the first time), which the game reads in place of
+// the install's. Returns false with a message on a malformed setting.
+bool apply_shell_setting(const std::filesystem::path& install_root, const std::filesystem::path& writable,
+                         const std::string& setting) {
+    const std::size_t dot = setting.find('.'), eq = setting.find('=');
+    if (dot == std::string::npos || eq == std::string::npos || dot > eq || dot == 0 || eq == dot + 1) {
+        std::fprintf(stderr, "--shell-setting wants Section.Key=Value, got %s\n", setting.c_str());
+        return false;
+    }
+    const std::string section = setting.substr(0, dot), key = setting.substr(dot + 1, eq - dot - 1),
+                      value = setting.substr(eq + 1);
+    const std::filesystem::path copy = writable / "ShellData" / "ShellData.ini";
+    std::error_code ec;
+    if (!std::filesystem::exists(copy)) {
+        std::filesystem::create_directories(copy.parent_path(), ec);
+        std::filesystem::copy_file(install_root / "ShellData" / "ShellData.ini", copy, ec);
+    }
+    std::ifstream in(copy);
+    std::vector<std::string> lines;
+    for (std::string l; std::getline(in, l);) {
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        lines.push_back(l);
+    }
+    in.close();
+    // Replace the key in its section, or add it (and the section) at the end.
+    bool in_section = false, done = false;
+    std::size_t section_end = lines.size();
+    for (std::size_t i = 0; i < lines.size() && !done; ++i) {
+        const std::string& l = lines[i];
+        if (!l.empty() && l.front() == '[') {
+            if (in_section) section_end = i;
+            in_section = l == "[" + section + "]";
+            if (in_section) section_end = lines.size();
+            continue;
+        }
+        if (in_section && l.compare(0, key.size() + 1, key + "=") == 0) {
+            lines[i] = key + "=" + value;
+            done = true;
+        }
+    }
+    if (!done) {
+        bool have = false;
+        for (std::size_t i = 0; i < lines.size(); ++i)
+            if (lines[i] == "[" + section + "]") {
+                have = true;
+                std::size_t at = i + 1;
+                while (at < lines.size() && (lines[at].empty() || lines[at].front() != '[')) ++at;
+                lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(at), key + "=" + value);
+                break;
+            }
+        if (!have) {
+            lines.push_back("[" + section + "]");
+            lines.push_back(key + "=" + value);
+        }
+    }
+    (void)section_end;
+    std::ofstream out(copy, std::ios::binary);
+    for (const std::string& l : lines) out << l << "\r\n";
+    std::fprintf(stderr, "shell setting [%s] %s=%s\n", section.c_str(), key.c_str(), value.c_str());
+    return static_cast<bool>(out);
 }
 
-// A windowed run needs Metal, a shader folder and translation of the shaders
-// it has not seen; each is on unless the environment already says otherwise.
+void usage() {
+    std::fprintf(stderr,
+                 "usage: dcrun [--edition 2017|2019] [--content <folder>] [--headless]\n"
+                 "             [--shell-setting Section.Key=Value ...] <prepared-cache>\n"
+                 "  Opens a window and plays; --headless (or DCUSA_WINDOW=0) runs offscreen.\n"
+                 "  --shell-setting changes the operator settings in ShellData.ini, for example\n"
+                 "  Credit.Freeplay=0 (coins) or 1 (free play), Audio.MusicVolume=80.\n");
+}
+
+// A run needs Metal, a shader folder and translation of the shaders it has not
+// seen; each is on unless the environment already says otherwise.
 // The shader folder is <cache folder>/shaders: the game's HLSL is captured
 // there on first use and translated during the run.
 void windowed_defaults(const char* cache) {
@@ -98,11 +167,18 @@ int main(int argc, char** argv) {
     const char* path = nullptr;
     const char* content = nullptr;
     bool headless = false;
+    std::vector<std::string> shell_settings;
     if (const char* w = std::getenv("DCUSA_WINDOW"); w != nullptr && std::string(w) == "0") headless = true;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--headless") {
             headless = true;
+        } else if (arg == "--shell-setting") {
+            if (i + 1 >= argc) {
+                usage();
+                return 2;
+            }
+            shell_settings.push_back(argv[++i]);
         } else if (arg == "--content") {
             if (i + 1 >= argc) {
                 usage();
@@ -130,7 +206,7 @@ int main(int argc, char** argv) {
         usage();
         return 2;
     }
-    if (!headless) windowed_defaults(path);
+    windowed_defaults(path);  // headless runs draw with Metal too; DCUSA_METAL=0 selects the 2D reference
 
     dcusa::ExeImage image;
     std::string error;
@@ -170,6 +246,8 @@ int main(int argc, char** argv) {
         const std::filesystem::path writable = std::filesystem::path(path).parent_path() / "container";
         std::error_code ec;
         std::filesystem::create_directories(writable, ec);
+        for (const std::string& setting : shell_settings)
+            if (!apply_shell_setting(install->install_root, writable, setting)) return 2;
         dcusa::recomp::set_guest_files(install->install_root, install->game_dir.filename().string(), writable);
         std::fprintf(stderr, "content %s\n", install->game_dir.string().c_str());
     }
