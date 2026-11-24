@@ -1,4 +1,5 @@
 #include "gpu/metal.hpp"
+#include "gpu/bc_decode.hpp"
 #include "gpu/metal_direct.hpp"
 #include "runtime/hitch.hpp"
 
@@ -30,6 +31,9 @@ struct Texture {
     MTLPixelFormat format = MTLPixelFormatInvalid;
     bool depth = false;
     bool cube = false;  // a cube map (D3D11_RESOURCE_MISC_TEXTURECUBE): six faces per element
+    // A BC texture on a GPU without BC sampling: held decoded (gpu/bc_decode),
+    // each upload decoded on the way in.
+    bool bc_decoded = false;
     // MSAA (DCUSA_MSAA): the multisampled surface passes render into; `tex` is
     // its resolve, which everything that reads the texture sees.
     id<MTLTexture> ms = nil;
@@ -112,6 +116,9 @@ struct Device {
     std::uint8_t enc_slice[kTargets]{};
     std::uint32_t enc_dsv = 0;
     std::string shader_dir;
+    // The GPU samples BC1-BC7 itself (all Macs, recent iPads and iPhones);
+    // otherwise BC textures are decoded on upload. DCUSA_BC_DECODE=1 forces that.
+    bool bc_native = true;
     std::unordered_map<std::uint32_t, Texture> textures;
     std::unordered_map<std::uint32_t, BufferRef> buffers;
     // Upload arenas: buffer updates are copied into the current arena, so a
@@ -1273,9 +1280,31 @@ bool enabled() {
     g_dev->queue = [dev newCommandQueue];
     profile_init();
     g_dev->shader_dir = dir;
+    {
+        const char* force = std::getenv("DCUSA_BC_DECODE");
+        g_dev->bc_native = dev.supportsBCTextureCompression && !(force != nullptr && std::strcmp(force, "1") == 0);
+    }
     if (verbose())
         std::fprintf(stderr, "metal: %s, BCn %s\n", dev.name.UTF8String,
                      dev.supportsBCTextureCompression ? "yes" : "no");
+    return true;
+}
+
+bool is_bc(std::uint32_t dxgi) {
+    return (dxgi >= 70 && dxgi <= 84) || (dxgi >= 94 && dxgi <= 99);
+}
+
+// A BC upload decoded to the texture's plain format; `bytes`, `size` and
+// `row_pitch` then describe the decoded pixels.
+bool decode_bc(std::uint32_t dxgi, std::uint32_t w, std::uint32_t h, const std::uint8_t*& bytes, std::size_t& size,
+               std::uint32_t& row_pitch, std::vector<std::uint8_t>& out) {
+    const std::uint32_t bpp = bc_decoded_bytes(dxgi);
+    const std::uint32_t pitch = w * bpp;
+    out.resize(static_cast<std::size_t>(pitch) * h);
+    if (bpp == 0 || !bc_decode(dxgi, bytes, size, row_pitch, w, h, out.data(), pitch)) return false;
+    bytes = out.data();
+    size = out.size();
+    row_pitch = pitch;
     return true;
 }
 
@@ -1289,8 +1318,21 @@ void upload_texture_sub(std::uint32_t key, std::uint32_t slice, std::uint32_t mi
 void create_texture(std::uint32_t key, const TextureDesc& desc) {
     if (!enabled()) return;
     bool depth = false;
-    const MTLPixelFormat format = pixel_format(desc.format, (desc.bind & 0x40u) != 0, &depth);
+    MTLPixelFormat format = pixel_format(desc.format, (desc.bind & 0x40u) != 0, &depth);
     Texture t;
+    if (!g_dev->bc_native && is_bc(desc.format)) {
+        switch (bc_decoded_bytes(desc.format)) {
+        case 1: format = MTLPixelFormatR8Unorm; break;
+        case 2: format = MTLPixelFormatRG8Unorm; break;
+        case 4:
+            format = desc.format == 72 || desc.format == 75 || desc.format == 78 || desc.format == 99
+                         ? MTLPixelFormatRGBA8Unorm_sRGB
+                         : MTLPixelFormatRGBA8Unorm;
+            break;
+        default: format = MTLPixelFormatInvalid; break;  // BC6H and the signed BC4 / BC5: not decoded
+        }
+        t.bc_decoded = true;
+    }
     t.desc = desc;
     t.format = format;
     t.depth = depth;
@@ -1375,8 +1417,9 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
     Texture& t = it->second;
     if (t.cube) return upload_texture_sub(key, 0, 0, bytes, size, row_pitch);  // face 0, level 0
     flush_clears(t);
-    const bool bc = t.desc.format >= 70 && t.desc.format <= 99 && t.desc.format != 87 && t.desc.format != 88 &&
-                    t.desc.format != 90 && t.desc.format != 91;
+    std::vector<std::uint8_t> decoded;
+    if (t.bc_decoded && !decode_bc(t.desc.format, t.desc.width, t.desc.height, bytes, size, row_pitch, decoded)) return;
+    const bool bc = !t.bc_decoded && is_bc(t.desc.format);
     const std::uint32_t rows = bc ? (t.desc.height + 3) / 4 : t.desc.height;
     if (row_pitch == 0 || static_cast<std::size_t>(row_pitch) * rows > size) return;
     // A texture a pending draw may read gets a new Metal texture for the new bytes.
@@ -1418,8 +1461,9 @@ void upload_texture_sub(std::uint32_t key, std::uint32_t slice, std::uint32_t mi
     if (slice >= slices) return;
     flush_clears(*t);
     const std::uint32_t w = std::max(1u, t->desc.width >> mip), h = std::max(1u, t->desc.height >> mip);
-    const bool bc = t->desc.format >= 70 && t->desc.format <= 99 && t->desc.format != 87 && t->desc.format != 88 &&
-                    t->desc.format != 90 && t->desc.format != 91;
+    std::vector<std::uint8_t> decoded;
+    if (t->bc_decoded && !decode_bc(t->desc.format, w, h, bytes, size, row_pitch, decoded)) return;
+    const bool bc = !t->bc_decoded && is_bc(t->desc.format);
     const std::uint32_t rows = bc ? (h + 3) / 4 : h;
     if (row_pitch == 0 || static_cast<std::size_t>(row_pitch) * rows > size) return;
     if (t->tex.storageMode == MTLStorageModePrivate) {

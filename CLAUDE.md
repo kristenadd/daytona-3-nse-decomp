@@ -56,6 +56,11 @@ agreed to this).
 7. **Phase 5.** **Verified** (see below). CTest `phase5_attract` and
    `phase5_controls` (label `phase5`; [PHASE5.md](PHASE5.md)).
 
+8. **iOS and iPadOS.** **Verified in the Simulator** (see below). Next: a
+   real device (signing team, extended-virtual-addressing and
+   increased-memory-limit entitlements), touch controls, BC6H decoding if the
+   game uses it.
+
 ## Future work
 
 - **Boot "Data Loading" time.** Boot takes about 7,500 presents (about two
@@ -129,5 +134,11 @@ agreed to this).
   through Video for Windows) now shows, and the race after name entry starts
   (the guest heap's free list had made the load crawl). The user confirmed
   both in the window. PHASE4 "Video" correction and "Guest heap".
+- **iOS Simulator** (item 8). `cmake --preset ios-sim`; with the cache, shaders
+  and game folder in the app's Documents, the iPad Pro 13-inch Simulator boots
+  through Data Loading to attract and draws the 3D demo with the ranking board.
+  The Simulator has no BC textures; they are decoded on upload, and
+  `test_bc_decode` matches the Mac GPU (BC1-3 and BC7 exactly, BC4/5 to the
+  nearest value).
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.

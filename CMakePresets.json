@@ -10,17 +10,41 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_OSX_ARCHITECTURES": "arm64"
       }
+    },
+    {
+      "name": "ios-sim",
+      "displayName": "iOS Simulator app (arm64)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ios-sim",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphonesimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "17.0"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "mac-host", "configurePreset": "mac-host" }
+    {
+      "name": "mac-host",
+      "configurePreset": "mac-host"
+    },
+    {
+      "name": "ios-sim",
+      "configurePreset": "ios-sim"
+    }
   ],
   "testPresets": [
     {
       "name": "mac-host",
       "configurePreset": "mac-host",
-      "output": { "outputOnFailure": true },
-      "execution": { "jobs": 8 }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 8
+      }
     }
   ]
 }

@@ -8,6 +8,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# iOS / iPadOS (the ios-sim preset): the same libraries and an app instead of
+# the Mac tools and tests (src/platform/ios).
+set(DCUSA_IOS OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(DCUSA_IOS ON)
+endif()
+
 if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
     message(FATAL_ERROR "Apple builds require -DCMAKE_OSX_ARCHITECTURES=arm64 (use the presets)")
 endif()
@@ -66,6 +73,7 @@ add_library(dcusa_recomp STATIC
     src/audio/ds_mixer.cpp
     src/audio/null_output.cpp
     src/gpu/metal.mm
+    src/gpu/bc_decode.cpp
     src/gpu/gpu_queue.mm)
 target_include_directories(dcusa_recomp PUBLIC src)
 target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal" "-framework QuartzCore"
@@ -190,14 +198,41 @@ if(dcusa_generated_dir)
                                -Wno-profile-instr-out-of-date)
     endif()
 
-    add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm
-                         src/platform/macos/game_window.mm src/platform/macos/core_audio_output.mm)
-    set_source_files_properties(src/platform/macos/gamecontroller_pad.mm src/platform/macos/game_window.mm
-                                src/platform/macos/core_audio_output.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system "-framework GameController" "-framework AppKit"
-                                        "-framework QuartzCore" "-framework AudioToolbox")
-    dcusa_warnings(dcrun)
+    if(NOT DCUSA_IOS)
+        add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm
+                             src/platform/macos/game_window.mm src/platform/macos/core_audio_output.mm)
+        set_source_files_properties(src/platform/macos/gamecontroller_pad.mm src/platform/macos/game_window.mm
+                                    src/platform/macos/core_audio_output.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system "-framework GameController" "-framework AppKit"
+                                            "-framework QuartzCore" "-framework AudioToolbox")
+        dcusa_warnings(dcrun)
+    else()
+        # The iPhone / iPad app. Simulator builds are signed ad hoc after linking;
+        # a device build needs a development team (DCUSA_IOS_TEAM) and the
+        # extended virtual addressing entitlement (the 4 GB guest space).
+        add_executable(DaytonaUSA MACOSX_BUNDLE src/platform/ios/ios_app.mm src/platform/macos/gamecontroller_pad.mm
+                                                src/platform/macos/core_audio_output.mm)
+        set_source_files_properties(src/platform/ios/ios_app.mm src/platform/macos/gamecontroller_pad.mm
+                                    src/platform/macos/core_audio_output.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        set(DCUSA_IOS_BUNDLE_ID "local.dcusa.DaytonaUSA" CACHE STRING "bundle identifier of the iOS app")
+        set_target_properties(DaytonaUSA PROPERTIES
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Info.plist.in"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "${DCUSA_IOS_BUNDLE_ID}"
+            MACOSX_BUNDLE_BUNDLE_NAME "DaytonaUSA"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
+            MACOSX_BUNDLE_BUNDLE_VERSION "1")
+        target_link_libraries(DaytonaUSA PRIVATE dcusa_generated dcusa_system "-framework UIKit" "-framework GameController"
+                                                 "-framework QuartzCore" "-framework AudioToolbox" "-framework AVFoundation"
+                                                 "-framework Metal" "-framework Foundation")
+        if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+            add_custom_command(TARGET DaytonaUSA POST_BUILD
+                COMMAND codesign --force --sign - --timestamp=none "$<TARGET_BUNDLE_DIR:DaytonaUSA>"
+                COMMENT "Signing DaytonaUSA.app ad hoc for the simulator")
+        endif()
+    endif()
 endif()
+
+if(NOT DCUSA_IOS)
 
 # ---- tools ----
 add_executable(dcprepare tools/dcprepare/main.cpp)
@@ -224,6 +259,11 @@ dcusa_test(test_native)
 dcusa_test(test_imports)
 dcusa_test(test_threads)
 dcusa_test(test_metal)
+add_executable(test_bc_decode tests/test_bc_decode.mm)
+target_link_libraries(test_bc_decode PRIVATE dcusa_recomp)
+target_compile_options(test_bc_decode PRIVATE -fobjc-arc)
+add_test(NAME test_bc_decode COMMAND test_bc_decode)
+set_tests_properties(test_bc_decode PROPERTIES SKIP_RETURN_CODE 77)
 dcusa_test(test_shell)
 dcusa_test(test_pad)
 dcusa_test(test_ds_mixer)
@@ -282,3 +322,4 @@ if(TARGET dcrun AND DCUSA_PREPARED_CACHE)
     set_tests_properties(phase5_attract PROPERTIES TIMEOUT 1200)
 endif()
 set_tests_properties(test_game_files PROPERTIES LABELS "game-files" TIMEOUT 300)
+endif()  # NOT DCUSA_IOS

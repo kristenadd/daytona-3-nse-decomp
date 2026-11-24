@@ -1,4 +1,6 @@
 #include "recomp/d3d11.hpp"
+
+#include <TargetConditionals.h>
 #include "runtime/hitch.hpp"
 
 #include <sys/mman.h>
@@ -3416,11 +3418,13 @@ void D3DCompile(Cpu& c) {
     bool prepared = prepared_binds(request.key, &binds, &buffers);
     // DCUSA_TRANSLATE=1: a request with no translation yet is translated now,
     // so a run that reaches a new scene does not need a restart.
+#if !TARGET_OS_IPHONE  // iOS has no Python and no processes: it ships the shaders translated
     if (!prepared && shader_dir() != nullptr && std::getenv("DCUSA_TRANSLATE") != nullptr) {
         const std::string cmd = std::string("python3 '") + DCUSA_SOURCE_DIR "/tools/shaderprep/translate_shaders.py' '" +
                                 shader_dir() + "' --quiet --only " + key_text(request.key);
         if (std::system(cmd.c_str()) == 0) prepared = prepared_binds(request.key, &binds, &buffers);
     }
+#endif
     if (prepared) {
         shader_buffers[obj + 32] = buffers;
         ++g_prepared;

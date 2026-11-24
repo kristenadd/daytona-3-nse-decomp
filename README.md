@@ -38,6 +38,36 @@ start, right/left trigger gas/brake, left stick steering, right/left shoulder
 shift up/down, Y/X/B/A views 1-4. Menus are confirmed with the gas.
 `--headless` (or `DCUSA_WINDOW=0`) runs without a window, for scripted runs.
 
+## iPhone and iPad
+
+The same game code builds as an iOS / iPadOS app (`src/platform/ios`). It is
+verified in the Simulator (iPad Pro 13-inch, iOS 27.2): it boots to attract and
+draws the 3D demo. A real device is not tried yet.
+
+```bash
+cmake --preset ios-sim
+cmake --build --preset ios-sim
+```
+
+That gives `build/ios-sim/DaytonaUSA.app`, signed ad hoc for the Simulator.
+The app reads its files from its Documents folder (reachable from the Files
+app, or Finder with the device connected): `DCUSA2019.cache` and the
+`shaders` folder (both from the Mac's `build/mac-host/prepared`) and the game
+folder. Shaders cannot be translated on the device, so the shaders folder must
+already hold every shader the game uses. In the Simulator, put them in place
+with `xcrun simctl get_app_container booted local.dcusa.DaytonaUSA data` and
+copy into its `Documents`; `cp -cR` clones the 5 GB game folder without using
+space. (A symlink does not work: the install scan does not follow links.)
+
+GPUs without BC texture support (the Simulator, older iPhones) get BC1-BC5 and
+BC7 decoded on upload (`src/gpu/bc_decode`), matching the Mac GPU's own decode
+(`test_bc_decode`). BC6H is not decoded yet. `DCUSA_BC_DECODE=1` forces the
+decoder on a Mac.
+
+For a device, still to do: a signing team (`-DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM`
+or a codesign identity), and the extended-virtual-addressing and
+increased-memory-limit entitlements, since the guest address space is 4 GB.
+
 ## Building and testing (macOS, Apple silicon)
 
 ```bash
@@ -110,7 +140,8 @@ shader source and stays out of the repository.
 | `src/runtime` | fail-closed reporting, the platform contract (`host_platform.hpp`) |
 | `src/recomp` | guest machine state, the 4 GB guest address space, indirect-call dispatch, helpers the translated code calls, Win32 / D3D11 / DirectSound handlers, cooperative guest threads (`threads.cpp`) |
 | `tools/x86tr` | function discovery, the x86 → C++ translator, the Rosetta ground-truth instruction tests |
-| `src/gpu` | the offscreen Metal device behind the D3D11 calls |
+| `src/gpu` | the offscreen Metal device behind the D3D11 calls; BC texture decoding for GPUs without it |
+| `src/platform/ios` | the iOS / iPadOS app: UIKit scene, Metal layer, game thread |
 | `tools/shaderprep` | HLSL → SPIR-V → MSL for the captured compile requests, with per-class binding slots and reflection |
 | `tools/mslcheck` | compiles prepared MSL with the system Metal device (CTest `test_msl`) |
 | `tools/dcprepare` | verifies installations and writes the prepared images |

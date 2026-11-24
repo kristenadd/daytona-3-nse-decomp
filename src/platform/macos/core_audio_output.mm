@@ -1,6 +1,10 @@
 #include "platform/macos/core_audio_output.hpp"
 
 #include <AudioToolbox/AudioToolbox.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <AVFoundation/AVFoundation.h>
+#endif
 
 #include <cstdio>
 
@@ -17,7 +21,17 @@ public:
         user_ = user;
         AudioComponentDescription desc{};
         desc.componentType = kAudioUnitType_Output;
+#if TARGET_OS_IPHONE
+        // iOS: the RemoteIO unit, in a playback session (sound with the ring /
+        // silent switch off, as a game expects).
+        AVAudioSession* session = [AVAudioSession sharedInstance];
+        [session setCategory:AVAudioSessionCategoryPlayback error:nil];
+        [session setPreferredSampleRate:sample_rate error:nil];
+        [session setActive:YES error:nil];
+        desc.componentSubType = kAudioUnitSubType_RemoteIO;
+#else
         desc.componentSubType = kAudioUnitSubType_DefaultOutput;
+#endif
         desc.componentManufacturer = kAudioUnitManufacturer_Apple;
         AudioComponent comp = AudioComponentFindNext(nullptr, &desc);
         if (comp == nullptr || AudioComponentInstanceNew(comp, &unit_) != noErr) return fail("no output unit");
