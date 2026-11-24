@@ -716,11 +716,10 @@ std::uint32_t guest_find_close(std::uint32_t handle) {
 // Settings of GameData/config.ini the host overrides: DCUSA_INI="Section.Key=Value;..."
 // (section and key in any case), on top of the platform's defaults (iOS: a
 // phone's GPU budget, see kPhoneIni).
-// iOS: the scene width stays at 960. An iPhone 15 Pro Max settles there, but
-// near the dynamic resolution thresholds the width kept stepping between 960
-// and wider, and after such changes in a race the stands, fence and far grass
-// drew black (CLAUDE.md "Known issues"). Pinned, they draw right.
-const char* const kPhoneIni = "Render.DYNAMIC_RESOLUTION_MAX=960";
+// Empty: the width was pinned at 960 while width changes drew the stands
+// black; the cause was texture uploads racing a mip carry-over (metal.mm,
+// Texture::carried), so the dynamic resolution is free again.
+const char* const kPhoneIni = "";
 
 std::optional<std::string> ini_override(std::string_view windows_path, std::string_view section, std::string_view key) {
     std::string file = lower_copy(windows_path);

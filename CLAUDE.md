@@ -121,9 +121,10 @@ agreed to this).
   time: always on the phone after the unpaced fast boot, and around width
   changes. Those writes now go through the GPU while a carry-over may be
   pending. A Mac race after an unpaced boot (`DCUSA_BOOT_PACE=0
-  DCUSA_PAD_SCRIPT_FROM=attract`) reproduced it and now draws right;
-  waiting on a race on the phone. iOS still pins the width at 960
-  (`kPhoneIni`), which may no longer be needed.
+  DCUSA_PAD_SCRIPT_FROM=attract`) reproduced it and now draws right, and
+  the user raced on the phone and the stands looked right. The 960 width
+  pin is removed (`kPhoneIni` empty) to see whether races also stay right
+  with the dynamic resolution free.
 - **iPhone races are below 60 fps** (about 20.6 ms a frame; item 8, "Speed").
 - With `DCUSA_METAL=0` (the 2D software reference instead of Metal), a run
   stops at about present 120 on an `int3` at `0x6D14B8`, the end of
