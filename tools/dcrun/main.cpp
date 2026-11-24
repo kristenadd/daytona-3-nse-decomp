@@ -1,6 +1,7 @@
 // Runs a prepared Daytona.exe until the first thing that is not ported.
 #include <mach-o/dyld.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
 
@@ -169,6 +170,13 @@ void windowed_defaults(const char* cache) {
 }
 
 int main(int argc, char** argv) {
+    // The game keeps hundreds of data files open. An app started from Finder
+    // gets a soft limit of 256 open files (a shell, far more); past it opens
+    // failed and the boot stopped. Raise it to what the system allows.
+    if (rlimit lim{}; getrlimit(RLIMIT_NOFILE, &lim) == 0 && lim.rlim_cur < 10240) {
+        lim.rlim_cur = std::min<rlim_t>(lim.rlim_max, 10240);
+        setrlimit(RLIMIT_NOFILE, &lim);
+    }
     std::optional<dcusa::Edition> want;
     const char* path = nullptr;
     const char* content = nullptr;
