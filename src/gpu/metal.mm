@@ -40,6 +40,10 @@ struct Texture {
     // Top mip levels left out (DCUSA_TEXTURE_LIMIT): the Metal texture's level 0
     // is the game's level `skip`.
     std::uint32_t skip = 0;
+    // A GPU blit copying the smaller levels into a new `tex` (upload_texture,
+    // "mip carry-over") may not have run yet: CPU writes to those levels would
+    // land first and be overwritten by it, so they go through the GPU too.
+    bool carried = false;
     // MSAA (DCUSA_MSAA): the multisampled surface passes render into; `tex` is
     // its resolve, which everything that reads the texture sees.
     id<MTLTexture> ms = nil;
@@ -1661,6 +1665,7 @@ void upload_texture(std::uint32_t key, const std::uint8_t* bytes, std::size_t si
                     [blit copyFromTexture:old sourceSlice:0 sourceLevel:level toTexture:t.tex destinationSlice:0
                          destinationLevel:level sliceCount:1 levelCount:1];
                 [blit endEncoding];
+                t.carried = true;
             }
         }
         [t.tex replaceRegion:MTLRegionMake2D(0, 0, t.desc.width, t.desc.height) mipmapLevel:0 withBytes:bytes
@@ -1684,7 +1689,9 @@ void upload_texture_sub(std::uint32_t key, std::uint32_t slice, std::uint32_t mi
     const bool bc = !t->bc_decoded && is_bc(t->desc.format);
     const std::uint32_t rows = bc ? (h + 3) / 4 : h;
     if (row_pitch == 0 || static_cast<std::size_t>(row_pitch) * rows > size) return;
-    if (t->tex.storageMode == MTLStorageModePrivate) {
+    // Once the GPU is idle any carry-over blit has run, and CPU writes are safe again.
+    if (t->carried && g_dev->cmd == nil && !gpu_busy()) t->carried = false;
+    if (t->tex.storageMode == MTLStorageModePrivate || t->carried) {
         id<MTLBuffer> staging = [g_dev->dev newBufferWithBytes:bytes length:size options:MTLResourceStorageModeShared];
         end_pass();
         id<MTLBlitCommandEncoder> blit = blit_encoder("texture upload");

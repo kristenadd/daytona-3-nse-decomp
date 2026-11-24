@@ -1882,8 +1882,11 @@ void pace_present(Cpu& c, std::uint32_t sync_interval) {
     // once a frame. Unpaced, that part takes about a third of the time, but in
     // about 12,600 presents instead of 7,000, so a pad script (DCUSA_PAD_SCRIPT,
     // timed in presents) keeps the boot paced.
-    static const bool boot_paced =
-        std::getenv("DCUSA_BOOT_PACE") != nullptr || std::getenv("DCUSA_PAD_SCRIPT") != nullptr;
+    // DCUSA_BOOT_PACE=0 leaves it unpaced even with a script.
+    static const bool boot_paced = [] {
+        if (const char* v = std::getenv("DCUSA_BOOT_PACE")) return std::atoi(v) != 0;
+        return std::getenv("DCUSA_PAD_SCRIPT") != nullptr;
+    }();
     static clock::time_point& next = g_pace_next;
     // Each boot state change goes to the log with the time since the first present.
     static const clock::time_point first = clock::now();
@@ -2076,7 +2079,13 @@ void present(Cpu& c) {
         std::fprintf(stderr, "present: sync interval %u flags %u\n", arg(c, 1), arg(c, 2));
     }
     pace_present(c, arg(c, 1));
-    sample_pad();  // the controls for the frame the game builds next
+    // DCUSA_PAD_SCRIPT_FROM=attract: a pad script's frame 1 is the first present
+    // of attract (boot state 8), so one script fits a paced or unpaced boot.
+    static const bool from_attract = [] {
+        const char* v = std::getenv("DCUSA_PAD_SCRIPT_FROM");
+        return v != nullptr && std::strcmp(v, "attract") == 0;
+    }();
+    if (!from_attract || g_boot_state >= 8) sample_pad();  // the controls for the frame the game builds next
     if (gpu::enabled()) {
         static int presents = 0;
         ++presents;
