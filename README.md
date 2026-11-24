@@ -111,7 +111,7 @@ a `DEVICECTL_CHILD_` prefix; relative paths are in Documents, so
 and `DEVICECTL_CHILD_DCUSA_PAD_SCRIPT=race.txt` plays a pad script.
 ## Settings
 
-The port has no settings file of its own. The game reads its two .ini
+The port has no settings file of its own. The game reads three .ini
 files, and the port's own options are environment variables. On iOS the
 variables go through devicectl with a `DEVICECTL_CHILD_` prefix (see above).
 
@@ -157,6 +157,34 @@ build/mac-host/dcrun --shell-setting Credit.Freeplay=0 --content "<folder>" buil
 | `Audio` | `MusicVolume=80`, `SFXVolume=100`, `VoiceVolume=90`, `AttractMusic=3` |
 | `CalibrationData` | `AccelUp=30`, `AccelDown=200`, `BrakeUp=30`, `BrakeDown=200`, `SteeringLeft=15`, `SteeringRight=247`, `FeedbackStrength=2` |
 | `Network` | `Enabled=0`, `CabinetID=1`, `NumCabinets=1` |
+
+### ShellData/GameSettings.ini (game rules: difficulty, race length, selection)
+
+The game itself reads `../ShellData/GameSettings.ini`, one section
+`[GameSettings]` whose values are the option names below (the operator menu's
+choices, from `shell/GameTest.ini` and `shell/GameAdvancedTest.ini`).
+`--shell-setting` does not edit this file. Copy it to
+`container/ShellData/GameSettings.ini` (beside the ShellData.ini copy) and
+edit that. A file in the container takes the place of the game folder's.
+
+| Key (installed value) | Options |
+| --- | --- |
+| `DIFFICULTY` (EASY) | VERY EASY, EASY, MEDIUM, HARD, VERY HARD |
+| `GAME LENGTH` (MEDIUM) | VERY SHORT, SHORT, MEDIUM, LONG, VERY LONG, CLASSIC MODE |
+| `CAR SELECT` (CHOOSE) | CHOOSE, RANDOM, 1-5 |
+| `TRACK SELECT` (CHOOSE) | CHOOSE, RANDOM, EASY ONLY, 37_SPEED, DINOSAUR, SEASIDE, DAYTONA, LAKESIDE, METRO |
+| `TRANSMISSION SELECT` (ON) | ON, OFF |
+| `MENU TIMINGS` (MEDIUM) | SHORT, MEDIUM, LONG |
+| `CAMERA ENABLED`, `INSTANT REMATCH`, `CHAMPIONSHIP MODE`, `CHAMPIONSHIP CONTINUE` (YES) | YES, NO |
+| `START ON COIN ENTRY`, `AUTO DRIVE` (NO) | NO, YES |
+| `TOURNAMENT MODE` (OFF) | OFF, EXCLUSIVE, ON |
+| `TOURNAMENT DURATION` (14) | 1-30 (days) |
+| `TOURNAMENT TYPE` (CUSTOM) | CUSTOM, CHAMPIONSHIP |
+| `CUSTOM TOURNAMENT CAR` (1), `CUSTOM TOURNAMENT TRACK` (37_SPEED) | as CAR SELECT / TRACK SELECT without CHOOSE and RANDOM |
+| `CUSTOM TOURNAMENT TRANSMISSION` (CHOOSE) | CHOOSE, MANUAL, AUTOMATIC |
+| `TOURNAMENT CONTINUE` (NO) | NO, YES |
+| `TOURNAMENT DATE FORMAT` (MM/DD/YY) | MM/DD/YY, YY/MM/DD, DD/MM/YY |
+| `DRESS CODE` (OFF), `PARTY MODE` (not in the installed file) | OFF, ON |
 
 ### iOS Settings app
 
