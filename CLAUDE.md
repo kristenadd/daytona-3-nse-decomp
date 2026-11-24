@@ -62,6 +62,10 @@ agreed to this).
   stops at about present 120 on an `int3` at `0x6D14B8`, the end of
   `0x6D1460`. The Metal path, the default, is unaffected. Not investigated.
 
+- GPU memory reached 4.3 GB (5,455 Metal allocations) in a windowed session
+  after several races. Possibly just every mip level plus the 4x MSAA targets,
+  possibly a leak that grows per race. Not measured yet.
+
 ## Verified fixed
 
 - **Audio output** (item 1). A headless run records the mix (`DCUSA_AUDIO_WAV`).
