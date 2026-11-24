@@ -235,13 +235,22 @@ carries its smaller levels over. Blend states with `AlphaToCoverageEnable`
 alpha to coverage; with one sample a pixel that is an alpha test at 0.5, as in
 D3D11. Without it the trees were solid green cards.
 
-**Anti-aliasing.** The game asks for 2x and 4x MSAA for its scene buffers;
-the D3D layer says no (`DCUSA_MSAA=1` says yes, experimental: the game then
-creates 4x scene buffers and 4x-specific shadow shaders, which Metal does not
-yet render as multisampled). Instead an FXAA pass (FXAA 3.11 quality
+**Anti-aliasing.** The game asks for 2x and 4x MSAA for its scene buffers.
+With `DCUSA_MSAA=4` (the default) or 2 the D3D layer says yes: the game creates its scene
+colour, depth and R16F targets with that sample count and draws the scene
+into them. Each such texture gets a multisampled Metal surface beside it
+(`Texture::ms`); a pass whose targets all have one renders into them
+(`pass_samples`, the pipeline's `rasterSampleCount`), keeps them for later
+passes that load, and resolves into the ordinary texture
+(`StoreAndMultisampleResolve`; depth takes sample 0), which is what the post
+chain and every other reader sees. Clears cover both. A `texture2d_ms` input
+gets the multisampled colour surface, or a 4x zero stand-in. Alpha to coverage
+then gives the foliage and fence cut-outs soft edges. 4x is the default (on
+this Mac about 0.7 ms of GPU time a race frame and no CPU time);
+`DCUSA_MSAA=0` turns MSAA off. Independently, an FXAA pass (FXAA 3.11 quality
 algorithm, `antialias` in metal.mm) runs on the back buffer before it is
-shown or read back: on by default, `DCUSA_AA=0` off, `DCUSA_AA=split` on the
-right half only for comparison. Over 20 race frames it cuts the right half's
+shown or read back: `DCUSA_AA=1` on, `0` off, `split` on the right half only
+for comparison; unset, it is on only when MSAA is off. Over 20 race frames it cuts the right half's
 edge energy relative to the left by about a quarter. The scene is drawn
 1280 wide and stretched to 1920 before FXAA sees it, which limits how much
 it can smooth.

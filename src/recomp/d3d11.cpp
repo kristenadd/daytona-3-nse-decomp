@@ -1482,6 +1482,7 @@ void create_texture(Cpu& c) {
         td.bind = ld32(c.mem, desc + 32);
         td.misc = ld32(c.mem, desc + 40);
         td.initial = arg(c, 2) != 0;
+        td.samples = std::max(1u, ld32(c.mem, desc + 20));
         gpu::create_texture(obj, td);
     }
     const std::uint32_t initial = arg(c, 2);
@@ -1533,12 +1534,25 @@ void texture_desc(Cpu& c) {
     ret_stdcall(c, kSOk, 8);
 }
 
+// MSAA, 4x by default (the game's own anti-aliasing): the game is told that
+// many samples are supported and draws its scene into multisampled targets,
+// which Metal resolves for everything that reads them. DCUSA_MSAA=2 for 2x,
+// DCUSA_MSAA=0 for none (then FXAA, DCUSA_AA, is on by default instead).
+std::uint32_t msaa_samples() {
+    static const std::uint32_t n = [] {
+        const char* v = std::getenv("DCUSA_MSAA");
+        const int k = v ? std::atoi(v) : 4;
+        return k >= 4 ? 4u : k >= 2 ? 2u : k == 1 ? 4u : 0u;
+    }();
+    return n;
+}
+
 void check_msaa(Cpu& c) {
     const std::uint32_t count = arg(c, 2);
     const std::uint32_t out = arg(c, 3);
-    static const bool msaa = std::getenv("DCUSA_MSAA") != nullptr;
     if (stats_on()) std::fprintf(stderr, "CheckMultisampleQualityLevels format %u count %u\n", arg(c, 1), count);
-    if (out != 0) st32(c.mem, out, count == 1 || (msaa && (count == 2 || count == 4)) ? 1u : 0u);
+    const std::uint32_t most = msaa_samples();
+    if (out != 0) st32(c.mem, out, count == 1 || (count == 2 && most >= 2) || (count == 4 && most >= 4) ? 1u : 0u);
     ret_stdcall(c, kSOk, 16);
 }
 

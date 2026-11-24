@@ -30,6 +30,10 @@ struct Texture {
     MTLPixelFormat format = MTLPixelFormatInvalid;
     bool depth = false;
     bool cube = false;  // a cube map (D3D11_RESOURCE_MISC_TEXTURECUBE): six faces per element
+    // MSAA (DCUSA_MSAA): the multisampled surface passes render into; `tex` is
+    // its resolve, which everything that reads the texture sees.
+    id<MTLTexture> ms = nil;
+    std::uint32_t samples = 1;
     // A depth texture the shaders read as Texture2D: an R32Float copy, taken
     // again after each pass or clear that may have changed the depth.
     std::uint64_t written = 0, copied = ~0ull;
@@ -66,6 +70,7 @@ struct StageUse {
     std::uint32_t textures = 0;  // bit per texture index
     std::uint32_t depth = 0;     // of those, the depth2d ones
     std::uint32_t cube = 0;      // and the texturecube ones
+    std::uint32_t ms = 0;        // and the texture2d_ms ones
     std::uint32_t samplers = 0;
     // Bytes the function reads from each constant buffer.
     std::uint32_t buffer_size[kBuffers] = {};
@@ -125,7 +130,7 @@ struct Device {
     std::unordered_map<std::uint64_t, Program> programs;
     std::unordered_map<std::string, Pipeline> pipelines;
     id<MTLBuffer> zero_buffer = nil;
-    id<MTLTexture> zero_texture = nil, zero_depth = nil, zero_cube = nil;
+    id<MTLTexture> zero_texture = nil, zero_depth = nil, zero_cube = nil, zero_ms = nil;
     id<MTLSamplerState> default_sampler = nil;
     std::unordered_map<std::uint32_t, id<MTLDepthStencilState>> depth_states;
     std::unordered_map<std::string, bool> reported;
@@ -637,6 +642,12 @@ void flush_clears(Texture& t) {
         pass.colorAttachments[0].level = mip;
         pass.colorAttachments[0].loadAction = MTLLoadActionClear;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (t.ms != nil && mip == 0) {  // the multisampled surface too, resolved into tex
+            pass.colorAttachments[0].texture = t.ms;
+            pass.colorAttachments[0].level = 0;
+            pass.colorAttachments[0].resolveTexture = t.tex;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+        }
         const float* c = t.clear_rgba[mip];
         pass.colorAttachments[0].clearColor = MTLClearColorMake(c[0], c[1], c[2], c[3]);
         profile_pass(pass, target_label("clear", &t, mip));
@@ -648,6 +659,12 @@ void flush_clears(Texture& t) {
         pass.depthAttachment.loadAction = (t.clear_ds & 1u) ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.depthAttachment.storeAction = MTLStoreActionStore;
         pass.depthAttachment.clearDepth = t.clear_depth;
+        if (t.ms != nil) {
+            pass.depthAttachment.texture = t.ms;
+            pass.depthAttachment.resolveTexture = t.tex;
+            pass.depthAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+            pass.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+        }
         if (has_stencil(t.format)) {
             pass.stencilAttachment.texture = t.tex;
             pass.stencilAttachment.loadAction = (t.clear_ds & 2u) ? MTLLoadActionClear : MTLLoadActionLoad;
@@ -722,6 +739,26 @@ id<MTLTexture> mip_view(Texture& t, std::uint32_t first, std::uint32_t count) {
     return v;
 }
 
+// The sample count a pass over these targets renders with: the targets'
+// multisampled surfaces when every one has them with the same count, else 1.
+std::uint32_t pass_samples(const std::uint32_t rtv[kTargets], std::uint32_t dsv) {
+    std::uint32_t n = 0;
+    bool mixed = false;
+    auto note = [&](Texture* t) {
+        if (t == nullptr) return;
+        const std::uint32_t c = t->ms != nil ? t->samples : 1;
+        if (n == 0) n = c;
+        else if (n != c) mixed = true;
+    };
+    for (unsigned i = 0; i < kTargets; ++i) note(rtv[i] ? texture(rtv[i]) : nullptr);
+    note(dsv ? texture(dsv) : nullptr);
+    if (mixed) {
+        problem("pass mixes multisampled and single-sampled targets; drawn single-sampled");
+        return 1;
+    }
+    return n == 0 ? 1 : n;
+}
+
 bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTargets], const std::uint8_t slice[kTargets],
                 std::uint32_t dsv) {
     Device& d = *g_dev;
@@ -732,15 +769,22 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
     end_pass();
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     bool any = false;
+    // MSAA: draw into the multisampled surfaces, keep them (a later pass may
+    // load them) and resolve into the textures everything else reads.
+    const bool msaa = pass_samples(rtv, dsv) > 1;
     for (unsigned i = 0; i < kTargets; ++i) {
         Texture* t = rtv[i] ? texture(rtv[i]) : nullptr;
         if (t == nullptr || t->depth) continue;
         const NSUInteger level = std::min<NSUInteger>(mip[i], t->tex.mipmapLevelCount - 1);
-        pass.colorAttachments[i].texture = t->tex;
-        pass.colorAttachments[i].level = level;
+        pass.colorAttachments[i].texture = msaa ? t->ms : t->tex;
+        pass.colorAttachments[i].level = msaa ? 0 : level;
         pass.colorAttachments[i].slice = t->cube ? std::min<NSUInteger>(slice[i], 6 * t->tex.arrayLength - 1) : 0;
         pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
-        pass.colorAttachments[i].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[i].storeAction = msaa ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
+        if (msaa) {
+            pass.colorAttachments[i].resolveTexture = t->tex;
+            pass.colorAttachments[i].resolveLevel = level;
+        }
         if (level < 16 && slice[i] == 0 && (t->clear_mips & (1u << level))) {
             const float* c = t->clear_rgba[level];
             pass.colorAttachments[i].loadAction = MTLLoadActionClear;
@@ -752,15 +796,20 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
     }
     if (Texture* t = dsv ? texture(dsv) : nullptr; t != nullptr && t->depth) {
         ++t->written;
-        pass.depthAttachment.texture = t->tex;
+        pass.depthAttachment.texture = msaa ? t->ms : t->tex;
         pass.depthAttachment.loadAction = (t->clear_ds & 1u) ? MTLLoadActionClear : MTLLoadActionLoad;
-        pass.depthAttachment.storeAction = MTLStoreActionStore;
+        pass.depthAttachment.storeAction = msaa ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
         pass.depthAttachment.clearDepth = t->clear_depth;
+        if (msaa) {
+            pass.depthAttachment.resolveTexture = t->tex;
+            pass.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+        }
         if (has_stencil(t->format)) {
-            pass.stencilAttachment.texture = t->tex;
+            pass.stencilAttachment.texture = msaa ? t->ms : t->tex;
             pass.stencilAttachment.loadAction = (t->clear_ds & 2u) ? MTLLoadActionClear : MTLLoadActionLoad;
-            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.storeAction = msaa ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
             pass.stencilAttachment.clearStencil = t->clear_stencil;
+            if (msaa) pass.stencilAttachment.resolveTexture = t->tex;
         }
         t->clear_ds = 0;
         any = true;
@@ -803,6 +852,7 @@ void note_use(NSArray<id<MTLBinding>>* bindings, StageUse* use) {
             const id<MTLTextureBinding> tb = static_cast<id<MTLTextureBinding>>(b);
             if (tb.isDepthTexture) use->depth |= bit;
             if (tb.textureType == MTLTextureTypeCube || tb.textureType == MTLTextureTypeCubeArray) use->cube |= bit;
+            if (tb.textureType == MTLTextureType2DMultisample) use->ms |= bit;
         }
         if (b.type == MTLBindingTypeSampler) use->samplers |= bit;
     }
@@ -837,6 +887,8 @@ const Pipeline* pipeline(const DrawState& s, Program& vs, Program& ps) {
     Texture* dt = s.dsv ? texture(s.dsv) : nullptr;
     put(dt ? static_cast<std::uint64_t>(dt->format) : 0u);
     put(s.alpha_to_coverage ? 1u : 0u);
+    const std::uint32_t samples = pass_samples(s.rtv, s.dsv);
+    put(samples);
     if (auto it = d.pipelines.find(k); it != d.pipelines.end()) return it->second.state ? &it->second : nullptr;
 
     MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
@@ -893,6 +945,7 @@ const Pipeline* pipeline(const DrawState& s, Program& vs, Program& ps) {
     // With one sample a pixel, alpha to coverage is an alpha test at 0.5, as in
     // D3D11: the leaves of the trees are cut-out cards that relied on it.
     pd.alphaToCoverageEnabled = s.alpha_to_coverage;
+    pd.rasterSampleCount = samples;
     if (dt != nullptr && dt->depth) {
         pd.depthAttachmentPixelFormat = dt->format;
         if (has_stencil(dt->format)) pd.stencilAttachmentPixelFormat = dt->format;
@@ -954,6 +1007,21 @@ void stand_ins() {
     for (NSUInteger face = 0; face < 6; ++face)
         [d.zero_cube replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:face withBytes:&zero bytesPerRow:4
                      bytesPerImage:4];
+    MTLTextureDescriptor* md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                 width:1
+                                                                                height:1
+                                                                             mipmapped:NO];
+    md.textureType = MTLTextureType2DMultisample;
+    md.sampleCount = 4;
+    md.storageMode = MTLStorageModePrivate;
+    md.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    d.zero_ms = [d.dev newTextureWithDescriptor:md];
+    MTLRenderPassDescriptor* mpass = [MTLRenderPassDescriptor renderPassDescriptor];
+    mpass.colorAttachments[0].texture = d.zero_ms;
+    mpass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    mpass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    mpass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    [[command_buffer() renderCommandEncoderWithDescriptor:mpass] endEncoding];
     d.default_sampler = [d.dev newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]];
 }
 
@@ -1148,6 +1216,11 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
         const bool want_depth = (use.depth & bit) != 0;
         const bool want_cube = (use.cube & bit) != 0;
         Texture* t = id_ ? texture(id_) : nullptr;
+        if (use.ms & bit) {  // texture2d_ms: the multisampled surface itself
+            if (t != nullptr && t->ms != nil && !t->depth) return t->ms;
+            problem("texture2d_ms read without a multisampled colour texture");
+            return d.zero_ms;
+        }
         if (t != nullptr && t->depth == want_depth && t->cube == want_cube) return mip_view(*t, first_mip, count);
         if (t != nullptr) problem(std::string("texture kind mismatch: ") + (t->depth ? "depth" : t->cube ? "cube" : "colour") +
                                   " bound where the shader reads " + (want_depth ? "depth" : want_cube ? "cube" : "colour"));
@@ -1241,6 +1314,16 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
     // the smaller levels, distant fences and signs shimmered.
     if ((t.cube || (desc.initial && !chain)) && desc.mips != 1) levels = desc.mips == 0 ? full : std::min(full, desc.mips);
     t.tex = new_texture(desc, format, depth, levels);
+    if (desc.samples > 1 && (desc.bind & 0x60u) != 0 && !t.cube && [g_dev->dev supportsTextureSampleCount:desc.samples]) {
+        MTLTextureDescriptor* md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:desc.width
+                                                                                     height:desc.height mipmapped:NO];
+        md.textureType = MTLTextureType2DMultisample;
+        md.sampleCount = desc.samples;
+        md.storageMode = MTLStorageModePrivate;
+        md.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        t.ms = [g_dev->dev newTextureWithDescriptor:md];
+        t.samples = desc.samples;
+    }
     ++g_dev->stats.textures;
     g_dev->textures[key] = t;
     // D3D11 creates resources zero-filled; Metal leaves private textures
@@ -1268,6 +1351,16 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
         // A cube map's other faces (slice 0 was cleared above).
         for (NSUInteger face = 1; !depth && t.cube && face < 6 * t.tex.arrayLength; ++face) {
             pass.colorAttachments[0].slice = face;
+            [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
+        }
+        if (t.ms != nil) {  // and the multisampled surface
+            if (depth) {
+                pass.depthAttachment.texture = t.ms;
+                if (has_stencil(format)) pass.stencilAttachment.texture = t.ms;
+            } else {
+                pass.colorAttachments[0].texture = t.ms;
+                pass.colorAttachments[0].slice = 0;
+            }
             [[command_buffer() renderCommandEncoderWithDescriptor:pass] endEncoding];
         }
     }
@@ -1605,10 +1698,13 @@ struct Fxaa {
     bool failed = false;
 } g_fxaa;
 
+// FXAA: DCUSA_AA=1 on, 0 off, split on the right half; unset, on only when
+// MSAA (DCUSA_MSAA, 4x by default) is off.
 bool aa_enabled() {
     static const bool on = [] {
-        const char* v = std::getenv("DCUSA_AA");
-        return !(v != nullptr && std::strcmp(v, "0") == 0);
+        if (const char* v = std::getenv("DCUSA_AA")) return std::strcmp(v, "0") != 0;
+        const char* m = std::getenv("DCUSA_MSAA");
+        return m != nullptr && std::atoi(m) == 0;
     }();
     return on;
 }
