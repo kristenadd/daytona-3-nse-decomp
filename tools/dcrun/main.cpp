@@ -75,9 +75,12 @@ void install_fault_report(const std::uint8_t* base) {
 
 // The cabinet's operator menu belongs to the shell (Shell.exe), which does not
 // run here; what it changes is ShellData.ini (credits / free play, volumes,
-// calibration). --shell-setting Section.Key=Value edits the container's copy
-// (made from the install's the first time), which the game reads in place of
-// the install's. Returns false with a message on a malformed setting.
+// calibration) and GameSettings.ini (difficulty, race length, car and track
+// select; the game reads it as ../ShellData/GameSettings.ini).
+// --shell-setting Section.Key=Value edits the container's copy (made from the
+// install's the first time), which the game reads in place of the install's.
+// Section GameSettings goes to GameSettings.ini, every other to ShellData.ini.
+// Returns false with a message on a malformed setting.
 bool apply_shell_setting(const std::filesystem::path& install_root, const std::filesystem::path& writable,
                          const std::string& setting) {
     const std::size_t dot = setting.find('.'), eq = setting.find('=');
@@ -87,11 +90,12 @@ bool apply_shell_setting(const std::filesystem::path& install_root, const std::f
     }
     const std::string section = setting.substr(0, dot), key = setting.substr(dot + 1, eq - dot - 1),
                       value = setting.substr(eq + 1);
-    const std::filesystem::path copy = writable / "ShellData" / "ShellData.ini";
+    const char* const file = section == "GameSettings" ? "GameSettings.ini" : "ShellData.ini";
+    const std::filesystem::path copy = writable / "ShellData" / file;
     std::error_code ec;
     if (!std::filesystem::exists(copy)) {
         std::filesystem::create_directories(copy.parent_path(), ec);
-        std::filesystem::copy_file(install_root / "ShellData" / "ShellData.ini", copy, ec);
+        std::filesystem::copy_file(install_root / "ShellData" / file, copy, ec);
     }
     std::ifstream in(copy);
     std::vector<std::string> lines;
@@ -134,7 +138,7 @@ bool apply_shell_setting(const std::filesystem::path& install_root, const std::f
     (void)section_end;
     std::ofstream out(copy, std::ios::binary);
     for (const std::string& l : lines) out << l << "\r\n";
-    std::fprintf(stderr, "shell setting [%s] %s=%s\n", section.c_str(), key.c_str(), value.c_str());
+    std::fprintf(stderr, "shell setting %s [%s] %s=%s\n", file, section.c_str(), key.c_str(), value.c_str());
     return static_cast<bool>(out);
 }
 
@@ -144,7 +148,9 @@ void usage() {
                  "             [--shell-setting Section.Key=Value ...] <prepared-cache>\n"
                  "  Opens a window and plays; --headless (or DCUSA_WINDOW=0) runs offscreen.\n"
                  "  --shell-setting changes the operator settings in ShellData.ini, for example\n"
-                 "  Credit.Freeplay=0 (coins) or 1 (free play), Audio.MusicVolume=80.\n");
+                 "  Credit.Freeplay=0 (coins) or 1 (free play), Audio.MusicVolume=80, and the\n"
+                 "  game rules in GameSettings.ini: \"GameSettings.DIFFICULTY=HARD\",\n"
+                 "  \"GameSettings.GAME LENGTH=LONG\".\n");
 }
 
 // A run needs Metal, a shader folder and translation of the shaders it has not

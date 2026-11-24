@@ -160,31 +160,57 @@ build/mac-host/dcrun --shell-setting Credit.Freeplay=0 --content "<folder>" buil
 
 ### ShellData/GameSettings.ini (game rules: difficulty, race length, selection)
 
-The game itself reads `../ShellData/GameSettings.ini`, one section
-`[GameSettings]` whose values are the option names below (the operator menu's
-choices, from `shell/GameTest.ini` and `shell/GameAdvancedTest.ini`).
-`--shell-setting` does not edit this file. Copy it to
-`container/ShellData/GameSettings.ini` (beside the ShellData.ini copy) and
-edit that. A file in the container takes the place of the game folder's.
+The game itself reads `../ShellData/GameSettings.ini` (2019 edition), one
+section `[GameSettings]` whose values are option names. Like ShellData.ini,
+the game reads a copy in `container/ShellData/`. Edit it with `--shell-setting`
+and section `GameSettings` (quote keys that contain spaces):
 
-| Key (installed value) | Options |
-| --- | --- |
-| `DIFFICULTY` (EASY) | VERY EASY, EASY, MEDIUM, HARD, VERY HARD |
-| `GAME LENGTH` (MEDIUM) | VERY SHORT, SHORT, MEDIUM, LONG, VERY LONG, CLASSIC MODE |
-| `CAR SELECT` (CHOOSE) | CHOOSE, RANDOM, 1-5 |
-| `TRACK SELECT` (CHOOSE) | CHOOSE, RANDOM, EASY ONLY, 37_SPEED, DINOSAUR, SEASIDE, DAYTONA, LAKESIDE, METRO |
-| `TRANSMISSION SELECT` (ON) | ON, OFF |
-| `MENU TIMINGS` (MEDIUM) | SHORT, MEDIUM, LONG |
-| `CAMERA ENABLED`, `INSTANT REMATCH`, `CHAMPIONSHIP MODE`, `CHAMPIONSHIP CONTINUE` (YES) | YES, NO |
-| `START ON COIN ENTRY`, `AUTO DRIVE` (NO) | NO, YES |
-| `TOURNAMENT MODE` (OFF) | OFF, EXCLUSIVE, ON |
-| `TOURNAMENT DURATION` (14) | 1-30 (days) |
-| `TOURNAMENT TYPE` (CUSTOM) | CUSTOM, CHAMPIONSHIP |
-| `CUSTOM TOURNAMENT CAR` (1), `CUSTOM TOURNAMENT TRACK` (37_SPEED) | as CAR SELECT / TRACK SELECT without CHOOSE and RANDOM |
-| `CUSTOM TOURNAMENT TRANSMISSION` (CHOOSE) | CHOOSE, MANUAL, AUTOMATIC |
-| `TOURNAMENT CONTINUE` (NO) | NO, YES |
-| `TOURNAMENT DATE FORMAT` (MM/DD/YY) | MM/DD/YY, YY/MM/DD, DD/MM/YY |
-| `DRESS CODE` (OFF), `PARTY MODE` (not in the installed file) | OFF, ON |
+```bash
+build/mac-host/dcrun --shell-setting "GameSettings.DIFFICULTY=VERY HARD" --shell-setting "GameSettings.GAME LENGTH=LONG" --content "<folder>" build/mac-host/prepared/DCUSA2019.cache
+```
+
+The table is the game's own list (`0x118A510` in the 2019 exe). The reader
+`0x5189B0` stores each choice's index as a byte at `[0x15C2298]+4+row`, so
+`DCUSA_WATCH="[15C2298]+4"` shows DIFFICULTY in the low byte. A key missing
+from the file should take the game's default (not checked). The installed file sets 21 of the
+24 keys, and some of its values differ from the game's defaults.
+
+| Row | Key | Options (game default first, then the installed file's value) |
+| --- | --- | --- |
+| 0 | `DIFFICULTY` | VERY EASY, EASY, MEDIUM, HARD, VERY HARD (MEDIUM; installed EASY) |
+| 1 | `GAME LENGTH` | VERY SHORT, SHORT, MEDIUM, LONG, VERY LONG, CLASSIC MODE (MEDIUM) |
+| 2 | `CAMERA ENABLED` | YES, NO (YES) |
+| 3 | `INSTANT REMATCH` | YES, NO (YES) |
+| 4 | `START ON COIN ENTRY` | YES, NO (NO) |
+| 5 | `MENU TIMINGS` | SHORT, MEDIUM, LONG (MEDIUM) |
+| 6 | `CAR SELECT` | CHOOSE, RANDOM, 1-5 (CHOOSE) |
+| 7 | `TRACK SELECT` | CHOOSE, RANDOM, EASY ONLY, 37_SPEED, DINOSAUR, SEASIDE, DAYTONA, LAKESIDE, METRO (CHOOSE) |
+| 8 | `TRANSMISSION SELECT` | ON, OFF (ON) |
+| 9 | `CHAMPIONSHIP MODE` | YES, NO (YES) |
+| 10 | `CHAMPIONSHIP CONTINUE` | YES, NO (YES) |
+| 11 | `AUTO DRIVE` | YES, NO (YES; installed NO). See below. |
+| 12 | `KIDS ONLY MODE` | YES, NO (NO; not in the installed file) |
+| 13 | `TOURNAMENT MODE` | ON, OFF, EXCLUSIVE (OFF) |
+| 14 | `TOURNAMENT DURATION` | 1-30 days (14) |
+| 15 | `TOURNAMENT TYPE` | CHAMPIONSHIP, CUSTOM (CUSTOM) |
+| 16 | `CUSTOM TOURNAMENT CAR` | as CAR SELECT (1) |
+| 17 | `CUSTOM TOURNAMENT TRACK` | as TRACK SELECT (37_SPEED) |
+| 18 | `CUSTOM TOURNAMENT TRANSMISSION` | MANUAL, AUTOMATIC, CHOOSE (CHOOSE) |
+| 19 | `TOURNAMENT CONTINUE` | YES, NO (NO) |
+| 20 | `TOURNAMENT DATE FORMAT` | MM/DD/YY, YY/MM/DD, DD/MM/YY (MM/DD/YY) |
+| 21 | `DRESS CODE` | ON, OFF (OFF) |
+| 22 | `DEFAULT CAMERA` | 1-4 (3; not in the installed file) |
+| 23 | `LANGUAGE` | ENGLISH, FRENCH, ITALIAN, SPANISH, RUSSIAN, TURKISH, PORTUGUESE (ENGLISH; not in the installed file) |
+
+`AUTO DRIVE` (`0x62E9E0`): with YES, when a 16-bit value of the Model 2
+code (`0x501054` in its memory) has been 0 for 192 ticks (about 3.2 s),
+the game sends 0xFF to Model 2 input 3 instead, until the value is nonzero
+again. Which control that input is has not been checked.
+
+The shell's menu (`shell/GameTest.ini`, `GameAdvancedTest.ini`) also lists
+`PARTY MODE`, which the game does not read. The 2017 edition has no
+GameSettings.ini; `--shell-setting GameSettings...` then writes a file with
+only the keys given, and whether that edition reads one is not checked.
 
 ### iOS Settings app
 
