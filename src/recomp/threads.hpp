@@ -9,6 +9,7 @@
 //
 // Handles for threads, events, semaphores and mutexes share one table starting
 // at kSyncHandleBase. Waiting on any other handle fails closed.
+#include <chrono>
 #include <cstdint>
 
 #include "recomp/cpu.hpp"
@@ -54,6 +55,8 @@ bool sched_on_free_thread();
 // other cores; a slice was measured slower here, since the boot drains its
 // resource queue on the main thread once per frame.
 void sched_frame_yield(Cpu& c);
+// Gives the other threads turns until each is blocked or the deadline passes.
+void sched_run_others_until(Cpu& c, std::chrono::steady_clock::time_point deadline);
 void sched_sleep(Cpu& c, std::uint32_t ms);
 // WAIT_OBJECT_0 + index, kWaitTimeout, or kWaitFailed (with the reason in
 // *error when it is not null).

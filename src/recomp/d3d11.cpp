@@ -26,6 +26,7 @@
 #include "gpu/metal.hpp"
 #include "recomp/guest.hpp"
 #include "recomp/guest_memory.hpp"
+#include "recomp/threads.hpp"
 #include "recomp/win32.hpp"
 #include "recomp/x86ops.hpp"
 #include "runtime/fail_closed.hpp"
@@ -1752,16 +1753,53 @@ void print_watch(const std::uint8_t* mem, int present_no) {
 // running unpaced there, or paced a little faster (15.5 ms) so the two would
 // not stack, made races render wrong on an iPhone (static shadows and the
 // course map black): the game needs its frames no faster than 60 Hz.
-void pace_present(std::uint32_t sync_interval) {
+// The wait is given to the other guest threads first (DCUSA_PACE_IDLE=0 sleeps
+// through it): they only run when the main thread yields, and the boot's
+// loaders otherwise sat idle for most of every paced frame.
+// Set while the boot's "Data Loading" runs unpaced (below): a frame then goes
+// to the display only when the last one shown is a refresh old, since taking a
+// drawable waits for the display and would pace the boot all the same.
+bool g_boot_loading = false;
+
+void pace_present(Cpu& c, std::uint32_t sync_interval) {
     using clock = std::chrono::steady_clock;
     static const bool off = std::getenv("DCUSA_NOPACE") != nullptr;
+    static const bool give = [] {
+        const char* e = std::getenv("DCUSA_PACE_IDLE");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    // DCUSA_BOOT_PACE=1 paces the boot too. Until the boot state [0x1735608]
+    // (2019) leaves 0 the screen is the static "Data Loading" text, and the
+    // load is gated by presents: the main thread drains the resource queue
+    // once a frame. Unpaced, that part takes about a third of the time, but in
+    // about 12,600 presents instead of 7,000, so a pad script (DCUSA_PAD_SCRIPT,
+    // timed in presents) keeps the boot paced.
+    static const bool boot_paced =
+        std::getenv("DCUSA_BOOT_PACE") != nullptr || std::getenv("DCUSA_PAD_SCRIPT") != nullptr;
     static clock::time_point next{};
+    // Each boot state change goes to the log with the time since the first present.
+    static const clock::time_point first = clock::now();
+    static std::uint32_t last_state = 0;
+    const std::uint32_t state = ld32(c.mem, 0x1735608u);
+    if (state != last_state) {
+        std::fprintf(stderr, "boot state %u at %.1f s\n", state,
+                     std::chrono::duration<double>(clock::now() - first).count());
+        last_state = state;
+    }
+    g_boot_loading = !boot_paced && state == 0;
     if (off) return;
+    if (g_boot_loading) {
+        next = {};
+        return;
+    }
     const auto period = std::chrono::nanoseconds(16'666'667) * std::max(1u, sync_interval);
     const auto now = clock::now();
     // More than a period behind: start over from now rather than run fast to catch up.
     if (next.time_since_epoch().count() == 0 || now > next + period) next = now;
-    else std::this_thread::sleep_until(next);
+    else {
+        if (give) sched_run_others_until(c, next);
+        std::this_thread::sleep_until(next);
+    }
     next += period;
 }
 
@@ -1913,7 +1951,7 @@ void present(Cpu& c) {
         shown = true;
         std::fprintf(stderr, "present: sync interval %u flags %u\n", arg(c, 1), arg(c, 2));
     }
-    pace_present(arg(c, 1));
+    pace_present(c, arg(c, 1));
     sample_pad();  // the controls for the frame the game builds next
     if (gpu::enabled()) {
         static int presents = 0;
@@ -1947,8 +1985,13 @@ void present(Cpu& c) {
         const bool in_range = presents >= range.first && presents <= range.second;
         if (in_range) g_frames_after_hitch = std::max(g_frames_after_hitch, 1);
         const bool wanted = every_frame || g_frames_after_hitch > 0 || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
-        gpu::antialias(pipe.backbuffer);  // FXAA (DCUSA_AA=0: off)
-        gpu::show(pipe.backbuffer);  // into the window, when there is one
+        static std::chrono::steady_clock::time_point last_shown{};
+        const auto now = std::chrono::steady_clock::now();
+        if (!g_boot_loading || now - last_shown >= std::chrono::milliseconds(16)) {
+            gpu::antialias(pipe.backbuffer);  // FXAA (DCUSA_AA=0: off)
+            gpu::show(pipe.backbuffer);  // into the window, when there is one
+            last_shown = now;
+        }
         std::uint32_t w = 0, h = 0;
         if (!wanted) gpu::submit();
         else if (gpu::read_rgba8(pipe.backbuffer, &stored[pipe.backbuffer].bytes, &w, &h)) stored[pipe.backbuffer].row = w * 4u;

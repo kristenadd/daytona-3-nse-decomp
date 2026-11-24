@@ -783,6 +783,45 @@ so it is off by default. `DCUSA_FRAMES_IN_FLIGHT` (2) and
 `DCUSA_GENERATED_LINES` (line tables for chosen translated files, for
 profiling) are other tools from this work.
 
+## Boot time
+
+Boot to attract (boot state `[0x1735608]` 8) took 131 s on an M3 Max and 103 s
+on an iPhone 15 Pro Max. It now takes 37 s and 56 s. Each boot state change is
+logged with its time ("boot state 8 at 55.9 s").
+
+- **Where it went.** Until the boot state leaves 0 the screen is the static
+  "Data Loading" text, and the load advances with presents: the main thread
+  drains the resource queue once a frame, and the loader threads only run
+  when it yields. Paced at 60 Hz, most of each frame was a sleep. Unpaced on
+  the Mac the same load takes about 12,600 presents in 22 s, GPU-bound (the
+  main thread waits on the render thread; each frame is the post chain over
+  an empty scene).
+- **What changed.** While the boot state is 0 presents are not paced
+  (`DCUSA_BOOT_PACE=1` paces them as before, and so does a pad script, since
+  scripts are timed in presents and the unpaced load takes about 12,600 of
+  them instead of 7,000), and a frame goes to the display
+  only when the last one shown is 16 ms old. On the phone, taking a drawable
+  waits for the display, so unpacing alone changed nothing there (102.7 s
+  either way). After the loading screen the pacing is as before: the logos
+  and movie between states 5 and 8 take the same 12 s. The pacing wait is also
+  given to the other guest threads before the main thread sleeps
+  (`DCUSA_PACE_IDLE=0` sleeps through it). On its own, while the boot was
+  still paced, that brought the loading screen from 129 to 97 s on the Mac.
+- **Decoded textures from the Mac.** They would not shorten the boot on an
+  iPhone. Its A17 Pro samples BC textures, so they upload as the game made
+  them, with no decoding. Host texture creation in the frame that creates
+  44,501 textures is 2.8 ms on the Mac. The game's LZ decompressor
+  (`0x426890`) is a small share of a boot profile. Shipping preprocessed
+  textures matters for the iPad mini 6 (A15, no BC), and for memory there
+  rather than time: BC transcoded to ASTC ahead of time on the Mac, keyed by
+  a hash of the uploaded data, would keep each texture the size of its BC
+  original instead of 4 to 8 times larger.
+- **A measuring trap.** dcrun's shader folder is `<cache folder>/shaders`.
+  A run from a copied cache file has no translations, so every new shader
+  runs the Python translator in a child process. That shows up as frames of
+  9 to 20 s, which are not the game's (set `DCUSA_SHADERS` to the prepared
+  folder).
+
 ## Out of this phase
 
 - A host window and `CAMetalLayer`. Phase 7.

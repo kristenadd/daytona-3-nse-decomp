@@ -96,11 +96,24 @@ bool commit_guest(std::uint8_t* mem, std::uint32_t address, std::uint32_t size) 
 // Freed guest memory goes back to the host: the whole host pages inside
 // [address, address + size) stop counting toward the process's footprint (what
 // iOS kills an app over) until reuse_pages. Their contents are undefined then.
-void release_pages(std::uint8_t* mem, std::uint32_t address, std::uint32_t size) {
+void release_pages(std::uint8_t* mem, std::uint32_t address, std::uint32_t size, bool committed = false) {
     const std::uint64_t page = static_cast<std::uint64_t>(getpagesize());
     const std::uint64_t lo = (address + page - 1) & ~(page - 1);
     const std::uint64_t hi = (std::uint64_t(address) + size) & ~(page - 1);
-    if (hi > lo) madvise(mem + lo, static_cast<std::size_t>(hi - lo), MADV_FREE_REUSABLE);
+    if (hi <= lo) return;
+    // DCUSA_RELEASE_PAGES=0 keeps them; =zero clears them at once, as the
+    // system does when it takes reusable pages under memory pressure (a test
+    // for guest code that reads memory after freeing it). Only heap blocks are
+    // cleared: a VirtualFree range may hold pages that were never committed.
+    static const int mode = [] {
+        const char* e = std::getenv("DCUSA_RELEASE_PAGES");
+        if (e == nullptr) return 1;
+        if (std::strcmp(e, "zero") == 0) return 2;
+        return std::atoi(e) != 0 ? 1 : 0;
+    }();
+    if (mode == 0) return;
+    if (mode == 2 && committed) std::memset(mem + lo, 0, static_cast<std::size_t>(hi - lo));
+    madvise(mem + lo, static_cast<std::size_t>(hi - lo), MADV_FREE_REUSABLE);
 }
 
 void reuse_pages(std::uint8_t* mem, std::uint32_t address, std::uint32_t size) {
@@ -218,7 +231,7 @@ void heap_free(std::uint8_t* M, std::uint32_t p) {
     const unsigned cls = heap_class(ld32(M, p - 8), &capacity);
     if (cls < kHeapClasses && capacity == ld32(M, p - 8)) {
         heap_bins[cls].push_back(p);
-        if (capacity >= kHeapReleaseBytes) release_pages(M, p, capacity);
+        if (capacity >= kHeapReleaseBytes) release_pages(M, p, capacity, true);
     }
 }
 

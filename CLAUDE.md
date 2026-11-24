@@ -76,15 +76,11 @@ agreed to this).
 
 ## Future work
 
-- **Boot "Data Loading" time.** Boot takes about 7,500 presents (about two
-  minutes at the 60 Hz pacing) before attract, plus a single 1.0 to 1.3 s
-  frame near present 6,000. Find out why, and whether it can be cached.
-  Leads: the boot drains its resource queue on the main thread once per frame
-  (threads.cpp `sched_frame_yield`), so pacing may be what limits it
-  (`DCUSA_NOPACE=1` boots faster); `DCUSA_HITCH` and `DCUSA_IO=1` show where
-  the time goes. Caching ideas, once the cost is known: skip the pacing
-  while the loading screen is up, keep decompressed or decoded data on disk
-  between runs, or snapshot guest memory after boot.
+- **Boot time, further.** Boot to attract is now 37 s on the Mac and 56 s on
+  the iPhone (131 s and 103 s before; PHASE3 "Boot time"). On the phone, 44 s
+  of that is the loading screen, which advances with presents. Next ideas:
+  cheaper loading frames (they draw the full post chain over an empty
+  scene), or a snapshot of guest memory after boot.
 - **Service / test mode.** On the cabinet the Test and Service buttons open
   the operator menu of `Shell.exe` (driven by `shell/GameTest*.ini` and
   `GameAdvancedTest*.ini`), a separate program that does not run here. The

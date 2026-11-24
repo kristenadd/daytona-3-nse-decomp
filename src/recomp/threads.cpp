@@ -733,6 +733,26 @@ void sched_frame_yield(Cpu& c) {
     } while (Clock::now() < deadline);
 }
 
+// The pacing wait at a present: the other threads run until each is blocked
+// or the deadline comes, and the main thread sleeps out whatever is left. A
+// paced boot otherwise spent most of each frame asleep while the loader
+// threads, which only run when the main thread gives them a turn, waited.
+void sched_run_others_until(Cpu& c, std::chrono::steady_clock::time_point deadline) {
+    ensure(c);
+    Sched& s = S();
+    if (t_free_slot >= 0) return;
+    const unsigned me = s.current;
+    s.slots[me].waiting_forever = false;
+    while (Clock::now() < deadline) {
+        fire_timers();
+        s.idle = 0;
+        const unsigned next = pick_after(me);
+        if (next == me) break;
+        switch_to(me, next);
+        if (live_count() <= 1 || s.idle + 1 >= live_count()) break;
+    }
+}
+
 void sched_sleep(Cpu& c, std::uint32_t ms) {
     if (ms == 0) {
         sched_yield(c);
