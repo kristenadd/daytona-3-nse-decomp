@@ -56,6 +56,18 @@ agreed to this).
 7. **Phase 5.** **Verified** (see below). CTest `phase5_attract` and
    `phase5_controls` (label `phase5`; [PHASE5.md](PHASE5.md)).
 
+## Future work
+
+- **Boot "Data Loading" time.** Boot takes about 7,500 presents (about two
+  minutes at the 60 Hz pacing) before attract, plus a single 1.0 to 1.3 s
+  frame near present 6,000. Find out why, and whether it can be cached.
+  Leads: the boot drains its resource queue on the main thread once per frame
+  (threads.cpp `sched_frame_yield`), so pacing may be what limits it
+  (`DCUSA_NOPACE=1` boots faster); `DCUSA_HITCH` and `DCUSA_IO=1` show where
+  the time goes. Caching ideas, once the cost is known: skip the pacing
+  while the loading screen is up, keep decompressed or decoded data on disk
+  between runs, or snapshot guest memory after boot.
+
 ## Known issues
 
 - With `DCUSA_METAL=0` (the 2D software reference instead of Metal), a run
