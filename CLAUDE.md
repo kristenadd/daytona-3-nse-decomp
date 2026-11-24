@@ -75,10 +75,10 @@ agreed to this).
       (13 to 20%); the D3D layer's per-draw work (12%); memory stalls in the
       scene walk (object traversal 0x4423B0, 14% on the phone). Inlining the
       draw path, PGO and an order file gained nothing.
-   2. **Black stands after a width change, root cause.** Worked around by
-      pinning the phone's width (Known issues). It will come back wherever
-      the dynamic resolution steps the width (Vision Pro, a future iPad).
-      Make the Mac step widths back and forth, then compare frames.
+   2. **Black stands: confirm on the phone, then unpin the width.** The
+      cause was found (6bf3344, Known issues). Have the user race on the
+      phone; if the stands stay right, try removing the 960 pin
+      (`kPhoneIni`) and race again with the dynamic resolution free.
    3. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
@@ -112,18 +112,18 @@ agreed to this).
 
 ## Known issues
 
-- **Black stands after a render-width change (worked around on iOS).** On the
-  iPhone the stands, fence, light poles and far grass drew black in races
-  (from late lap 1). The trigger is the game's dynamic resolution changing
-  the scene width mid-race: with the GPU timestamps zeroed
-  (`DCUSA_GPU_QUERIES=0`), or the width pinned
-  (`DCUSA_INI=Render.DYNAMIC_RESOLUTION_MAX=960`), whole races draw right.
-  The phone sits near the thresholds and steps between widths; the Mac at
-  a steady width (GPU times scaled by 3, 4 or 12, or held back 3 frames with
-  `DCUSA_GPU_QUERY_LAG`) stays right. iOS now pins the width at 960
-  (`kPhoneIni`, host_files.cpp), where the phone settled anyway. Not found:
-  what goes stale when the width changes. Next: make the Mac step back and
-  forth, then compare the frames after a change.
+- **Black stands, fence and far grass (cause found, 6bf3344).** When the
+  game uploads a texture's level 0 while the GPU may still read it, the
+  upload makes a new Metal texture and copies the smaller levels across
+  with a GPU blit; the game's following per-level uploads were written from
+  the CPU at once and then overwritten by that blit, so distant surfaces
+  (small mips) drew black. It happened when the GPU was busy at upload
+  time: always on the phone after the unpaced fast boot, and around width
+  changes. Those writes now go through the GPU while a carry-over may be
+  pending. A Mac race after an unpaced boot (`DCUSA_BOOT_PACE=0
+  DCUSA_PAD_SCRIPT_FROM=attract`) reproduced it and now draws right;
+  waiting on a race on the phone. iOS still pins the width at 960
+  (`kPhoneIni`), which may no longer be needed.
 - **iPhone races are below 60 fps** (about 20.6 ms a frame; item 8, "Speed").
 - With `DCUSA_METAL=0` (the 2D software reference instead of Metal), a run
   stops at about present 120 on an `int3` at `0x6D14B8`, the end of
