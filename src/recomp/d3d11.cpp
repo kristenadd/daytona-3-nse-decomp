@@ -2256,7 +2256,14 @@ void query_get_data(Cpu& c) {
             // yet (S_FALSE, 1) until that command buffer has run.
             const auto it = query_marks.find(query);
             std::uint64_t start = 0, end = 0;
-            if (it != query_marks.end() && !gpu::frame_gpu_times(it->second.frame, &start, &end)) {
+            // DCUSA_GPU_QUERY_LAG=<k>: a frame's times are not there until k
+            // presents after it, as on a slower GPU (an iPhone's lag 2 to 3).
+            static const std::uint64_t lag = [] {
+                const char* v = std::getenv("DCUSA_GPU_QUERY_LAG");
+                return v != nullptr ? static_cast<std::uint64_t>(std::atoi(v)) : 0u;
+            }();
+            if (it != query_marks.end() && (g_frames_presented < it->second.frame + lag ||
+                                            !gpu::frame_gpu_times(it->second.frame, &start, &end))) {
                 ret_stdcall(c, 1u, 20);
                 return;
             }
