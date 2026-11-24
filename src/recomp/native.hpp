@@ -19,5 +19,8 @@ void native_crt_unary(Cpu& c);
 // Frame skip (d3d11.cpp): whether this tick leaves out the scene render (the
 // call to 0x4DC120 in the frame routine 0x4DD160), since the frame is late.
 bool frame_skip_render();
+// The boot's "Data Loading" percentage (0x5BFD15 pushes it for "%d%%"), for the
+// boot screen (d3d11.cpp).
+void boot_progress(std::uint32_t percent);
 
 }

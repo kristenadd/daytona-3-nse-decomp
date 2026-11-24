@@ -74,10 +74,11 @@ add_library(dcusa_recomp STATIC
     src/audio/null_output.cpp
     src/gpu/metal.mm
     src/gpu/bc_decode.cpp
+    src/gpu/boot_screen.mm
     src/gpu/gpu_queue.mm)
 target_include_directories(dcusa_recomp PUBLIC src)
 target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal" "-framework QuartzCore"
-                      "-framework CoreGraphics")
+                      "-framework CoreGraphics" "-framework CoreText" "-framework ImageIO")
 set_source_files_properties(src/gpu/metal.mm src/gpu/gpu_queue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 # d3d11.cpp runs tools/shaderprep on a shader it has no translation for (DCUSA_TRANSLATE=1).
 set_source_files_properties(src/recomp/d3d11.cpp PROPERTIES COMPILE_DEFINITIONS "DCUSA_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
@@ -252,6 +253,26 @@ if(dcusa_generated_dir)
                     --output-format human-readable-text --errors --warnings
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Assets.xcassets"
             COMMENT "Compiling the app icon")
+        # The launch screen and the boot screen's title: the attract title made
+        # from the player's game on the Mac (tools/bootscreen/capture_title.py),
+        # never committed. Without it the launch screen is black and the boot
+        # screen is off. The Settings app's switch for the boot screen.
+        set(DCUSA_BOOT_TITLE "${CMAKE_CURRENT_SOURCE_DIR}/build/mac-host/prepared/boot/title.png" CACHE FILEPATH
+            "attract title for the iOS launch and boot screens (capture_title.py)")
+        if(EXISTS "${DCUSA_BOOT_TITLE}")
+            add_custom_command(TARGET DaytonaUSA POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy "${DCUSA_BOOT_TITLE}" "$<TARGET_BUNDLE_DIR:DaytonaUSA>/boot_title.png"
+                COMMENT "Copying the boot title")
+        else()
+            message(STATUS "No boot title at ${DCUSA_BOOT_TITLE}: launch screen black, boot screen off")
+        endif()
+        add_custom_command(TARGET DaytonaUSA POST_BUILD
+            COMMAND xcrun ibtool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>/LaunchScreen.storyboardc"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/LaunchScreen.storyboard"
+                    --target-device iphone --target-device ipad --minimum-deployment-target ${CMAKE_OSX_DEPLOYMENT_TARGET}
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Settings.bundle"
+                    "$<TARGET_BUNDLE_DIR:DaytonaUSA>/Settings.bundle"
+            COMMENT "Compiling the launch screen, copying Settings.bundle")
         target_link_libraries(DaytonaUSA PRIVATE dcusa_generated dcusa_system "-framework UIKit" "-framework GameController"
                                                  "-framework QuartzCore" "-framework AudioToolbox" "-framework AVFoundation"
                                                  "-framework Metal" "-framework Foundation")

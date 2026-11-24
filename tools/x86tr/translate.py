@@ -1391,6 +1391,11 @@ SITE_OVERRIDES = {
         0x4DD30A: ('',
                    'if (!frame_skip_render()) { esp -= 4; st32(M, esp, 0x4DD30Fu); SYNC_R(); '
                    'f_004DC120(c); RELOAD(); }'),
+        # "Data Loading ... n%": the percentage (100 - remaining * 100 / most
+        # queued, 0x5BFC1B..0x5BFC3B) on its way to the "%d%%" format, kept for
+        # the host's boot screen. The push as before; no flags change.
+        0x5BFD15: ('',
+                   'boot_progress(edi); { uint32_t v_ = edi; esp -= 4; st32(M, esp, v_); }'),
     },
 }
 

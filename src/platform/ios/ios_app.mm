@@ -137,6 +137,23 @@ void* run_game(void*) {
     }
     setenv("DCUSA_METAL", "1", 0);
     setenv("DCUSA_SHADERS", shaders.c_str(), 0);
+    // The boot screen (the Settings app's "Title boot screen", on unless turned
+    // off): the attract title with a progress bar instead of "Data Loading".
+    // The title is Documents/boot/title.png, else the one the build put in the
+    // bundle (tools/bootscreen/capture_title.py, from the player's game on a Mac).
+    {
+        NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+        const bool on = [defaults objectForKey:@"boot_screen"] == nil || [defaults boolForKey:@"boot_screen"];
+        std::string image = (docs / "boot" / "title.png").string();
+        if (!std::filesystem::exists(image, ec)) {
+            NSString* bundled = [NSBundle.mainBundle pathForResource:@"boot_title" ofType:@"png"];
+            image = bundled != nil ? bundled.UTF8String : "";
+        }
+        if (on && !image.empty()) {
+            setenv("DCUSA_BOOT_SCREEN", "1", 0);
+            setenv("DCUSA_BOOT_SCREEN_IMAGE", image.c_str(), 0);
+        }
+    }
     std::string error;
     bool loaded = false;
     for (dcusa::Edition edition : {dcusa::Edition::Nse2019, dcusa::Edition::Dcu2017}) {

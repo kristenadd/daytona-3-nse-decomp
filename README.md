@@ -38,6 +38,24 @@ start, right/left trigger gas/brake, left stick steering, right/left shoulder
 shift up/down, Y/X/B/A views 1-4. Menus are confirmed with the gas.
 `--headless` (or `DCUSA_WINDOW=0`) runs without a window, for scripted runs.
 
+**Boot screen (optional).** In place of the black "Data Loading" and network
+check screens, the boot can show the attract title with a progress bar in its
+colours, filled from the game's own loading percentage, then "Checking
+network...". The title is rendered from your game files (it is never in
+the repository):
+
+```bash
+tools/bootscreen/capture_title.py --dcrun build/mac-host/dcrun --cache build/mac-host/prepared/DCUSA2019.cache --content "<folder>" --out build/mac-host/prepared/boot/title.png
+DCUSA_BOOT_SCREEN=1 build/mac-host/dcrun --content "<folder>" build/mac-host/prepared/DCUSA2019.cache
+```
+
+The capture runs attract headless for a few minutes with the "PRESS START
+BUTTON" / "FREE PLAY" image left out (the copyright stays) and keeps the first
+settled title frame. `DCUSA_BOOT_SCREEN_IMAGE=<png>` picks another image. On
+iOS the build puts the title in the app (`DCUSA_BOOT_TITLE`, default that
+path) for the launch screen and the boot screen, which the Settings app
+switches off ("Title boot screen").
+
 ## iPhone and iPad
 
 The same game code builds as an iOS / iPadOS app (`src/platform/ios`). It is

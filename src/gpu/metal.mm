@@ -1828,8 +1828,68 @@ void clear_depth(std::uint32_t key, float depth, std::uint8_t stencil, std::uint
     ++g_dev->stats.clears;
 }
 
+// DCUSA_SKIP_PS=<key>[,<key>...]: draws with these pixel shaders (hex keys, as
+// DCUSA_METAL_TRACE prints them) are left out; DCUSA_SKIP_SRV=<texture>[,...]
+// leaves out draws whose first pixel shader texture is one of these. Used to
+// take the title screen without its text.
+std::vector<std::uint64_t> hex_list(const char* name) {
+        std::vector<std::uint64_t> out;
+        if (const char* v = std::getenv(name)) {
+            std::string list(v);
+            for (std::size_t at = 0; at < list.size();) {
+                const std::size_t comma = list.find(',', at);
+                out.push_back(std::strtoull(list.substr(at, comma - at).c_str(), nullptr, 16));
+                if (comma == std::string::npos) break;
+                at = comma + 1;
+            }
+        }
+        return out;
+}
+
+// DCUSA_SKIP_PS_RT=<ps key>@<target>: only the draws with that pixel shader
+// into that render target (the title's text quads go into the backbuffer)
+// whose texture is narrower than DCUSA_SKIP_WIDTH (default 1024: the text
+// images, not the title art).
+// DCUSA_SKIP_SIZES=<w>x<h>[,...] skips these sizes as well, whatever the width.
+bool small_source(const DrawState& s) {
+    static const std::uint32_t limit = std::getenv("DCUSA_SKIP_WIDTH") ? std::atoi(std::getenv("DCUSA_SKIP_WIDTH")) : 1024;
+    static const std::vector<std::pair<std::uint32_t, std::uint32_t>> sizes = [] {
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> out;
+        if (const char* v = std::getenv("DCUSA_SKIP_SIZES")) {
+            unsigned w = 0, h = 0;
+            for (const char* p = v; p != nullptr && std::sscanf(p, "%ux%u", &w, &h) == 2;) {
+                out.emplace_back(w, h);
+                p = std::strchr(p, ',');
+                if (p != nullptr) ++p;
+            }
+        }
+        return out;
+    }();
+    auto it = g_dev->textures.find(s.ps_srv[0]);
+    if (it == g_dev->textures.end()) return true;
+    const std::uint32_t w = it->second.desc.width, h = it->second.desc.height;
+    if (std::getenv("DCUSA_SKIP_TRACE")) std::fprintf(stderr, "overlay quad %06x %ux%u\n", s.ps_srv[0], w, h);
+    return w < limit || std::find(sizes.begin(), sizes.end(), std::make_pair(w, h)) != sizes.end();
+}
+
+bool skipped_draw(const DrawState& s) {
+    static const std::vector<std::uint64_t> ps = hex_list("DCUSA_SKIP_PS"), srv = hex_list("DCUSA_SKIP_SRV");
+    static const std::pair<std::uint64_t, std::uint32_t> ps_rt = [] {
+        std::pair<std::uint64_t, std::uint32_t> out{0, 0};
+        if (const char* v = std::getenv("DCUSA_SKIP_PS_RT")) {
+            const char* at = std::strchr(v, '@');
+            out.first = std::strtoull(v, nullptr, 16);
+            if (at != nullptr) out.second = static_cast<std::uint32_t>(std::strtoul(at + 1, nullptr, 16));
+        }
+        return out;
+    }();
+    return (!ps.empty() && std::find(ps.begin(), ps.end(), s.ps) != ps.end()) ||
+           (!srv.empty() && std::find(srv.begin(), srv.end(), s.ps_srv[0]) != srv.end()) ||
+           (ps_rt.first != 0 && s.ps == ps_rt.first && s.rtv[0] == ps_rt.second && small_source(s));
+}
+
 void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, std::int32_t base) {
-    if (!enabled() || count == 0) return;
+    if (!enabled() || count == 0 || skipped_draw(s)) return;
     MTLPrimitiveType prim;
     id<MTLRenderCommandEncoder> e = prepare(s, &prim);
     auto ib = g_dev->buffers.find(s.ib);
@@ -1855,7 +1915,7 @@ void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, 
 }
 
 void draw(const DrawState& s, std::uint32_t count, std::uint32_t start) {
-    if (!enabled() || count == 0) return;
+    if (!enabled() || count == 0 || skipped_draw(s)) return;
     MTLPrimitiveType prim;
     id<MTLRenderCommandEncoder> e = prepare(s, &prim);
     if (e == nil) {
@@ -2080,9 +2140,18 @@ void set_layer(void* layer) {
 }
 
 void show(std::uint32_t key) {
-    if (!enabled() || g_layer == nil) return;
+    static const bool trace = std::getenv("DCUSA_SHOW_TRACE") != nullptr;
+    static int traced = 0;
+    if (!enabled() || g_layer == nil) {
+        if (trace && traced++ < 200) std::fprintf(stderr, "show %08x: no layer\n", key);
+        return;
+    }
     Texture* t = used(key);
-    if (t == nullptr || t->tex == nil || t->depth || !make_show_pipeline()) return;
+    if (t == nullptr || t->tex == nil || t->depth || !make_show_pipeline()) {
+        if (trace && traced++ < 200) std::fprintf(stderr, "show %08x: texture %p\n", key, static_cast<void*>(t));
+        return;
+    }
+    if (trace && traced++ < 200) std::fprintf(stderr, "show %08x %ux%u\n", key, t->desc.width, t->desc.height);
     end_pass();
     // Follow the window: the drawable is the layer's size in pixels.
     const CGSize points = g_layer.bounds.size;

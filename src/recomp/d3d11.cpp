@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -27,6 +28,7 @@
 #include "recomp/guest.hpp"
 #include "recomp/guest_memory.hpp"
 #include "recomp/threads.hpp"
+#include "gpu/boot_screen.hpp"
 #include "recomp/win32.hpp"
 #include "recomp/x86ops.hpp"
 #include "runtime/fail_closed.hpp"
@@ -1760,6 +1762,78 @@ void print_watch(const std::uint8_t* mem, int present_no) {
 // to the display only when the last one shown is a refresh old, since taking a
 // drawable waits for the display and would pace the boot all the same.
 bool g_boot_loading = false;
+std::uint32_t g_boot_state = 0;  // [0x1735608], read at each present
+int g_boot_percent = -1;         // "Data Loading" percentage (boot_progress), -1 before the first
+
+// DCUSA_BOOT_SCREEN=1: until the boot state reaches 8 (attract), the display
+// shows the attract title with a progress bar (gpu/boot_screen) instead of
+// "Data Loading" and the network check. The title image is
+// DCUSA_BOOT_SCREEN_IMAGE, else <prepared>/boot/title.png beside the shader
+// folder (tools/bootscreen/capture_title.py makes it). Frame dumps still
+// read the game's own frame.
+constexpr std::uint32_t kBootScreenTexture = 0xFFFFB007u;
+bool boot_screen_shown() {
+    static const bool on = [] {
+        const char* e = std::getenv("DCUSA_BOOT_SCREEN");
+        if (e == nullptr || std::atoi(e) == 0) return false;
+        std::string path;
+        if (const char* img = std::getenv("DCUSA_BOOT_SCREEN_IMAGE")) path = img;
+        else if (const char* shaders = std::getenv("DCUSA_SHADERS"))
+            path = (std::filesystem::path(shaders).parent_path() / "boot" / "title.png").string();
+        if (path.empty() || !gpu::boot_screen_load(path)) {
+            std::fprintf(stderr, "boot screen: no title image at %s\n", path.c_str());
+            return false;
+        }
+        return true;
+    }();
+    return on && g_boot_state < 8;
+}
+
+// The boot screen's picture for this present: uploaded when its text changes.
+void show_boot_screen() {
+    static std::string shown;
+    static bool created = false;
+    std::string label;
+    if (g_boot_state == 0) {
+        label = g_boot_percent < 0 ? "Loading" : "Loading  " + std::to_string(g_boot_percent) + "%";
+    } else {
+        const int dots = 1 + static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::steady_clock::now().time_since_epoch()).count() / 400 % 3);
+        label = "Checking network" + std::string(static_cast<std::size_t>(dots), '.');
+    }
+    const int percent = g_boot_state == 0 ? std::max(0, g_boot_percent) : -1;
+    const std::string key = label + "|" + std::to_string(percent);
+    if (key != shown) {
+        if (std::getenv("DCUSA_SHOW_TRACE")) std::fprintf(stderr, "boot screen: %s (state %u)\n", key.c_str(), g_boot_state);
+        std::uint32_t w = 0, h = 0;
+        const auto& px = gpu::boot_screen_compose(percent, label, &w, &h);
+        if (!created) {
+            gpu::TextureDesc d;
+            d.width = w;
+            d.height = h;
+            d.format = 28;  // R8G8B8A8_UNORM
+            d.bind = 0x8;
+            gpu::create_texture(kBootScreenTexture, d);
+            created = true;
+        }
+        gpu::upload_texture(kBootScreenTexture, px.data(), px.size(), w * 4);
+        // DCUSA_BOOT_SCREEN_DUMP=<prefix>: the picture at 0, 50 and 100% and at
+        // the network check, as PPM (a headless run has no window to look at).
+        if (const char* dump = std::getenv("DCUSA_BOOT_SCREEN_DUMP")) {
+            static std::set<std::string> written;
+            const std::string tag = percent < 0 ? "network" : percent == 0 || percent == 50 || percent == 100 ? std::to_string(percent) : "";
+            if (!tag.empty() && written.insert(tag).second) {
+                if (std::FILE* f = std::fopen((std::string(dump) + "." + tag + ".ppm").c_str(), "wb")) {
+                    std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+                    for (std::size_t i = 0; i < px.size(); i += 4) std::fwrite(&px[i], 1, 3, f);
+                    std::fclose(f);
+                }
+            }
+        }
+        shown = key;
+    }
+    gpu::show(kBootScreenTexture);
+}
 
 // Frame skip. The game's clock is its frames, so a frame later than 60 Hz
 // slows the whole game down (an iPhone race at 20 ms a frame ran at 80%).
@@ -1803,6 +1877,7 @@ void pace_present(Cpu& c, std::uint32_t sync_interval) {
     static const clock::time_point first = clock::now();
     static std::uint32_t last_state = 0;
     const std::uint32_t state = ld32(c.mem, 0x1735608u);
+    g_boot_state = state;
     if (state != last_state) {
         std::fprintf(stderr, "boot state %u at %.1f s\n", state,
                      std::chrono::duration<double>(clock::now() - first).count());
@@ -2027,8 +2102,12 @@ void present(Cpu& c) {
         const bool skipped = g_render_skipped;
         g_render_skipped = false;
         if (!skipped && (!g_boot_loading || now - last_shown >= std::chrono::milliseconds(16))) {
-            gpu::antialias(pipe.backbuffer);  // FXAA (DCUSA_AA=0: off)
-            gpu::show(pipe.backbuffer);  // into the window, when there is one
+            if (boot_screen_shown()) {
+                show_boot_screen();
+            } else {
+                gpu::antialias(pipe.backbuffer);  // FXAA (DCUSA_AA=0: off)
+                gpu::show(pipe.backbuffer);  // into the window, when there is one
+            }
             last_shown = now;
         }
         std::uint32_t w = 0, h = 0;
@@ -3859,5 +3938,7 @@ bool frame_skip_render() {
     }
     return skip;
 }
+
+void boot_progress(std::uint32_t percent) { g_boot_percent = static_cast<int>(std::min<std::uint32_t>(percent, 100)); }
 
 }
