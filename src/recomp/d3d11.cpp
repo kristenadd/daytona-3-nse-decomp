@@ -1761,6 +1761,28 @@ void print_watch(const std::uint8_t* mem, int present_no) {
 // drawable waits for the display and would pace the boot all the same.
 bool g_boot_loading = false;
 
+// Frame skip. The game's clock is its frames, so a frame later than 60 Hz
+// slows the whole game down (an iPhone race at 20 ms a frame ran at 80%).
+// When a tick reaches the scene render (0x4DC120, about 80% of a race frame's
+// main thread) after its present was due, the render is left out: the game
+// logic still runs, the display keeps the last picture, and the pacing
+// catches up. At most kMaxSkips ticks in a row are skipped.
+// DCUSA_FRAME_SKIP=0 off, 1 when late (iOS default), 2 every other tick (a test).
+std::chrono::steady_clock::time_point g_pace_next{};
+bool g_render_skipped = false;
+int g_skip_run = 0;
+constexpr int kMaxSkips = 2;
+std::uint64_t g_skipped_total = 0;
+
+int frame_skip_mode() {
+    static const int mode = [] {
+        const char* e = std::getenv("DCUSA_FRAME_SKIP");
+        if (e != nullptr) return std::atoi(e);
+        return TARGET_OS_IPHONE ? 1 : 0;
+    }();
+    return mode;
+}
+
 void pace_present(Cpu& c, std::uint32_t sync_interval) {
     using clock = std::chrono::steady_clock;
     static const bool off = std::getenv("DCUSA_NOPACE") != nullptr;
@@ -1776,7 +1798,7 @@ void pace_present(Cpu& c, std::uint32_t sync_interval) {
     // timed in presents) keeps the boot paced.
     static const bool boot_paced =
         std::getenv("DCUSA_BOOT_PACE") != nullptr || std::getenv("DCUSA_PAD_SCRIPT") != nullptr;
-    static clock::time_point next{};
+    static clock::time_point& next = g_pace_next;
     // Each boot state change goes to the log with the time since the first present.
     static const clock::time_point first = clock::now();
     static std::uint32_t last_state = 0;
@@ -1794,8 +1816,10 @@ void pace_present(Cpu& c, std::uint32_t sync_interval) {
     }
     const auto period = std::chrono::nanoseconds(16'666'667) * std::max(1u, sync_interval);
     const auto now = clock::now();
-    // More than a period behind: start over from now rather than run fast to catch up.
-    if (next.time_since_epoch().count() == 0 || now > next + period) next = now;
+    // Behind by more than a period (with frame skip, four): start over from now
+    // rather than run fast to catch up.
+    const auto slack = frame_skip_mode() != 0 ? period * 4 : period;
+    if (next.time_since_epoch().count() == 0 || now > next + slack) next = now;
     else {
         if (give) sched_run_others_until(c, next);
         std::this_thread::sleep_until(next);
@@ -1946,6 +1970,19 @@ void present(Cpu& c) {
                          all_presents, tex, n_tex, buf, n_buf, other, gpu::memory_report().c_str());
         }
         report_hitch(all_presents);
+        // DCUSA_SKIP_LOG=<n>: every n presents, the game's tick rate (60 is full
+        // speed) and how many of those ticks left out the scene render.
+        if (static const int skip_every = std::getenv("DCUSA_SKIP_LOG") ? std::atoi(std::getenv("DCUSA_SKIP_LOG")) : 0;
+            skip_every > 0 && all_presents % skip_every == 0) {
+            static auto last = std::chrono::steady_clock::now();
+            static std::uint64_t last_skipped = 0;
+            const auto t = std::chrono::steady_clock::now();
+            const double s = std::chrono::duration<double>(t - last).count();
+            std::fprintf(stderr, "ticks %d: %.1f per second, %llu of %d skipped the render\n", all_presents,
+                         skip_every / s, static_cast<unsigned long long>(g_skipped_total - last_skipped), skip_every);
+            last = t;
+            last_skipped = g_skipped_total;
+        }
     }
     if (static bool shown = false; !shown && stats_on()) {
         shown = true;
@@ -1987,7 +2024,9 @@ void present(Cpu& c) {
         const bool wanted = every_frame || g_frames_after_hitch > 0 || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
         static std::chrono::steady_clock::time_point last_shown{};
         const auto now = std::chrono::steady_clock::now();
-        if (!g_boot_loading || now - last_shown >= std::chrono::milliseconds(16)) {
+        const bool skipped = g_render_skipped;
+        g_render_skipped = false;
+        if (!skipped && (!g_boot_loading || now - last_shown >= std::chrono::milliseconds(16))) {
             gpu::antialias(pipe.backbuffer);  // FXAA (DCUSA_AA=0: off)
             gpu::show(pipe.backbuffer);  // into the window, when there is one
             last_shown = now;
@@ -3802,6 +3841,23 @@ void call_com(Cpu& c, std::uint32_t target) {
     if (kind == DSoundBuf && slot == 0x50) return ds_restore(c);
     if (kind < KindCount) return plain_call(c, kind, slot);
     refuse(kind, slot);
+}
+
+bool frame_skip_render() {
+    const int mode = frame_skip_mode();
+    if (mode == 0 || g_boot_loading) return false;
+    bool skip = false;
+    if (mode == 2) skip = g_skip_run == 0;
+    else skip = g_skip_run < kMaxSkips && g_pace_next.time_since_epoch().count() != 0 &&
+                std::chrono::steady_clock::now() > g_pace_next;
+    if (skip) {
+        ++g_skip_run;
+        ++g_skipped_total;
+        g_render_skipped = true;
+    } else {
+        g_skip_run = 0;
+    }
+    return skip;
 }
 
 }

@@ -16,5 +16,8 @@ void native_strstr(Cpu& c);   // char* (haystack, needle) -> match or 0; empty n
 // function ("exp", "log", ...). The handlers it selects are not translated. The argument
 // is st(0); the result replaces it. The guest return address stays where it is.
 void native_crt_unary(Cpu& c);
+// Frame skip (d3d11.cpp): whether this tick leaves out the scene render (the
+// call to 0x4DC120 in the frame routine 0x4DD160), since the frame is late.
+bool frame_skip_render();
 
 }

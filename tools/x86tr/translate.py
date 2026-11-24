@@ -1384,6 +1384,13 @@ SITE_OVERRIDES = {
                    '{ const uint32_t n_ = edi + 4u; '
                    'if ((int32_t)n_ < (int32_t)ld32(M, esp + 0x40u)) { const uint32_t o_ = ld32(M, eax + n_ * 4u); '
                    '__builtin_prefetch(M + o_); __builtin_prefetch(M + o_ + 64u); } }'),
+        # The frame routine's scene render (0x4DD160: subsystem updates, the
+        # Model 2 step, then this call). Left out when the frame is late
+        # (frame_skip_render, d3d11.cpp); the call takes no arguments, and
+        # the next instructions are calls too, so no flags or eax are read.
+        0x4DD30A: ('',
+                   'if (!frame_skip_render()) { esp -= 4; st32(M, esp, 0x4DD30Fu); SYNC_R(); '
+                   'f_004DC120(c); RELOAD(); }'),
     },
 }
 

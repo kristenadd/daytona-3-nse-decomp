@@ -65,7 +65,9 @@ agreed to this).
      10 s. Next: transcode BC to ASTC (same size as BC7/BC3, sampled by A15),
      best done on the Mac ahead of time and shipped beside the shaders.
    - **Speed:** races run at about 20.6 ms a frame on the phone (25 before;
-     PHASE3 "Frame rate on an iPhone"). The limit is the game's main thread,
+     PHASE3 "Frame rate on an iPhone"). Frame skip keeps the game itself at
+     60 ticks a second, drawing about 43 pictures a second (PHASE3 "Frame
+     skip"). More pictures still need a cheaper frame. The limit is the game's main thread,
      about 16 ms of its own code a race frame, plus the render thread waiting
      on the GPU. Next: the main thread's object traversal (0x4423B0, 14%),
      the D3D layer's per-draw work (12%), the GPU's 6.5 ms of back-pressure.

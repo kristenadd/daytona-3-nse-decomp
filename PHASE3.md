@@ -783,6 +783,32 @@ so it is off by default. `DCUSA_FRAMES_IN_FLIGHT` (2) and
 `DCUSA_GENERATED_LINES` (line tables for chosen translated files, for
 profiling) are other tools from this work.
 
+### Frame skip
+
+The game's clock is its frames: at 20.6 ms a frame an iPhone race ran at
+about 80% speed, race timer included. A race tick is the frame routine
+`0x4DD160`: the subsystem updates, the Model 2 step (`0x4DBDC0`, about 15%
+of the main thread), a second round of per-subsystem calls, then the scene
+render `0x4DC120` (the scene walk and draw path, about 80%), then the
+dynamic resolution check. When a tick reaches the scene render after its
+present was due, the render is left out (a `SITE_OVERRIDES` entry at
+`0x4DD30A` asks `frame_skip_render`). The display keeps the last picture,
+and the pacing catches up, up to four periods behind (two skips in a row at
+most).
+
+- **iPhone 15 Pro Max, scripted race:** 59.5 to 60 ticks a second, with
+  about 170 of every 600 renders skipped (about 43 pictures a second). It was
+  48 ticks before. Lap 1 took 1'00"12, the same as an unskipped Mac race, and
+  the frames look right.
+- **Mac, every other render skipped** (`DCUSA_FRAME_SKIP=2`): 60 ticks a
+  second, frames right, and `phase5_controls` passes. Lap 1 took 55.0 s
+  instead of about 60, so the render step changes the race a little when
+  skipped that often. It probably draws on the game's random numbers for
+  effects; not checked.
+- `DCUSA_FRAME_SKIP=0` turns it off and `1` skips when late (the iOS
+  default; the Mac default is 0). `DCUSA_SKIP_LOG=<n>` logs the tick rate and
+  skips every n presents.
+
 ## Boot time
 
 Boot to attract (boot state `[0x1735608]` 8) took 131 s on an M3 Max and 103 s
