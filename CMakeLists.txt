@@ -266,6 +266,13 @@ if(dcusa_generated_dir)
         else()
             message(STATUS "No boot title at ${DCUSA_BOOT_TITLE}: launch screen black, boot screen off")
         endif()
+        # The label's font, if one is beside the title (font.ttf; not committed).
+        get_filename_component(dcusa_boot_dir "${DCUSA_BOOT_TITLE}" DIRECTORY)
+        if(EXISTS "${dcusa_boot_dir}/font.ttf")
+            add_custom_command(TARGET DaytonaUSA POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy "${dcusa_boot_dir}/font.ttf" "$<TARGET_BUNDLE_DIR:DaytonaUSA>/boot_font.ttf"
+                COMMENT "Copying the boot screen font")
+        endif()
         add_custom_command(TARGET DaytonaUSA POST_BUILD
             COMMAND xcrun ibtool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>/LaunchScreen.storyboardc"
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/LaunchScreen.storyboard"

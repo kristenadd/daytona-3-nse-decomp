@@ -2143,15 +2143,15 @@ void show(std::uint32_t key) {
     static const bool trace = std::getenv("DCUSA_SHOW_TRACE") != nullptr;
     static int traced = 0;
     if (!enabled() || g_layer == nil) {
-        if (trace && traced++ < 200) std::fprintf(stderr, "show %08x: no layer\n", key);
+        if (trace && traced++ % 60 == 0) std::fprintf(stderr, "show %08x: no layer\n", key);
         return;
     }
     Texture* t = used(key);
     if (t == nullptr || t->tex == nil || t->depth || !make_show_pipeline()) {
-        if (trace && traced++ < 200) std::fprintf(stderr, "show %08x: texture %p\n", key, static_cast<void*>(t));
+        if (trace && traced++ % 60 == 0) std::fprintf(stderr, "show %08x: texture %p\n", key, static_cast<void*>(t));
         return;
     }
-    if (trace && traced++ < 200) std::fprintf(stderr, "show %08x %ux%u\n", key, t->desc.width, t->desc.height);
+    if (trace && traced++ % 60 == 0) std::fprintf(stderr, "show %08x %ux%u\n", key, t->desc.width, t->desc.height);
     end_pass();
     // Follow the window: the drawable is the layer's size in pixels.
     const CGSize points = g_layer.bounds.size;

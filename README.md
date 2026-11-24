@@ -51,9 +51,12 @@ DCUSA_BOOT_SCREEN=1 build/mac-host/dcrun --content "<folder>" build/mac-host/pre
 
 The capture runs attract headless for a few minutes with the "PRESS START
 BUTTON" / "FREE PLAY" image left out (the copyright stays) and keeps the first
-settled title frame. `DCUSA_BOOT_SCREEN_IMAGE=<png>` picks another image. On
+settled title frame. `DCUSA_BOOT_SCREEN_IMAGE=<png>` picks another image. The
+label uses `build/mac-host/prepared/boot/font.ttf` when there is one
+(`DCUSA_BOOT_SCREEN_FONT=<ttf>` otherwise; Eurostile matches the game's text,
+and it is not in the repository either), else Helvetica Neue Bold. On
 iOS the build puts the title in the app (`DCUSA_BOOT_TITLE`, default that
-path) for the launch screen and the boot screen, which the Settings app
+path, with font.ttf beside it) for the launch screen and the boot screen, which the Settings app
 switches off ("Title boot screen").
 
 ## iPhone and iPad

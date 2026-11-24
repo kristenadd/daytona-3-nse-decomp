@@ -152,6 +152,8 @@ void* run_game(void*) {
         if (on && !image.empty()) {
             setenv("DCUSA_BOOT_SCREEN", "1", 0);
             setenv("DCUSA_BOOT_SCREEN_IMAGE", image.c_str(), 0);
+            if (NSString* font = [NSBundle.mainBundle pathForResource:@"boot_font" ofType:@"ttf"])
+                setenv("DCUSA_BOOT_SCREEN_FONT", font.UTF8String, 0);
         }
     }
     std::string error;

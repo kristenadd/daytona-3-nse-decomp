@@ -12,6 +12,8 @@ namespace dcusa::gpu {
 // Loads the title image (PNG). False when there is none.
 bool boot_screen_load(const std::string& path);
 bool boot_screen_loaded();
+// A font file (TTF / OTF) for the label; without one, Helvetica Neue Bold.
+bool boot_screen_font(const std::string& path);
 
 // The picture at `width` x `height`, RGBA8 rows: the title, a bar filled to
 // `percent` (0 to 100; below 0 a full bar) and `label` above it.

@@ -1780,13 +1780,24 @@ bool boot_screen_shown() {
         if (const char* img = std::getenv("DCUSA_BOOT_SCREEN_IMAGE")) path = img;
         else if (const char* shaders = std::getenv("DCUSA_SHADERS"))
             path = (std::filesystem::path(shaders).parent_path() / "boot" / "title.png").string();
+        // DCUSA_BOOT_SCREEN_FONT=<ttf>, else <prepared>/boot/font.ttf when there is one.
+        std::string font;
+        if (const char* f = std::getenv("DCUSA_BOOT_SCREEN_FONT")) font = f;
+        else if (!path.empty()) font = (std::filesystem::path(path).parent_path() / "font.ttf").string();
+        if (!font.empty() && std::filesystem::exists(font)) gpu::boot_screen_font(font);
         if (path.empty() || !gpu::boot_screen_load(path)) {
             std::fprintf(stderr, "boot screen: no title image at %s\n", path.c_str());
             return false;
         }
         return true;
     }();
-    return on && g_boot_state < 8;
+    if (!on) return false;
+    // After the state turns 8 the game still shows its network screen (about
+    // 45 presents), then black (about 60), then the CRIWARE logo on white:
+    // hold the boot screen 110 presents more, so it gives way to the logo.
+    static int after = 0;
+    if (g_boot_state < 8) return true;
+    return after++ < 110;
 }
 
 // The boot screen's picture for this present: uploaded when its text changes.
@@ -1797,9 +1808,10 @@ void show_boot_screen() {
     if (g_boot_state == 0) {
         label = g_boot_percent < 0 ? "Loading" : "Loading  " + std::to_string(g_boot_percent) + "%";
     } else {
-        const int dots = 1 + static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                  std::chrono::steady_clock::now().time_since_epoch()).count() / 400 % 3);
-        label = "Checking network" + std::string(static_cast<std::size_t>(dots), '.');
+        // Blinks like the game's PRESS START: 0.6 s on, 0.4 s off.
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (ms % 1000 < 600) label = "Checking network";
     }
     const int percent = g_boot_state == 0 ? std::max(0, g_boot_percent) : -1;
     const std::string key = label + "|" + std::to_string(percent);
@@ -1821,7 +1833,7 @@ void show_boot_screen() {
         // the network check, as PPM (a headless run has no window to look at).
         if (const char* dump = std::getenv("DCUSA_BOOT_SCREEN_DUMP")) {
             static std::set<std::string> written;
-            const std::string tag = percent < 0 ? "network" : percent == 0 || percent == 50 || percent == 100 ? std::to_string(percent) : "";
+            const std::string tag = percent < 0 ? (label.empty() ? "" : "network") : percent == 0 || percent == 50 || percent == 100 ? std::to_string(percent) : "";
             if (!tag.empty() && written.insert(tag).second) {
                 if (std::FILE* f = std::fopen((std::string(dump) + "." + tag + ".ppm").c_str(), "wb")) {
                     std::fprintf(f, "P6\n%u %u\n255\n", w, h);

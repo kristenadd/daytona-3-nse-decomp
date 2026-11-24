@@ -12,6 +12,7 @@ namespace dcusa::gpu {
 namespace {
 
 CGImageRef g_title = nullptr;
+CGFontRef g_font = nullptr;  // boot_screen_font
 std::vector<std::uint8_t> g_pixels;
 constexpr std::uint32_t kWidth = 1920, kHeight = 1080;
 
@@ -43,6 +44,15 @@ bool boot_screen_load(const std::string& path) {
 
 bool boot_screen_loaded() { return g_title != nullptr; }
 
+bool boot_screen_font(const std::string& path) {
+    if (g_font != nullptr) return true;
+    CGDataProviderRef data = CGDataProviderCreateWithFilename(path.c_str());
+    if (data == nullptr) return false;
+    g_font = CGFontCreateWithDataProvider(data);
+    CGDataProviderRelease(data);
+    return g_font != nullptr;
+}
+
 const std::vector<std::uint8_t>& boot_screen_compose(int percent, const std::string& label, std::uint32_t* width,
                                                      std::uint32_t* height) {
     *width = kWidth;
@@ -70,7 +80,7 @@ const std::vector<std::uint8_t>& boot_screen_compose(int percent, const std::str
     }
 
     // The bar, in the white band between "NEW SEASON EDITION" and the swirl.
-    const CGRect track = CGRectMake(560, 862, 800, 18);
+    const CGRect track = CGRectMake(560, 842, 800, 18);
     CGContextSetFillColorSpace(g, rgb);
     CGContextSetFillColor(g, kTrack);
     rounded(g, track);
@@ -93,24 +103,27 @@ const std::vector<std::uint8_t>& boot_screen_compose(int percent, const std::str
         CGContextRestoreGState(g);
     }
 
-    // The label, centred above the bar, styled after the game's own overlay
-    // text ("PRESS START BUTTON", "FREE PLAY"): wide bold capitals, white with
-    // a dark navy outline and a soft dark glow. The game's face is not a
-    // system font; Helvetica Neue Bold stretched 18% wider comes close.
+    // The label, centred under the bar, styled after the game's overlay text
+    // ("PRESS START BUTTON"): wide bold white capitals (Helvetica Neue Bold
+    // stretched 20% wider comes close to its face) with an outline, here a
+    // lighter one than the game's navy (60% black) and a faint shadow.
     if (!label.empty()) {
         constexpr CGFloat kStretch = 1.2;
-        const CGFloat outline[4] = {0.11, 0.16, 0.27, 1}, glow[4] = {0.05, 0.07, 0.12, 0.75};
-        CTFontRef font = CTFontCreateWithName(CFSTR("HelveticaNeue-Bold"), 44, nullptr);
+        // A given font (Eurostile, the game's face, is not a system font) is
+        // a regular weight: its face is thickened with a stroke of its own colour.
+        CTFontRef font = g_font != nullptr ? CTFontCreateWithGraphicsFont(g_font, 24, nullptr, nullptr)
+                                           : CTFontCreateWithName(CFSTR("HelveticaNeue-Bold"), 22, nullptr);
+        const float face_stroke = g_font != nullptr ? -4.0f : 0.0f;
         CGColorRef white = CGColorCreate(rgb, (const CGFloat[4]){1, 1, 1, 1});
-        CGColorRef navy = CGColorCreate(rgb, outline);
-        CGColorRef shade = CGColorCreate(rgb, glow);
+        CGColorRef edge_color = CGColorCreate(rgb, (const CGFloat[4]){0.4, 0.4, 0.4, 1});
+        CGColorRef shade = CGColorCreate(rgb, (const CGFloat[4]){0, 0, 0, 0.35});
         std::string upper = label;
         for (char& ch : upper) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
         CFStringRef text = CFStringCreateWithCString(nullptr, upper.c_str(), kCFStringEncodingUTF8);
-        // One line per pass: the outline (a stroke, as a % of the font size)
-        // with the glow, then the white face on top, so the outline stays outside.
+        // One line per pass: the outline (fill plus a stroke, as a % of the
+        // font size) with the shadow, then the white face on top.
         auto make_line = [&](CGColorRef color, float stroke_width) {
-            const float kern_value = 2.0f;
+            const float kern_value = 4.0f;
             CFNumberRef kern = CFNumberCreate(nullptr, kCFNumberFloatType, &kern_value);
             CFNumberRef stroke = CFNumberCreate(nullptr, kCFNumberFloatType, &stroke_width);
             const void* keys[5] = {kCTFontAttributeName, kCTForegroundColorAttributeName, kCTStrokeColorAttributeName,
@@ -126,16 +139,15 @@ const std::vector<std::uint8_t>& boot_screen_compose(int percent, const std::str
             CFRelease(kern);
             return line;
         };
-        CTLineRef edge = make_line(navy, -14.0f);  // fill and a wide stroke: the outline
-        CTLineRef face = make_line(white, 0.0f);
+        CTLineRef edge = make_line(edge_color, -16.0f);
+        CTLineRef face = make_line(white, face_stroke);
         const double w = CTLineGetTypographicBounds(face, nullptr, nullptr, nullptr) * kStretch;
-        const CGFloat baseline = track.origin.y - 22;
         for (int pass = 0; pass < 2; ++pass) {
             // Text draws upward from its baseline: flip once more around the baseline.
             CGContextSaveGState(g);
-            CGContextTranslateCTM(g, (kWidth - w) / 2, baseline);
+            CGContextTranslateCTM(g, (kWidth - w) / 2, track.origin.y + track.size.height + 32);
             CGContextScaleCTM(g, kStretch, -1);
-            if (pass == 0) CGContextSetShadowWithColor(g, CGSizeMake(0, -2), 7, shade);
+            if (pass == 0) CGContextSetShadowWithColor(g, CGSizeMake(0, -1), 4, shade);
             CGContextSetTextPosition(g, 0, 0);
             CTLineDraw(pass == 0 ? edge : face, g);
             CGContextRestoreGState(g);
@@ -144,7 +156,7 @@ const std::vector<std::uint8_t>& boot_screen_compose(int percent, const std::str
         CFRelease(face);
         CFRelease(text);
         CGColorRelease(shade);
-        CGColorRelease(navy);
+        CGColorRelease(edge_color);
         CGColorRelease(white);
         CFRelease(font);
     }
