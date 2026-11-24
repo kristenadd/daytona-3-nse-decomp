@@ -2172,7 +2172,19 @@ void submit() {
     compact_parked();
 }
 
+bool read_rgba8_inner(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height);
+
+// In a pool of its own: the caller may be a thread without one (the game
+// thread with DCUSA_GPU_THREAD=0), where the staging buffer and command buffer
+// were never released (frame dumps after every boot hitch took an iPhone to
+// 5 GB in 20 s).
 bool read_rgba8(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height) {
+    @autoreleasepool {
+        return read_rgba8_inner(key, out, width, height);
+    }
+}
+
+bool read_rgba8_inner(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height) {
     if (!enabled()) return false;
     Texture* t = used(key);
     if (t == nullptr || (t->format != MTLPixelFormatRGBA8Unorm && t->format != MTLPixelFormatBGRA8Unorm &&

@@ -180,11 +180,18 @@ if(dcusa_generated_dir)
     # DCUSA_GENERATED_LINES: translated files (names such as tr_0043A870.cpp)
     # built with line tables, so a profile maps samples to source lines and,
     # through their comments, to guest instructions.
-    set(DCUSA_GENERATED_LINES "" CACHE STRING "translated files to build with line tables (for profiling)")
-    foreach(f IN LISTS DCUSA_GENERATED_LINES)
-        set_source_files_properties("${dcusa_generated_dir}/${f}" TARGET_DIRECTORY dcusa_generated
-                                    PROPERTIES COMPILE_OPTIONS "-gline-tables-only")
-    endforeach()
+    set(DCUSA_GENERATED_LINES "" CACHE STRING "translated files to build with line tables, or all (for profiling)")
+    if(DCUSA_GENERATED_LINES STREQUAL "all")
+        target_compile_options(dcusa_generated PRIVATE -gline-tables-only)
+        # The Xcode generator turns -g flags into its own settings.
+        set_target_properties(dcusa_generated PROPERTIES XCODE_ATTRIBUTE_GCC_GENERATE_DEBUGGING_SYMBOLS YES
+                              XCODE_ATTRIBUTE_CLANG_DEBUG_INFORMATION_LEVEL line-tables-only)
+    else()
+        foreach(f IN LISTS DCUSA_GENERATED_LINES)
+            set_source_files_properties("${dcusa_generated_dir}/${f}" TARGET_DIRECTORY dcusa_generated
+                                        PROPERTIES COMPILE_OPTIONS "-gline-tables-only")
+        endforeach()
+    endif()
     # Profile-guided optimisation of the translated code and the runtime (PHASE3
     # "Frame-rate profile"): DCUSA_PGO=generate builds an instrumented dcrun, whose
     # run writes LLVM_PROFILE_FILE; DCUSA_PGO=<merged .profdata> builds with it.

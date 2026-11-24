@@ -394,6 +394,9 @@ class TestImage:
     def u32(self, va):
         return struct.unpack_from('<I', self.text, va - self.base)[0]
 
+    def imports(self):
+        return {}
+
 
 def run(cmd, binary=False):
     r = subprocess.run(cmd, capture_output=True)
