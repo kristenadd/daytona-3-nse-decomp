@@ -112,13 +112,21 @@ int main() {
     CHECK(c.r[Cpu::EAX] != 0);
     CHECK(c.r[Cpu::ESP] == Stack + 20);
     std::uint32_t grown = c.r[Cpu::EAX];
+    CHECK(grown == block);  // 8 bytes fit the block's 16-byte size class: in place
     CHECK(ld32(m, grown) == 0xAABBCCDD);
     c = make_cpu(mem);
+    call(c, "KERNEL32.dll!HeapSize", {kProcessHeap, 0, grown});
+    CHECK(c.r[Cpu::EAX] == 8);
+    c = make_cpu(mem);
     call(c, "KERNEL32.dll!HeapReAlloc", {kProcessHeap, 0x10u, grown, 64u});
-    CHECK(c.r[Cpu::EAX] == 0);
+    CHECK(c.r[Cpu::EAX] == 0);  // in place only, and 64 does not fit
+    c = make_cpu(mem);
+    call(c, "KERNEL32.dll!HeapReAlloc", {kProcessHeap, 0, grown, 64u});
+    const std::uint32_t moved = c.r[Cpu::EAX];
+    CHECK(moved != 0 && moved != grown && ld32(m, moved) == 0xAABBCCDD);
     c = make_cpu(mem);
     call(c, "KERNEL32.dll!HeapAlloc", {kProcessHeap, 0x8u, 4u});
-    CHECK(c.r[Cpu::EAX] == block);
+    CHECK(c.r[Cpu::EAX] == block);  // the freed 16-byte block, reused for its class
 
     c = make_cpu(mem);
     call(c, "KERNEL32.dll!EncodePointer", {0});

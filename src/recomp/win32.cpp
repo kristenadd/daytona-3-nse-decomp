@@ -66,7 +66,6 @@ constexpr std::uint32_t kTlsCount = 64u;
 constexpr std::uint32_t kHeapZero = 0x8u;
 constexpr std::uint32_t kHeapNext = 0u;
 constexpr std::uint32_t kHeapTls = 4u;
-constexpr std::uint32_t kHeapFree = 8u;
 // The tail of the heap holds the command line and the environment block, so
 // allocations stop short of it.
 constexpr std::uint32_t kHeapLimit = kProcessHeap + kHeapBytes - 512;
@@ -132,42 +131,70 @@ bool heap_owns(std::uint32_t p) {
            (p >= kHeap3 + 16 && p < kHeap3Limit);
 }
 
-std::uint32_t bump_alloc(std::uint8_t* M, std::uint32_t& bump, std::uint32_t limit, std::uint32_t size, bool zero) {
-    const std::uint32_t user = (bump + 4u + 15u) & ~15u;
-    const std::uint32_t end = user + size;
+// A block: its capacity at p - 8, the size asked for at p - 4 (HeapSize), the
+// bytes at p, 16-byte aligned.
+std::uint32_t bump_alloc(std::uint8_t* M, std::uint32_t& bump, std::uint32_t limit, std::uint32_t capacity) {
+    const std::uint32_t user = (bump + 8u + 15u) & ~15u;
+    const std::uint32_t end = user + capacity;
     if (end < user || end > limit) return 0;
-    st32(M, user - 4, size);
+    st32(M, user - 8, capacity);
     bump = (end + 15u) & ~15u;
-    if (zero) std::memset(M + user, 0, size);
     return user;
+}
+
+// Size classes: 16-byte steps up to 256 bytes, then four per power of two
+// (at most 25% over). Freed blocks wait on the free stack of their class and
+// are reused only for that class, so a small request never takes (and wastes)
+// a large freed block and no allocation walks a list. The old single first-fit
+// list grew to thousands of blocks over a race; the load after name entry then
+// spent minutes in it (a white, then black, screen).
+constexpr unsigned kHeapClasses = 16 + 24 * 4;
+std::vector<std::uint32_t> heap_bins[kHeapClasses];
+
+unsigned heap_class(std::uint32_t n, std::uint32_t* capacity) {
+    if (n <= 256) {
+        *capacity = (n + 15u) & ~15u;
+        return *capacity / 16u - 1u;
+    }
+    const unsigned e = 31u - static_cast<unsigned>(__builtin_clz(n - 1u));  // 2^e < n <= 2^(e+1)
+    const std::uint32_t step = 1u << (e - 2u);
+    const std::uint64_t cap = (static_cast<std::uint64_t>(n) + step - 1u) & ~static_cast<std::uint64_t>(step - 1u);
+    *capacity = cap > 0xFFFFFFF0ull ? 0xFFFFFFF0u : static_cast<std::uint32_t>(cap);
+    return 16u + (e - 8u) * 4u + static_cast<unsigned>(cap / step - 5u);
 }
 
 std::uint32_t heap_alloc(std::uint8_t* M, std::uint32_t size, bool zero) {
     if (size == 0) size = 1;
-    std::uint32_t prev = kProcessHeap + kHeapFree;
-    std::uint32_t cur = ld32(M, prev);
-    while (cur != 0) {
-        std::uint32_t have = ld32(M, cur - 4);
-        std::uint32_t next = ld32(M, cur);
-        if (have >= size) {
-            st32(M, prev, next);
-            if (zero) std::memset(M + cur, 0, have);
-            return cur;
+    if (ld32(M, kProcessHeap + kHeapNext) == 0)  // a fresh guest memory: nothing freed belongs to it
+        for (auto& bin : heap_bins) bin.clear();
+    std::uint32_t capacity = 0;
+    const unsigned cls = heap_class(size, &capacity);
+    std::uint32_t user = 0;
+    if (cls < kHeapClasses && !heap_bins[cls].empty()) {
+        user = heap_bins[cls].back();
+        heap_bins[cls].pop_back();
+    } else {
+        std::uint32_t bump = ld32(M, kProcessHeap + kHeapNext);
+        if (bump < kProcessHeap + 16) bump = kProcessHeap + 16;
+        if ((user = bump_alloc(M, bump, kHeapLimit, capacity)) != 0) {
+            st32(M, kProcessHeap + kHeapNext, bump);
+        } else if ((user = bump_alloc(M, heap2_bump, kHeap2 + kHeap2Bytes, capacity)) == 0) {
+            const std::uint32_t before = heap3_bump;
+            if (capacity > kHeap3Limit - kHeap3 ||
+                !commit_guest(M, before, std::min<std::uint32_t>(capacity + 64u, kHeap3Limit - before)))
+                return 0;
+            if ((user = bump_alloc(M, heap3_bump, kHeap3Limit, capacity)) == 0) return 0;
         }
-        prev = cur;
-        cur = next;
     }
-    std::uint32_t bump = ld32(M, kProcessHeap + kHeapNext);
-    if (bump < kProcessHeap + 16) bump = kProcessHeap + 16;
-    if (std::uint32_t user = bump_alloc(M, bump, kHeapLimit, size, zero)) {
-        st32(M, kProcessHeap + kHeapNext, bump);
-        return user;
-    }
-    if (std::uint32_t user = bump_alloc(M, heap2_bump, kHeap2 + kHeap2Bytes, size, zero)) return user;
-    const std::uint32_t before = heap3_bump;
-    if (size > kHeap3Limit - kHeap3 || !commit_guest(M, before, std::min<std::uint32_t>(size + 64u, kHeap3Limit - before)))
-        return 0;
-    return bump_alloc(M, heap3_bump, kHeap3Limit, size, zero);
+    st32(M, user - 4, size);
+    if (zero) std::memset(M + user, 0, size);
+    return user;
+}
+
+void heap_free(std::uint8_t* M, std::uint32_t p) {
+    std::uint32_t capacity = 0;
+    const unsigned cls = heap_class(ld32(M, p - 8), &capacity);
+    if (cls < kHeapClasses && capacity == ld32(M, p - 8)) heap_bins[cls].push_back(p);
 }
 
 bool heap_committed(std::uint32_t a) {
@@ -213,15 +240,16 @@ void HeapReAlloc(Cpu& c) {
     std::uint32_t out = 0;
     if (heap == kProcessHeap && heap_owns(p)) {
         const std::uint32_t old = ld32(c.mem, p - 4);
-        if ((flags & 0x10u) != 0) {
-            if (size <= old) out = p;
-        } else {
+        if (size != 0 && size <= ld32(c.mem, p - 8)) {  // fits the block: in place
+            if ((flags & kHeapZero) != 0 && size > old) std::memset(c.mem + p + old, 0, size - old);
+            st32(c.mem, p - 4, size);
+            out = p;
+        } else if ((flags & 0x10u) == 0) {
             const std::uint32_t n = heap_alloc(c.mem, size, (flags & kHeapZero) != 0);
             if (n != 0) {
                 const std::uint32_t copy = old < size ? old : size;
                 std::memcpy(c.mem + n, c.mem + p, copy);
-                st32(c.mem, p, ld32(c.mem, kProcessHeap + kHeapFree));
-                st32(c.mem, kProcessHeap + kHeapFree, p);
+                heap_free(c.mem, p);
                 out = n;
             }
         }
@@ -364,10 +392,7 @@ void HeapFree(Cpu& c) {
     const std::uint32_t p = arg(c, 2);
     std::uint32_t ok = 0;
     if (heap == kProcessHeap && (p == 0 || heap_owns(p))) {
-        if (p != 0) {
-            st32(c.mem, p, ld32(c.mem, kProcessHeap + kHeapFree));
-            st32(c.mem, kProcessHeap + kHeapFree, p);
-        }
+        if (p != 0) heap_free(c.mem, p);
         ok = 1;
     }
     ret_stdcall(c, ok, 12);
@@ -2027,10 +2052,7 @@ void AVIStreamRelease(Cpu& c) { ret_stdcall(c, 0, 4); }
 void AVIFileRelease(Cpu& c) {
     auto it = g_avis.find(arg(c, 0));
     if (it != g_avis.end()) {
-        if (it->second->frame != 0) {  // back on the heap's free list
-            st32(c.mem, it->second->frame, ld32(c.mem, kProcessHeap + kHeapFree));
-            st32(c.mem, kProcessHeap + kHeapFree, it->second->frame);
-        }
+        if (it->second->frame != 0) heap_free(c.mem, it->second->frame);
         guest_close_file(it->second->file);
         g_avis.erase(it);
     }

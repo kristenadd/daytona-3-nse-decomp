@@ -437,3 +437,15 @@ Camera, HTTP, NetBIOS, and linked play stay fail-closed.
   Metal device draws each frame into with `gpu::show`; AppKit events are
   drained once per frame from Present, since the game keeps the main thread).
 - Opening a socket.
+
+## Guest heap
+
+`HeapAlloc` used one free list, searched first-fit, that handed out a freed
+block whole: a 16-byte request could take a freed 50 MB block, and after a race
+and name entry the list was thousands of blocks long, so the next load spent
+minutes in it (a white, then black, screen after name entry). Blocks now carry
+their capacity (`p - 8`) beside the size asked for (`p - 4`, what `HeapSize`
+returns); freed blocks wait on a host-side stack per size class (16-byte steps
+to 256 bytes, then four classes per power of two) and are reused only for that
+class. Allocation and free are constant time; `HeapReAlloc` grows in place when
+the new size fits the block.
