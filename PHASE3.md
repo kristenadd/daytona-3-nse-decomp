@@ -809,6 +809,20 @@ most).
   default; the Mac default is 0). `DCUSA_SKIP_LOG=<n>` logs the tick rate and
   skips every n presents.
 
+### Scene walk fast path
+
+A Time Profiler run of an iPhone race with frame skip (the race at 60
+ticks, about 43 pictures a second; main thread about 70% busy, GPU 69%
+busy, more frames in flight no help) put one guest instruction on top: the
+scene walk's per-object virtual call at `0x4423BA`, 8% of the main thread,
+plus 6% in `call_indirect` for it. A probe found every call there going to
+`0x459580` (about 5,300 a frame): an update that checks the object's dirty
+flags and, when all are clear, does nothing after a 0x158-byte frame and
+the stack cookie. The call site now tests those flags itself
+(`scene_object_clean`, native.hpp) and skips the call for a clean object.
+Same scripted race on the phone: 45.3 pictures a second (42.5 to 43.6 in
+three runs before), lap 1 unchanged on the Mac, Phase 5 passes.
+
 ## Boot time
 
 Boot to attract (boot state `[0x1735608]` 8) took 131 s on an M3 Max and 103 s

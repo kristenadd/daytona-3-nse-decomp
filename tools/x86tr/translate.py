@@ -1384,6 +1384,17 @@ SITE_OVERRIDES = {
                    '{ const uint32_t n_ = edi + 4u; '
                    'if ((int32_t)n_ < (int32_t)ld32(M, esp + 0x40u)) { const uint32_t o_ = ld32(M, eax + n_ * 4u); '
                    '__builtin_prefetch(M + o_); __builtin_prefetch(M + o_ + 64u); } }'),
+        # The scene walk's per-object virtual call (+0x2C). In races every call
+        # (5,300 a frame) goes to 0x459580, which checks the object's dirty
+        # flags and does nothing when all are clear, after a 0x158-byte frame
+        # and the stack cookie; the call and its dispatch were 14% of an
+        # iPhone's main thread. A clean object (scene_object_clean) skips the
+        # call: only its argument (pushed at 0x4423B3, `ret 4`) is popped.
+        # After the call eax, ecx, edx and the flags are all set again before
+        # they are read (0x4423B0, 0x4423C4, 0x4423C8, 0x4423BD).
+        0x4423BA: ('', '{ const uint32_t t_ = ld32(M, eax + 0x2Cu); '
+                       'if (t_ == 0x459580u && scene_object_clean(M, ecx)) { esp += 4u; } '
+                       'else { esp -= 4; st32(M, esp, 0x4423BDu); SYNC(); call_indirect(c, t_); RELOAD(); } }'),
         # The frame routine's scene render (0x4DD160: subsystem updates, the
         # Model 2 step, then this call). Left out when the frame is late
         # (frame_skip_render, d3d11.cpp); the call takes no arguments, and

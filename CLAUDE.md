@@ -66,7 +66,8 @@ agreed to this).
    decision).
    1. **More pictures a second.** Races take about 20.6 ms a frame on the
       phone (25 before; PHASE3 "Frame rate on an iPhone"). Frame skip keeps
-      the game at 60 ticks a second, drawing about 43 pictures. The limit is
+      the game at 60 ticks a second, drawing about 45 pictures (43 before the
+      scene walk fast path, PHASE3). The limit is
       the game's main thread, about 16 ms of its own code a race frame, plus
       the render thread waiting on the GPU (about 6.5 ms of back-pressure).
       In a Mac race profile the scene render `0x4DC120` is about 80% of the
