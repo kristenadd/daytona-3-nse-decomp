@@ -685,6 +685,51 @@ image and the tolerance the diff will use.
 7. The 2D reference and the frame image Phase 5 will diff. **2D reference
    written and unit-tested.** Presented frames are still black.
 
+## Memory
+
+Measured with `DCUSA_MEM=<presents>` (with `DCUSA_GPU_THREAD=0`): the D3D
+layer's CPU copies and Metal's textures, targets and buffers by kind, in MB.
+At attract on the Mac the footprint went from 7.0 GB to 4.9 GB:
+
+- **CPU copies of GPU-only resources** (d3d11.cpp `gpu_only`). Every texture's
+  level-0 bytes were kept on the CPU (1.6 GB) for the 2D reference renderer.
+  With Metal on, a texture of DEFAULT or IMMUTABLE usage with no CPU access
+  (render targets included) and an IMMUTABLE buffer drop them once uploaded.
+  A partial UpdateSubresource of such a texture goes straight to the GPU
+  (`upload_texture_region`).
+- **Buffers.** A buffer's first bytes took a Metal buffer of their own: 35,000
+  of a few KB, each at least a page. They are packed into a static arena now.
+  Upload arenas held by a few long-lived buffers piled up (82 of 8 MB, 240 MB
+  live); `compact_parked` moves those buffers to the static arena and frees
+  the arenas once the frames in flight are done.
+- **Freed guest memory** (win32.cpp). VirtualFree and large HeapFree blocks
+  give their pages back (`madvise(MADV_FREE_REUSABLE)`); 1.6 GB of touched
+  guest memory became 0.8 GB.
+- **Texture size on iOS** (`DCUSA_TEXTURE_LIMIT`, 1024 by default on iOS, off
+  on a Mac): a sampled texture with mip levels larger than that starts at the
+  first level that fits. 0.5 GB less.
+
+About 0.9 GB of the footprint is Metal driver memory beyond what Metal reports
+as allocated (`currentAllocatedSize`). A standalone test shows a render pass
+holding transient memory (six 1920x1080 clears: 97 MB allocated, 307 MB
+footprint, back to 107 MB two seconds later); while the game renders it never
+settles. Not reduced yet.
+
+## Shadow maps on iOS
+
+SPIRV-Cross declares a texture the HLSL compares against (SampleCmp) as
+`texture2d` and casts it at each use: `spvDepthCast(t).sample_compare(...)`.
+The backend bound such a slot to the R32Float copy of the depth texture.
+Comparing against a colour texture works on a Mac and returns nothing on an
+A17: every shadow test failed (dark cars, a black course map and fence). When
+a shader is loaded, a texture used only that way is declared `depth2d` (and
+the array and cube kinds) instead, so the depth texture itself is bound
+(`declare_compared_as_depth`). A depth texture read that way gets its pending
+deferred clear first, as the copy did: without it the static shadow map read
+stale zeros on the phone and the distant scenery was black.
+`DCUSA_SELFTEST_BC=1` compares the GPU's BC decoding with `gpu/bc_decode` on the
+device (the A17 matches exactly).
+
 ## Out of this phase
 
 - A host window and `CAMetalLayer`. Phase 7.

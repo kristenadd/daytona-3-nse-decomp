@@ -27,6 +27,11 @@ bool presented_frame(std::uint32_t* width, std::uint32_t* height, const std::uin
 // after the frame is drawn); nullptr runs offscreen.
 void set_presenter(dcusa::Presenter* presenter);
 
+// The display the game is told it has: DCUSA_RESOLUTION=WxH, 1920x1080 by
+// default. It sizes the back buffer only; the game renders its scene targets
+// at its own resolution (GameData/config.ini DYNAMIC_RESOLUTION_MAX, 1920).
+void display_size(std::uint32_t* width, std::uint32_t* height);
+
 // The DirectSound buffers the game plays, mixed for an AudioOutput to pull
 // (audio::DsMixer::pull with this as `user`).
 audio::DsMixer& sound_mixer();

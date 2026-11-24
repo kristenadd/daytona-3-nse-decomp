@@ -15,13 +15,19 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <UIKit/UIKit.h>
 
+#include <mach/mach.h>
 #include <pthread.h>
+#include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
+#include <thread>
 
 #include "audio/ds_mixer.hpp"
 #include "gpu/metal.hpp"
@@ -33,6 +39,7 @@
 #include "recomp/loader.hpp"
 #include "recomp/win32.hpp"
 #include "runtime/fail_closed.hpp"
+#include "runtime/pad_script.hpp"
 #include "system/content.hpp"
 #include "system/edition.hpp"
 #include "system/exe_image.hpp"
@@ -101,6 +108,19 @@ void* run_game(void*) {
     // Files app and devicectl can read back from a device.
     if (std::freopen((docs / "log.txt").c_str(), "w", stderr) != nullptr) setvbuf(stderr, nullptr, _IOLBF, 0);
     std::fprintf(stderr, "ios: game thread started\n");
+    // Relative paths (DCUSA_FRAME=f, from devicectl --environment-variables) land in Documents.
+    chdir(docs.c_str());
+    // The footprint iOS kills an app over, every 10 s, in log.txt.
+    std::thread([] {
+        for (int s = 10;; s += 10) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            task_vm_info_data_t info{};
+            mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+            if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &n) == KERN_SUCCESS)
+                std::fprintf(stderr, "ios: %d s footprint %llu MB\n", s,
+                             static_cast<unsigned long long>(info.phys_footprint >> 20));
+        }
+    }).detach();
     const std::filesystem::path cache = find_cache(docs);
     const std::filesystem::path shaders = docs / "shaders";
     std::error_code ec;
@@ -149,7 +169,22 @@ void* run_game(void*) {
         say("No Metal device, or no translated shaders in the shaders folder.");
         return nullptr;
     }
-    g.pad = dcusa::make_gamecontroller_pad();
+    // DCUSA_PAD_SCRIPT=<file in Documents> plays a script (runtime/pad_script.hpp),
+    // as dcrun does; otherwise the first game controller.
+    if (const char* script = std::getenv("DCUSA_PAD_SCRIPT")) {
+        std::ifstream in(script);
+        std::stringstream text;
+        text << in.rdbuf();
+        auto scripted = std::make_unique<dcusa::ScriptPad>();
+        std::string why;
+        if (!in || !scripted->parse(text.str(), &why)) {
+            say(why.empty() ? "cannot read DCUSA_PAD_SCRIPT" : why);
+            return nullptr;
+        }
+        g.pad = std::move(scripted);
+    } else {
+        g.pad = dcusa::make_gamecontroller_pad();
+    }
     dcusa::recomp::set_pad_source(g.pad.get());
     dcusa::gpu::set_layer((__bridge void*)g.layer);
     g.presenter = std::make_unique<LayerPresenter>(g.layer);

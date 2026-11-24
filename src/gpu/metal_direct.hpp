@@ -10,6 +10,8 @@ void create_texture(std::uint32_t id, const TextureDesc& desc);
 void upload_texture(std::uint32_t id, const std::uint8_t* bytes, std::size_t size, std::uint32_t row_pitch);
 void upload_texture_sub(std::uint32_t id, std::uint32_t slice, std::uint32_t mip, const std::uint8_t* bytes, std::size_t size,
                         std::uint32_t row_pitch);
+void upload_texture_region(std::uint32_t id, std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h,
+                           const std::uint8_t* bytes, std::size_t size, std::uint32_t row_pitch);
 void generate_mips(std::uint32_t id);
 void upload_buffer(std::uint32_t id, const std::uint8_t* bytes, std::size_t size);
 void create_sampler(std::uint32_t id, const SamplerDesc& desc);

@@ -3,6 +3,7 @@
 #include "recomp/avi_video.hpp"
 
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -92,6 +93,26 @@ bool commit_guest(std::uint8_t* mem, std::uint32_t address, std::uint32_t size) 
     return mprotect(mem + lo, static_cast<std::size_t>(hi - lo), PROT_READ | PROT_WRITE) == 0;
 }
 
+// Freed guest memory goes back to the host: the whole host pages inside
+// [address, address + size) stop counting toward the process's footprint (what
+// iOS kills an app over) until reuse_pages. Their contents are undefined then.
+void release_pages(std::uint8_t* mem, std::uint32_t address, std::uint32_t size) {
+    const std::uint64_t page = static_cast<std::uint64_t>(getpagesize());
+    const std::uint64_t lo = (address + page - 1) & ~(page - 1);
+    const std::uint64_t hi = (std::uint64_t(address) + size) & ~(page - 1);
+    if (hi > lo) madvise(mem + lo, static_cast<std::size_t>(hi - lo), MADV_FREE_REUSABLE);
+}
+
+void reuse_pages(std::uint8_t* mem, std::uint32_t address, std::uint32_t size) {
+    const std::uint64_t page = static_cast<std::uint64_t>(getpagesize());
+    const std::uint64_t lo = address & ~(page - 1);
+    const std::uint64_t hi = (std::uint64_t(address) + size + page - 1) & ~(page - 1);
+    if (hi > lo) madvise(mem + lo, static_cast<std::size_t>(hi - lo), MADV_FREE_REUSE);
+}
+
+// Heap blocks this large give their pages back when freed.
+constexpr std::uint32_t kHeapReleaseBytes = 256u << 10;
+
 constexpr std::uint32_t kCommandLine = kHeapLimit;
 constexpr std::uint32_t kCommandLineW = kHeapLimit + 128;
 constexpr std::uint32_t kEnvironment = kHeapLimit + 256;
@@ -173,6 +194,7 @@ std::uint32_t heap_alloc(std::uint8_t* M, std::uint32_t size, bool zero) {
     if (cls < kHeapClasses && !heap_bins[cls].empty()) {
         user = heap_bins[cls].back();
         heap_bins[cls].pop_back();
+        if (capacity >= kHeapReleaseBytes) reuse_pages(M, user, capacity);
     } else {
         std::uint32_t bump = ld32(M, kProcessHeap + kHeapNext);
         if (bump < kProcessHeap + 16) bump = kProcessHeap + 16;
@@ -194,7 +216,10 @@ std::uint32_t heap_alloc(std::uint8_t* M, std::uint32_t size, bool zero) {
 void heap_free(std::uint8_t* M, std::uint32_t p) {
     std::uint32_t capacity = 0;
     const unsigned cls = heap_class(ld32(M, p - 8), &capacity);
-    if (cls < kHeapClasses && capacity == ld32(M, p - 8)) heap_bins[cls].push_back(p);
+    if (cls < kHeapClasses && capacity == ld32(M, p - 8)) {
+        heap_bins[cls].push_back(p);
+        if (capacity >= kHeapReleaseBytes) release_pages(M, p, capacity);
+    }
 }
 
 bool heap_committed(std::uint32_t a) {
@@ -301,6 +326,7 @@ void VirtualAlloc(Cpu& c) {
         const std::uint32_t need = (size + kAllocGranularity - 1u) & ~(kAllocGranularity - 1u);
         if (need != 0 && (address = virt_take_free(need)) != 0) {
             reused = true;
+            reuse_pages(c.mem, address, need);
         } else if (need != 0 && virt_bump <= kVirtLimit && need <= kVirtLimit - virt_bump) {
             address = virt_bump;
             virt_bump += need;
@@ -372,6 +398,7 @@ void VirtualFree(Cpu& c) {
     if ((type & 0x8000u) != 0) {
         const auto it = virt_regions.find(address);
         if (it != virt_regions.end()) {
+            release_pages(c.mem, it->first, it->second);
             virt_release(it->first, it->second);
             virt_regions.erase(it);
         }
@@ -1754,8 +1781,10 @@ void GetClientRect(Cpu& c) {
     if (rect != 0) {
         st32(c.mem, rect, 0);
         st32(c.mem, rect + 4, 0);
-        st32(c.mem, rect + 8, 1920);
-        st32(c.mem, rect + 12, 1080);
+        std::uint32_t w = 0, h = 0;
+        display_size(&w, &h);
+        st32(c.mem, rect + 8, w);
+        st32(c.mem, rect + 12, h);
     }
     ret_stdcall(c, 1, 8);
 }

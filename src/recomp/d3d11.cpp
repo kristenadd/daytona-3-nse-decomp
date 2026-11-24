@@ -89,7 +89,18 @@ struct StoredBytes {
     std::vector<std::uint8_t> bytes;
     std::uint32_t row = 0;
     std::uint32_t format = 0;
+    // A resource only the GPU reads (Metal on; a texture of DEFAULT or IMMUTABLE
+    // usage with no CPU access, render targets included: their CPU copy fed
+    // only the software reference; or an IMMUTABLE buffer): its bytes are dropped once the Metal device has them,
+    // `full` keeps their size. Over 1.5 GB of textures in attract.
+    bool gpu_only = false;
+    std::uint32_t full = 0;
 };
+
+// The CPU copy of a GPU-only texture, once uploaded.
+void drop_cpu_copy(StoredBytes& s) {
+    if (s.gpu_only) std::vector<std::uint8_t>().swap(s.bytes);
+}
 
 struct LiveMap {
     std::uint32_t resource = 0;
@@ -924,8 +935,13 @@ void sync_gpu(const std::uint8_t* mem, std::uint32_t obj) {
     const auto it = stored.find(obj);
     if (it == stored.end() || it->second.bytes.empty()) return;
     const std::uint32_t kind = ld32(mem, obj + 4);
-    if (kind == Texture) gpu::upload_texture(obj, it->second.bytes.data(), it->second.bytes.size(), it->second.row);
-    else gpu::upload_buffer(obj, it->second.bytes.data(), it->second.bytes.size());
+    if (kind == Texture) {
+        gpu::upload_texture(obj, it->second.bytes.data(), it->second.bytes.size(), it->second.row);
+        drop_cpu_copy(it->second);
+    } else {
+        gpu::upload_buffer(obj, it->second.bytes.data(), it->second.bytes.size());
+        drop_cpu_copy(it->second);
+    }
 }
 
 std::uint32_t texel_bytes(std::uint32_t format) {
@@ -970,7 +986,10 @@ void remember(std::uint32_t obj, std::uint32_t size, std::uint32_t row) {
 
 void copy_from_guest(std::uint32_t obj, const std::uint8_t* mem, std::uint32_t src, std::uint32_t src_row) {
     auto it = stored.find(obj);
-    if (it == stored.end() || src == 0 || it->second.bytes.empty()) return;
+    if (it == stored.end() || src == 0) return;
+    // A whole new image for a GPU-only texture: held until sync_gpu uploads it.
+    if (it->second.bytes.empty() && it->second.gpu_only) it->second.bytes.resize(it->second.full);
+    if (it->second.bytes.empty()) return;
     const std::uint32_t row = it->second.row == 0 ? static_cast<std::uint32_t>(it->second.bytes.size()) : it->second.row;
     const std::uint32_t rows = row == 0 ? 0 : static_cast<std::uint32_t>(it->second.bytes.size() / row);
     if (rows <= 1 || src_row == 0 || src_row == row) {
@@ -1232,7 +1251,13 @@ void create_buffer(Cpu& c) {
     st32(c.mem, obj + 24, ld32(c.mem, desc + 12));
     st32(c.mem, obj + 28, ld32(c.mem, desc + 16));
     st32(c.mem, obj + 32, ld32(c.mem, desc + 20));
-    if (width <= kMapBytes) remember(obj, width, width);
+    if (width <= kMapBytes) {
+        remember(obj, width, width);
+        // An IMMUTABLE buffer never changes after this: the GPU's copy is enough.
+        StoredBytes& sb = stored[obj];
+        sb.full = width;
+        sb.gpu_only = gpu::enabled() && ld32(c.mem, desc + 4) == 1u;
+    }
     const std::uint32_t initial = arg(c, 2);
     if (initial != 0) copy_from_guest(obj, c.mem, ld32(c.mem, initial), width);
     sync_gpu(c.mem, obj);
@@ -1468,7 +1493,12 @@ void create_texture(Cpu& c) {
     const std::uint32_t bytes = texture_bytes(ld32(c.mem, desc), ld32(c.mem, desc + 4), ld32(c.mem, desc + 16), &row);
     if (bytes != 0) {
         remember(obj, bytes, row);
-        stored[obj].format = ld32(c.mem, desc + 16);
+        StoredBytes& sb = stored[obj];
+        sb.format = ld32(c.mem, desc + 16);
+        sb.full = bytes;
+        sb.gpu_only = gpu::enabled() && ld32(c.mem, desc + 28) <= 1u && ld32(c.mem, desc + 36) == 0;
+        // Filled by initial data or UpdateSubresource, which bring their own bytes.
+        if (sb.gpu_only) drop_cpu_copy(sb);
         ++g_textures;
         if (stats_on() && (bytes > 4096u || g_textures <= 4))
             std::fprintf(stderr, "tex %u %ux%u fmt %u bytes %u\n", g_textures, ld32(c.mem, desc),
@@ -1511,6 +1541,7 @@ void create_texture(Cpu& c) {
                         gpu::upload_texture_sub(obj, slice, mip, c.mem + ld32(c.mem, sub), static_cast<std::size_t>(pitch) * rows, pitch);
                 }
             }
+            if (auto it = stored.find(obj); it != stored.end()) drop_cpu_copy(it->second);
         }
     }
     if (out != 0) st32(c.mem, out, obj);
@@ -1599,14 +1630,33 @@ void enum_outputs(Cpu& c) {
     ret_stdcall(c, kSOk, 12);
 }
 
+}  // namespace
+
+void display_size(std::uint32_t* width, std::uint32_t* height) {
+    static const std::pair<std::uint32_t, std::uint32_t> size = [] {
+        std::uint32_t w = 1920, h = 1080;
+        if (const char* v = std::getenv("DCUSA_RESOLUTION")) {
+            unsigned a = 0, b = 0;
+            if (std::sscanf(v, "%ux%u", &a, &b) == 2 && a >= 320 && b >= 180 && a <= 7680 && b <= 4320) w = a, h = b;
+        }
+        return std::make_pair(w, h);
+    }();
+    *width = size.first;
+    *height = size.second;
+}
+
+namespace {
+
 void mode_list(Cpu& c) {
     const std::uint32_t format = arg(c, 1);
     const std::uint32_t count = arg(c, 3);
     const std::uint32_t modes = arg(c, 4);
     if (count != 0) st32(c.mem, count, 1);
     if (modes != 0) {
-        st32(c.mem, modes, 1920);
-        st32(c.mem, modes + 4, 1080);
+        std::uint32_t w = 0, h = 0;
+        display_size(&w, &h);
+        st32(c.mem, modes, w);
+        st32(c.mem, modes + 4, h);
         st32(c.mem, modes + 8, 60);
         st32(c.mem, modes + 12, 1);
         st32(c.mem, modes + 16, format);
@@ -1825,6 +1875,25 @@ void present(Cpu& c) {
             std::_Exit(0);
         }
         print_pad_trace(c.mem, all_presents);
+        // DCUSA_MEM=<n>: every n presents, where the host memory goes (MB).
+        // With DCUSA_GPU_THREAD=0 (the report reads the device's tables).
+        static const int mem_every = [] {
+            const char* v = std::getenv("DCUSA_MEM");
+            return v ? std::atoi(v) : 0;
+        }();
+        if (mem_every > 0 && all_presents % mem_every == 0) {
+            double tex = 0, buf = 0, other = 0;
+            unsigned n_tex = 0, n_buf = 0;
+            for (const auto& [obj, sb] : stored) {
+                const double mb = static_cast<double>(sb.bytes.capacity()) / 1048576.0;
+                const std::uint32_t kind = ld32(c.mem, obj + 4);
+                if (kind == Texture) tex += mb, ++n_tex;
+                else if (kind == Buffer) buf += mb, ++n_buf;
+                else other += mb;
+            }
+            std::fprintf(stderr, "mem %d: stored textures %.0f (%u) buffers %.0f (%u) other %.0f | metal %s\n",
+                         all_presents, tex, n_tex, buf, n_buf, other, gpu::memory_report().c_str());
+        }
         report_hitch(all_presents);
     }
     if (static bool shown = false; !shown && stats_on()) {
@@ -1884,8 +1953,10 @@ void present(Cpu& c) {
 void swap_desc(Cpu& c) {
     const std::uint32_t desc = arg(c, 1);
     if (desc != 0) {
-        st32(c.mem, desc, 1920);
-        st32(c.mem, desc + 4, 1080);
+        std::uint32_t w = 0, h = 0;
+        display_size(&w, &h);
+        st32(c.mem, desc, w);
+        st32(c.mem, desc + 4, h);
         st32(c.mem, desc + 8, 60);
         st32(c.mem, desc + 12, 1);
         st32(c.mem, desc + 16, 28);
@@ -1921,16 +1992,18 @@ void get_buffer(Cpu& c) {
     const std::uint32_t out = arg(c, 3);
     if (!guid_is(c.mem, iid, 0x6F15AAF2u, 0xD208, 0x4E89, 0x9AB4489535D34F9Cull)) refuse_iid(c.mem, iid);
     const std::uint32_t obj = spawn(c.mem, Texture);
-    st32(c.mem, obj + 12, 1920);
-    st32(c.mem, obj + 16, 1080);
+    std::uint32_t w = 0, h = 0;
+    display_size(&w, &h);
+    st32(c.mem, obj + 12, w);
+    st32(c.mem, obj + 16, h);
     st32(c.mem, obj + 20, 28);
     st32(c.mem, obj + 24, 1);
-    remember(obj, 1920u * 1080u * 4u, 1920u * 4u);
+    remember(obj, w * h * 4u, w * 4u);
     pipe.backbuffer = obj;
     if (gpu::enabled()) {
         gpu::TextureDesc td;
-        td.width = 1920;
-        td.height = 1080;
+        td.width = w;
+        td.height = h;
         td.format = 28;
         td.bind = 0x28;  // render target, shader resource
         gpu::create_texture(obj, td);
@@ -1965,7 +2038,21 @@ void update_subresource(Cpu& c) {
         ret_stdcall(c, kSOk, 28);
         return;
     }
-    if (sub != 0 || src == 0 || it == stored.end() || it->second.bytes.empty()) {
+    if (sub != 0 || src == 0 || it == stored.end() || (it->second.bytes.empty() && !it->second.gpu_only)) {
+        ret_stdcall(c, kSOk, 28);
+        return;
+    }
+    if (box != 0 && it->second.gpu_only && it->second.bytes.empty()) {
+        // Part of a GPU-only texture: straight to the GPU, the rest stays.
+        const std::uint32_t left = ld32(c.mem, box), top = ld32(c.mem, box + 4);
+        const std::uint32_t right = ld32(c.mem, box + 12), bottom = ld32(c.mem, box + 16);
+        const std::uint32_t f = it->second.format;
+        const bool bc = (f >= 70 && f <= 84) || (f >= 94 && f <= 99);
+        if (right > left && bottom > top && src_row != 0) {
+            const std::uint32_t rows = bc ? (bottom - top + 3) / 4 : bottom - top;
+            gpu::upload_texture_region(res, left, top, right - left, bottom - top, c.mem + src,
+                                       static_cast<std::size_t>(src_row) * rows, src_row);
+        }
         ret_stdcall(c, kSOk, 28);
         return;
     }

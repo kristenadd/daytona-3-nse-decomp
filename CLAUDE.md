@@ -56,14 +56,21 @@ agreed to this).
 7. **Phase 5.** **Verified** (see below). CTest `phase5_attract` and
    `phase5_controls` (label `phase5`; [PHASE5.md](PHASE5.md)).
 
-8. **iOS and iPadOS.** **Verified in the Simulator** (see below). On devices
-   the app builds, signs (`ios-device` preset, both memory entitlements),
-   installs and starts, but the system kills it for memory before attract:
-   iPad mini 6 (4 GB) at about 2.8 GB resident after 5 s of CPU, iPhone 15
-   Pro Max (8 GB) at about 5.4 GB after 52 s (JetsamEvent reports). The Mac
-   build has the same appetite (footprint 2.2 GB at 2 s, 3.7 GB at 12 s: about
-   2 GB of Metal memory, 1 GB malloc, 0.7 GB touched guest memory), so cutting
-   it is the next step. Then touch controls.
+8. **iOS and iPadOS.** **Verified in the Simulator and on an iPhone 15 Pro
+   Max** (see below). Still to do:
+   - **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
+     about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
+     pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
+     A 512 cap, no MSAA and a 1280x720 display did not get it past 2.4 GB at
+     10 s. Next: transcode BC to ASTC (same size as BC7/BC3, sampled by A15),
+     best done on the Mac ahead of time and shipped beside the shaders.
+   - **Speed:** races are slow on the phone. It renders 1920x1080 with 4x
+     MSAA and runs the engine's per-draw CPU work; a lower render size or
+     MSAA setting on iOS, then the CPU profile (item 5).
+   - **Touch controls.**
+   - **Unexplained GPU memory:** about 0.9 GB of Metal driver memory beyond
+     its allocations (render passes hold transient memory while the game
+     renders; PHASE3 "Memory").
 
 ## Future work
 
@@ -95,8 +102,10 @@ agreed to this).
   `0x6D1460`. The Metal path, the default, is unaffected. Not investigated.
 
 - GPU memory reached 4.3 GB (5,455 Metal allocations) in a windowed session
-  after several races. Possibly just every mip level plus the 4x MSAA targets,
-  possibly a leak that grows per race. Not measured yet.
+  after several races. Partly explained since: upload arenas pinned by a few
+  long-lived buffers grew without bound (fixed, compact_parked), and the first
+  bytes of every buffer took a Metal buffer of their own (35,000 of them;
+  fixed). Not remeasured across several races.
 
 ## Verified fixed
 
@@ -146,5 +155,10 @@ agreed to this).
   nearest value). With the decoder forced on the Mac (`DCUSA_BC_DECODE=1`)
   Phase 5 attract passes (colour p95 0.429, median 0.212); before BC6H was
   decoded it failed (saturation 0.071 over).
+- **iPhone 15 Pro Max** (item 8). The `ios-device` build boots to attract and
+  races (`DCUSA_PAD_SCRIPT=race.txt` from Documents) at about 4.6 GB
+  footprint, where it was killed at 5.4 GB before the memory work. A race frame
+  matches the Mac's: shadows, the fence, the course map. PHASE3 "Memory" and
+  "Shadow maps on iOS".
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.

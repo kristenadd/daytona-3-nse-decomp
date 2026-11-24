@@ -28,7 +28,7 @@ namespace dcusa::gpu {
 namespace {
 
 enum class Op : std::uint8_t {
-    CreateTexture, UploadTexture, UploadTextureSub, GenerateMips, UploadBuffer, CreateSampler, Destroy, ClearTarget, ClearDepth,
+    CreateTexture, UploadTexture, UploadTextureSub, UploadTextureRegion, GenerateMips, UploadBuffer, CreateSampler, Destroy, ClearTarget, ClearDepth,
     DrawIndexed, Draw, Submit, SetLayer, Show, SetTrace, Antialias,
 };
 
@@ -76,6 +76,10 @@ void replay(const Batch& b) {
             case Op::UploadTexture: direct::upload_texture(c.id, b.bytes.data() + c.index, c.size, c.a); break;
             case Op::UploadTextureSub:
                 direct::upload_texture_sub(c.id, c.b, static_cast<std::uint32_t>(c.base), b.bytes.data() + c.index, c.size, c.a);
+                break;
+            case Op::UploadTextureRegion:
+                direct::upload_texture_region(c.id, c.b & 0xFFFFu, c.b >> 16, static_cast<std::uint32_t>(c.base) & 0xFFFFu,
+                                              static_cast<std::uint32_t>(c.base) >> 16, b.bytes.data() + c.index, c.size, c.a);
                 break;
             case Op::GenerateMips: direct::generate_mips(c.id); break;
             case Op::UploadBuffer: direct::upload_buffer(c.id, b.bytes.data() + c.index, c.size); break;
@@ -188,6 +192,20 @@ void upload_texture(std::uint32_t id, const std::uint8_t* bytes, std::size_t siz
     c.index = at;
     c.size = size;
     c.a = row_pitch;
+}
+
+void upload_texture_region(std::uint32_t id, std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h,
+                           const std::uint8_t* bytes, std::size_t size, std::uint32_t row_pitch) {
+    if (!threaded()) return direct::upload_texture_region(id, x, y, w, h, bytes, size, row_pitch);
+    if (bytes == nullptr || size == 0 || x > 0xFFFFu || y > 0xFFFFu || w > 0xFFFFu || h > 0xFFFFu) return;
+    const std::size_t at = Q().filling->keep_bytes(bytes, size);
+    Cmd& c = record(Op::UploadTextureRegion);
+    c.id = id;
+    c.index = at;
+    c.size = size;
+    c.a = row_pitch;
+    c.b = x | y << 16;
+    c.base = static_cast<std::int32_t>(w | h << 16);
 }
 
 void upload_texture_sub(std::uint32_t id, std::uint32_t slice, std::uint32_t mip, const std::uint8_t* bytes, std::size_t size,

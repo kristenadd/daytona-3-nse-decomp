@@ -42,8 +42,9 @@ shift up/down, Y/X/B/A views 1-4. Menus are confirmed with the gas.
 
 The same game code builds as an iOS / iPadOS app (`src/platform/ios`). It is
 verified in the Simulator (iPad Pro 13-inch, iOS 27.2): it boots to attract and
-draws the 3D demo. On an iPad mini 6 and an iPhone 15 Pro Max it starts and
-then is stopped by the system for using too much memory (see CLAUDE.md, item 8).
+draws the 3D demo. On an iPhone 15 Pro Max it boots, plays attract and races
+(slowly, so far). An iPad mini 6 (4 GB) still runs out of memory early in boot:
+its GPU has no BC textures, and decoded they do not fit (CLAUDE.md, item 8).
 
 ```bash
 cmake --preset ios-sim
@@ -82,7 +83,11 @@ with `xcrun devicectl device copy to --domain-type appDataContainer
 --destination Documents/<name>` (folders copy whole), or the Files app. The
 app writes its messages to `Documents/log.txt`; read it back with
 `devicectl device copy from ... --source Documents/log.txt`. A memory kill
-leaves a `JetsamEvent-*.ips` in `--domain-type systemCrashLogs`.
+leaves a `JetsamEvent-*.ips` in `--domain-type systemCrashLogs`. The log also
+gets the footprint every 10 s. Variables for a run go through devicectl with
+a `DEVICECTL_CHILD_` prefix; relative paths are in Documents, so
+`DEVICECTL_CHILD_DCUSA_FRAME=f DEVICECTL_CHILD_DCUSA_EVERY=500` saves frames there
+and `DEVICECTL_CHILD_DCUSA_PAD_SCRIPT=race.txt` plays a pad script.
 
 ## Building and testing (macOS, Apple silicon)
 

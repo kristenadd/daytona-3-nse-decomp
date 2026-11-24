@@ -37,6 +37,11 @@ void upload_texture(std::uint32_t id, const std::uint8_t* bytes, std::size_t siz
 // mip level `mip`, rows `row_pitch` bytes apart.
 void upload_texture_sub(std::uint32_t id, std::uint32_t slice, std::uint32_t mip, const std::uint8_t* bytes, std::size_t size,
                         std::uint32_t row_pitch);
+// Part of level 0, slice 0: the texels (x, y) to (x + w, y + h) (a multiple of
+// 4 for BC formats, except at the right and bottom edges), rows `row_pitch`
+// bytes apart. The rest of the texture keeps what it had.
+void upload_texture_region(std::uint32_t id, std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h,
+                           const std::uint8_t* bytes, std::size_t size, std::uint32_t row_pitch);
 void generate_mips(std::uint32_t id);
 
 void upload_buffer(std::uint32_t id, const std::uint8_t* bytes, std::size_t size);
@@ -138,5 +143,7 @@ struct Stats {
     unsigned gpu_buffers = 0;
 };
 const Stats& stats();
+// DCUSA_MEM: Metal memory by kind, one line (MB).
+std::string memory_report();
 
 }  // namespace dcusa::gpu
