@@ -382,11 +382,15 @@ Correction: attract also opens `screen demo.avi`, after its first full loop
 (about present 40,000 at 60 Hz). OpenCV first asks for
 `opencv_ffmpeg2410.dll`, which the install does not ship: `LoadLibraryA` now
 returns NULL with `ERROR_MOD_NOT_FOUND` for a DLL that is not there (one that
-is there still fails closed). OpenCV then falls back to Video for Windows:
-`AVIFileInit` succeeds and `AVIFileOpenA` fails with `AVIERR_FILEOPEN`, so the
-video is not shown and the game carries on. Before this, every run stopped
-there. Decoding the AVI (Microsoft Video 1) is still not done; the other
-`AVIFIL32` entries stay fail-closed.
+is there still fails closed). OpenCV then falls back to Video for Windows, which is now implemented for
+reading: `AVIFileOpenA`, `AVIFileGetStream`, `AVIStreamInfoA`,
+`AVIStreamGetFrameOpen` (24-bit), `AVIStreamGetFrame`, `AVIStreamGetFrameClose`,
+`AVIStreamRelease`, `AVIFileRelease`. Both AVIs are Microsoft Video 1 (`CRAM`,
+16-bit RGB555); `avi_video.cpp` parses the RIFF chunks and `idx1` key frames and
+decodes them natively, bit-exact with ffmpeg on the frames checked. The other
+AVI is the name-entry letter strip (`cmn_rslt_name_entry_chara.avi`, 1644x196,
+1061 frames at 60 fps): without it the letter selector after a ranking race was
+a white box. The writing and compression entry points stay fail-closed.
 
 ### 6. Left fail-closed on purpose
 

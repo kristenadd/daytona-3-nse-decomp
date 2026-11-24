@@ -62,6 +62,7 @@ add_library(dcusa_recomp STATIC
     src/recomp/shell.cpp
     src/recomp/host_files.cpp
     src/recomp/d3d11.cpp
+    src/recomp/avi_video.cpp
     src/audio/ds_mixer.cpp
     src/audio/null_output.cpp
     src/gpu/metal.mm

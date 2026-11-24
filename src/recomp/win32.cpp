@@ -1,5 +1,7 @@
 #include "recomp/win32.hpp"
 
+#include "recomp/avi_video.hpp"
+
 #include <sys/mman.h>
 
 #include <algorithm>
@@ -1890,17 +1892,149 @@ void GetModuleFileNameA(Cpu& c) { ret_stdcall(c, module_file_name(c, false), 12)
 // OpenCV asks for opencv_ffmpeg2410.dll, which the install does not ship, after
 // the first attract loop and goes on without it. A DLL that does exist fails
 // closed: its code is not translated.
-// Video for Windows, as OpenCV's file capture uses it (after the first attract
-// loop it opens one of the AVIs in rom\\movie). The AVIs are not decoded here:
-// the open fails, OpenCV's capture reports it could not open, and the game
-// goes on without that video. Every other AVIFIL32 entry stays fail-closed, so
-// nothing past a failed open is reached silently.
+// Video for Windows, as OpenCV 2.4's file capture (CvCaptureAVI_VFW) uses it
+// for the two AVIs in rom\movie: the name-entry letter strip after a race and
+// the attract camera stand-in. Files with Microsoft Video 1 16-bit video are
+// decoded natively (avi_video.cpp) and handed out as 24-bit bottom-up DIBs, as
+// AVIStreamGetFrame does. One object per open file; the PAVIFILE, PAVISTREAM and
+// PGETFRAME handed to the guest are its handle + 0, + 4 and + 8. The writing
+// and compression entry points stay fail-closed.
+struct AviOpen {
+    std::uint32_t file = 0;    // guest_create_file handle
+    AviVideo video;
+    std::uint32_t frame = 0;   // guest buffer: BITMAPINFOHEADER and the bits
+};
+std::unordered_map<std::uint32_t, std::unique_ptr<AviOpen>> g_avis;
+std::uint32_t g_next_avi = 0x7A000000u;
+constexpr std::uint32_t kAviErrFileOpen = 0x80044067u, kAviErrNoData = 0x80044075u;
+
+AviOpen* avi_of(std::uint32_t handle, std::uint32_t tag) {
+    if ((handle & 0xFu) != tag) return nullptr;
+    auto it = g_avis.find(handle - tag);
+    return it == g_avis.end() ? nullptr : it->second.get();
+}
+
 void AVIFileInit(Cpu& c) { ret_stdcall(c, 0, 0); }
+
 void AVIFileOpenA(Cpu& c) {
-    if (arg(c, 0) != 0) st32(c.mem, arg(c, 0), 0);  // *ppfile = NULL
-    if (std::getenv("DCUSA_STATS") != nullptr && arg(c, 1) != 0)
-        std::fprintf(stderr, "AVIFileOpenA %s: not opened\n", guest_ascii(c.mem, arg(c, 1), false).c_str());
-    ret_stdcall(c, 0x80044067u, 16);  // AVIERR_FILEOPEN
+    const std::uint32_t out = arg(c, 0);
+    if (out != 0) st32(c.mem, out, 0);
+    const std::string name = arg(c, 1) ? guest_ascii(c.mem, arg(c, 1), false) : std::string();
+    auto avi = std::make_unique<AviOpen>();
+    std::uint32_t err = 0;
+    std::uint64_t size = 0;
+    bool ok = !name.empty() && guest_create_file(name, kGenericRead, 3u /* OPEN_EXISTING */, 0, &avi->file, &err) == 0 &&
+              guest_file_size(avi->file, &size) == 0;
+    if (ok) {
+        const std::uint32_t fh = avi->file;
+        ok = avi->video.open(
+            [fh](std::uint64_t offset, std::uint32_t n, std::uint8_t* dst) {
+                std::int64_t now = 0;
+                std::uint32_t got = 0;
+                return guest_seek_file(fh, static_cast<std::int64_t>(offset), 0, &now) == 0 &&
+                       guest_read_file(fh, dst, n, &got) == 0 && got == n;
+            },
+            size);
+    }
+    if (std::getenv("DCUSA_STATS") != nullptr)
+        std::fprintf(stderr, "AVIFileOpenA %s: %s %ux%u %u frames\n", name.c_str(), ok ? "opened" : "not opened",
+                     avi->video.width(), avi->video.height(), avi->video.frames());
+    if (!ok) {
+        if (avi->file != 0) guest_close_file(avi->file);
+        ret_stdcall(c, kAviErrFileOpen, 16);
+        return;
+    }
+    const std::uint32_t handle = g_next_avi;
+    g_next_avi += 0x10u;
+    g_avis[handle] = std::move(avi);
+    if (out != 0) st32(c.mem, out, handle);
+    ret_stdcall(c, 0, 16);
+}
+
+// (pfile, ppavi, fccType, lParam): the one video stream.
+void AVIFileGetStream(Cpu& c) {
+    AviOpen* a = avi_of(arg(c, 0), 0);
+    const std::uint32_t out = arg(c, 1), type = arg(c, 2);
+    const bool video = type == 0 || type == 0x73646976u;  // 'vids'
+    if (out != 0) st32(c.mem, out, a != nullptr && video && arg(c, 3) == 0 ? arg(c, 0) + 4u : 0u);
+    ret_stdcall(c, a != nullptr && video && arg(c, 3) == 0 ? 0u : kAviErrNoData, 16);
+}
+
+// AVISTREAMINFOA, 140 bytes.
+void AVIStreamInfoA(Cpu& c) {
+    AviOpen* a = avi_of(arg(c, 0), 4);
+    const std::uint32_t si = arg(c, 1), size = arg(c, 2);
+    if (a == nullptr || si == 0 || size < 140) {
+        ret_stdcall(c, kAviErrNoData, 12);
+        return;
+    }
+    std::memset(c.mem + si, 0, size < 140 ? size : 140);
+    st32(c.mem, si + 0, 0x73646976u);  // 'vids'
+    st32(c.mem, si + 4, a->video.handler());
+    st32(c.mem, si + 20, a->video.scale());
+    st32(c.mem, si + 24, a->video.rate());
+    st32(c.mem, si + 32, a->video.frames());
+    st32(c.mem, si + 40, a->video.row_bytes() * a->video.height());
+    st32(c.mem, si + 44, 0xFFFFFFFFu);
+    st32(c.mem, si + 60, a->video.width());   // rcFrame.right
+    st32(c.mem, si + 64, a->video.height());  // rcFrame.bottom
+    ret_stdcall(c, 0, 12);
+}
+
+// (pavi, lpbiWanted): 24-bit frames (lpbiWanted NULL or a 24-bit header).
+void AVIStreamGetFrameOpen(Cpu& c) {
+    AviOpen* a = avi_of(arg(c, 0), 4);
+    const std::uint32_t want = arg(c, 1);
+    const bool rgb24 = want == 0 || (ld16(c.mem, want + 14) == 24 && ld32(c.mem, want + 16) == 0);
+    if (a == nullptr || !rgb24) {
+        ret_stdcall(c, 0, 8);
+        return;
+    }
+    if (a->frame == 0) a->frame = heap_alloc(c.mem, 40u + a->video.row_bytes() * a->video.height(), true);
+    ret_stdcall(c, a->frame != 0 ? arg(c, 0) + 4u : 0u, 8);
+}
+
+// (pg, lPos): the frame as a packed DIB, or NULL past the end.
+void AVIStreamGetFrame(Cpu& c) {
+    AviOpen* a = avi_of(arg(c, 0), 8);
+    const std::uint32_t pos = arg(c, 1);
+    if (a == nullptr || a->frame == 0 || pos >= a->video.frames()) {
+        ret_stdcall(c, 0, 8);
+        return;
+    }
+    const std::vector<std::uint8_t>& bits = a->video.frame_bgr24(pos);
+    if (bits.empty()) {
+        ret_stdcall(c, 0, 8);
+        return;
+    }
+    const std::uint32_t h = a->frame;
+    st32(c.mem, h + 0, 40);
+    st32(c.mem, h + 4, a->video.width());
+    st32(c.mem, h + 8, a->video.height());  // positive: bottom-up
+    st16(c.mem, h + 12, 1);
+    st16(c.mem, h + 14, 24);
+    st32(c.mem, h + 16, 0);  // BI_RGB
+    st32(c.mem, h + 20, static_cast<std::uint32_t>(bits.size()));
+    std::memset(c.mem + h + 24, 0, 16);
+    std::memcpy(c.mem + h + 40, bits.data(), bits.size());
+    ret_stdcall(c, h, 8);
+}
+
+void AVIStreamGetFrameClose(Cpu& c) { ret_stdcall(c, avi_of(arg(c, 0), 8) != nullptr ? 0u : kAviErrNoData, 4); }
+
+void AVIStreamRelease(Cpu& c) { ret_stdcall(c, 0, 4); }
+
+void AVIFileRelease(Cpu& c) {
+    auto it = g_avis.find(arg(c, 0));
+    if (it != g_avis.end()) {
+        if (it->second->frame != 0) {  // back on the heap's free list
+            st32(c.mem, it->second->frame, ld32(c.mem, kProcessHeap + kHeapFree));
+            st32(c.mem, kProcessHeap + kHeapFree, it->second->frame);
+        }
+        guest_close_file(it->second->file);
+        g_avis.erase(it);
+    }
+    ret_stdcall(c, 0, 4);
 }
 
 void LoadLibraryA(Cpu& c) {
@@ -2622,6 +2756,13 @@ constexpr Handler kHandlers[] = {
     {"KERNEL32.dll!LoadLibraryA", LoadLibraryA},
     {"AVIFIL32.dll!AVIFileInit", AVIFileInit},
     {"AVIFIL32.dll!AVIFileOpenA", AVIFileOpenA},
+    {"AVIFIL32.dll!AVIFileGetStream", AVIFileGetStream},
+    {"AVIFIL32.dll!AVIStreamInfoA", AVIStreamInfoA},
+    {"AVIFIL32.dll!AVIStreamGetFrameOpen", AVIStreamGetFrameOpen},
+    {"AVIFIL32.dll!AVIStreamGetFrame", AVIStreamGetFrame},
+    {"AVIFIL32.dll!AVIStreamGetFrameClose", AVIStreamGetFrameClose},
+    {"AVIFIL32.dll!AVIStreamRelease", AVIStreamRelease},
+    {"AVIFIL32.dll!AVIFileRelease", AVIFileRelease},
     {"KERNEL32.dll!GetModuleHandleExW", GetModuleHandleExW},
     {"KERNEL32.dll!GetModuleFileNameA", GetModuleFileNameA},
     {"KERNEL32.dll!GetModuleFileNameW", GetModuleFileNameW},
