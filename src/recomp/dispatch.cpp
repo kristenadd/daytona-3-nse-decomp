@@ -1,11 +1,13 @@
 #include "recomp/dispatch.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
 #include "recomp/d3d11.hpp"
+#include "recomp/rt_lock.hpp"
 #include "recomp/x86ops.hpp"
 #include "runtime/fail_closed.hpp"
 
@@ -18,13 +20,11 @@ std::span<const ImportSlot> g_imports;
 
 // Virtual calls go to a few hundred targets over and over; the binary search
 // over ~100,000 entries was 15% of the main thread in a race. A direct-mapped
-// cache in front of it. Guest threads run one at a time, so it needs no lock.
-struct CachedEntry {
-    std::uint32_t address = 0;
-    GuestFn fn = nullptr;
-};
+// cache in front of it. An entry is one 64-bit word (the guest address, and the
+// index of its entry plus one), so a guest thread running in parallel
+// (rt_lock.hpp) reads either a whole old entry or a whole new one.
 constexpr std::uint32_t kEntryCacheSize = 1u << 14;
-CachedEntry g_entry_cache[kEntryCacheSize];
+std::atomic<std::uint64_t> g_entry_cache[kEntryCacheSize];
 
 
 }
@@ -32,7 +32,7 @@ CachedEntry g_entry_cache[kEntryCacheSize];
 void dispatch_install(std::span<const GuestEntry> entries, std::span<const ImportSlot> imports) {
     g_entries = entries;
     g_imports = imports;
-    for (auto& slot : g_entry_cache) slot = {};
+    for (auto& slot : g_entry_cache) slot.store(0, std::memory_order_relaxed);
 }
 
 GuestFn find_entry(std::uint32_t target) {
@@ -47,15 +47,20 @@ GuestFn find_entry_slow(std::uint32_t target);
 
 // Inlined into call_indirect: a hit is a compare and a load.
 inline GuestFn find_entry_cached(std::uint32_t target) {
-    CachedEntry& slot = g_entry_cache[(target ^ (target >> 14)) & (kEntryCacheSize - 1)];
-    if (slot.address == target && slot.fn != nullptr) return slot.fn;
+    const std::uint64_t e = g_entry_cache[(target ^ (target >> 14)) & (kEntryCacheSize - 1)].load(std::memory_order_relaxed);
+    const std::uint32_t index = static_cast<std::uint32_t>(e);
+    if (static_cast<std::uint32_t>(e >> 32) == target && index != 0) return g_entries[index - 1].fn;
     return find_entry_slow(target);
 }
 
 [[gnu::noinline]] GuestFn find_entry_slow(std::uint32_t target) {
-    GuestFn fn = find_entry(target);
-    if (fn != nullptr) g_entry_cache[(target ^ (target >> 14)) & (kEntryCacheSize - 1)] = {target, fn};
-    return fn;
+    auto it = std::lower_bound(g_entries.begin(), g_entries.end(), target,
+                               [](const GuestEntry& e, std::uint32_t a) { return e.address < a; });
+    if (it == g_entries.end() || it->address != target) return nullptr;
+    const std::uint64_t index = static_cast<std::uint64_t>(it - g_entries.begin()) + 1;
+    g_entry_cache[(target ^ (target >> 14)) & (kEntryCacheSize - 1)].store(std::uint64_t(target) << 32 | index,
+                                                                            std::memory_order_relaxed);
+    return it->fn;
 }
 
 // The rare paths, out of line: call_indirect runs for every virtual call and
@@ -101,10 +106,23 @@ inline GuestFn find_entry_cached(std::uint32_t target) {
 void call_indirect(Cpu& c, std::uint32_t target) {
     if (target >= ImportBase) {
         const std::uint32_t k = (target - ImportBase) / 16;
-        if ((target - ImportBase) % 16 == 0 && k < g_imports.size() && g_imports[k].handler) return g_imports[k].handler(c);
+        if ((target - ImportBase) % 16 == 0 && k < g_imports.size() && g_imports[k].handler) {
+            // With parallel guest threads, the runtime is entered under its lock.
+            if (rt_parallel()) {
+                RtGuard locked;
+                return g_imports[k].handler(c);
+            }
+            return g_imports[k].handler(c);
+        }
         return import_unbound(c, target);
     }
-    if (target >= kComCall) return call_com(c, target);
+    if (target >= kComCall) {
+        if (rt_parallel()) {
+            RtGuard locked;
+            return call_com(c, target);
+        }
+        return call_com(c, target);
+    }
     if (target == 0x00C5030Cu) return fpatan_tail(c);
     if (GuestFn fn = find_entry_cached(target)) return fn(c);
     fail_closed(Unported::Function, target, "indirect call to an address with no translated function");

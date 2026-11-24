@@ -730,6 +730,50 @@ stale zeros on the phone and the distant scenery was black.
 `DCUSA_SELFTEST_BC=1` compares the GPU's BC decoding with `gpu/bc_decode` on the
 device (the A17 matches exactly).
 
+## Frame rate on an iPhone
+
+Race frames on an iPhone 15 Pro Max went from about 25 ms to about 21.5 ms
+(the same scripted race, `DCUSA_PAD_SCRIPT`, `DCUSA_STATS=1 DCUSA_EVERY=120`).
+What was found, with Instruments' Time Profiler over the network
+(`xctrace record --device <udid> --all-processes`) and `DCUSA_HITCH`:
+
+- **Turns between guest threads woke every thread.** A handover notified one
+  condition variable all parked host threads waited on (a dozen): each woke,
+  looked and slept again. Each slot has its own now (threads.cpp `wake`).
+- **Default QoS put the game on efficiency cores** a third of the time. The
+  game, guest and render threads and the preemption timer are user-interactive.
+- **The game's dynamic resolution never moved.** It scales the scene width
+  between `DYNAMIC_RESOLUTION_MIN` and `MAX` (GameData/config.ini) from the GPU
+  time it measures with D3D11 timestamp queries (0x4DC250 steps it against
+  14.6 to 20 ms). Every query answered zeros, so the width stayed where it
+  was (1920 on the phone, 1280 on a Mac). A timestamp now reports the GPU start
+  or end of its frame's command buffer (one per present), and "not ready" until
+  that buffer has run; the phone settles at 960, a Mac renders at 1920.
+- **Pacing.** On iOS the layer's drawables also wait for the display, and the
+  60 Hz sleep on top of that made light frames take 25 ms. Running unpaced, or
+  paced at 15.5 ms, broke races (static shadows and the course map black: the
+  game needs frames no faster than 60 Hz), so the pacing stays.
+- `DCUSA_INI="Section.Key=Value;..."` overrides GameData/config.ini settings
+  (host_files.cpp; iOS defaults can go in `kPhoneIni`). Smaller shadow maps, a
+  lower resolution floor and no MSAA did not help once the main thread was the
+  limit.
+
+What limits it now: the game's main thread, about 16 ms of its own code a
+race frame (memory latency in the engine's object traversal: one virtual-call
+loop at 0x4423B0 is 14% of it), plus the render thread holding it back when
+the GPU falls behind (6.5 ms a slow frame by default, 2.2 ms with a very light
+GPU load). The phone has two performance cores; the render thread does not keep
+up on an efficiency core.
+
+`DCUSA_PARALLEL_THREADS=59E660` runs the CRI sound server (a fifth of a core)
+in parallel with the other guest threads instead of taking turns: imports and
+D3D calls take a runtime lock (rt_lock.hpp), waits give it up, and the dispatch
+cache is one atomic word per entry. A race's audio matches the sequential run
+(levels and clipping per 10 s window). It did not change the phone's frame time,
+so it is off by default. `DCUSA_FRAMES_IN_FLIGHT` (2) and
+`DCUSA_GENERATED_LINES` (line tables for chosen translated files, for
+profiling) are other tools from this work.
+
 ## Out of this phase
 
 - A host window and `CAMetalLayer`. Phase 7.

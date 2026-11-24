@@ -47,6 +47,8 @@ std::uint32_t sched_thread_count();
 
 // Gives every other runnable thread one turn, then returns.
 void sched_yield(Cpu& c);
+// Whether the calling host thread runs a parallel guest thread (DCUSA_PARALLEL_THREADS).
+bool sched_on_free_thread();
 // The frame loop's poll: the other threads run until each is blocked, or for
 // at most DCUSA_SLICE ms (default 0: one turn each). On Windows they run on
 // other cores; a slice was measured slower here, since the boot drains its

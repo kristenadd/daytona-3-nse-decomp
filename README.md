@@ -88,6 +88,8 @@ gets the footprint every 10 s. Variables for a run go through devicectl with
 a `DEVICECTL_CHILD_` prefix; relative paths are in Documents, so
 `DEVICECTL_CHILD_DCUSA_FRAME=f DEVICECTL_CHILD_DCUSA_EVERY=500` saves frames there
 and `DEVICECTL_CHILD_DCUSA_PAD_SCRIPT=race.txt` plays a pad script.
+`DCUSA_INI="Section.Key=Value;..."` overrides the game's GameData/config.ini
+settings (shadow map sizes, the dynamic resolution range).
 
 ## Building and testing (macOS, Apple silicon)
 

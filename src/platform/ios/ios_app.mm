@@ -116,9 +116,13 @@ void* run_game(void*) {
             std::this_thread::sleep_for(std::chrono::seconds(10));
             task_vm_info_data_t info{};
             mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+            // Thermal state too: a phone that is serious or critical runs slower.
+            static const char* const kThermal[] = {"nominal", "fair", "serious", "critical"};
+            const NSInteger heat = NSProcessInfo.processInfo.thermalState;
             if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &n) == KERN_SUCCESS)
-                std::fprintf(stderr, "ios: %d s footprint %llu MB\n", s,
-                             static_cast<unsigned long long>(info.phys_footprint >> 20));
+                std::fprintf(stderr, "ios: %d s footprint %llu MB, thermal %s\n", s,
+                             static_cast<unsigned long long>(info.phys_footprint >> 20),
+                             heat >= 0 && heat < 4 ? kThermal[heat] : "?");
         }
     }).detach();
     const std::filesystem::path cache = find_cache(docs);
@@ -209,6 +213,7 @@ void start_game_thread() {
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 64u << 20);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);  // the game's main thread: a performance core
     pthread_t thread;
     pthread_create(&thread, &attr, run_game, nullptr);
     pthread_attr_destroy(&attr);

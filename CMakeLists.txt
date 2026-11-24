@@ -177,6 +177,14 @@ if(dcusa_generated_dir)
     # guest instruction by instruction) and no debug info (it would run to gigabytes).
     set(DCUSA_GENERATED_OPT "-O2" CACHE STRING "optimisation level for the translated code")
     target_compile_options(dcusa_generated PRIVATE -w ${DCUSA_GENERATED_OPT} -g0 -ffp-contract=off -fno-fast-math)
+    # DCUSA_GENERATED_LINES: translated files (names such as tr_0043A870.cpp)
+    # built with line tables, so a profile maps samples to source lines and,
+    # through their comments, to guest instructions.
+    set(DCUSA_GENERATED_LINES "" CACHE STRING "translated files to build with line tables (for profiling)")
+    foreach(f IN LISTS DCUSA_GENERATED_LINES)
+        set_source_files_properties("${dcusa_generated_dir}/${f}" TARGET_DIRECTORY dcusa_generated
+                                    PROPERTIES COMPILE_OPTIONS "-gline-tables-only")
+    endforeach()
     # Profile-guided optimisation of the translated code and the runtime (PHASE3
     # "Frame-rate profile"): DCUSA_PGO=generate builds an instrumented dcrun, whose
     # run writes LLVM_PROFILE_FILE; DCUSA_PGO=<merged .profdata> builds with it.

@@ -64,9 +64,11 @@ agreed to this).
      A 512 cap, no MSAA and a 1280x720 display did not get it past 2.4 GB at
      10 s. Next: transcode BC to ASTC (same size as BC7/BC3, sampled by A15),
      best done on the Mac ahead of time and shipped beside the shaders.
-   - **Speed:** races are slow on the phone. It renders 1920x1080 with 4x
-     MSAA and runs the engine's per-draw CPU work; a lower render size or
-     MSAA setting on iOS, then the CPU profile (item 5).
+   - **Speed:** races run at about 21.5 ms a frame on the phone (25 before;
+     PHASE3 "Frame rate on an iPhone"). The limit is the game's main thread,
+     about 16 ms of its own code a race frame, plus the render thread waiting
+     on the GPU. Next: the main thread's object traversal (0x4423B0, 14%),
+     the D3D layer's per-draw work (12%), the GPU's 6.5 ms of back-pressure.
    - **Touch controls.**
    - **Unexplained GPU memory:** about 0.9 GB of Metal driver memory beyond
      its allocations (render passes hold transient memory while the game
@@ -160,5 +162,10 @@ agreed to this).
   footprint, where it was killed at 5.4 GB before the memory work. A race frame
   matches the Mac's: shadows, the fence, the course map. PHASE3 "Memory" and
   "Shadow maps on iOS".
+- **Dynamic resolution and timestamps.** The game's GPU timestamp queries
+  report each frame's command buffer times, so its dynamic resolution works:
+  a Mac renders races at 1920 wide (1280 before, with zeros), the iPhone
+  settles at 960. Phase 5 attract passes (colour p95 0.428; median luma 102.0
+  against the capture's 101.6, saturation 0.336 against 0.336).
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.

@@ -2115,11 +2115,25 @@ void show(std::uint32_t key) {
 std::atomic<std::uint64_t> g_gpu_us{0};
 std::atomic<unsigned> g_gpu_buffers{0};
 
+// The GPU start and end of each frame's command buffer (one per present, in
+// order), for the game's timestamp queries (frame_gpu_times).
+struct FrameTimes {
+    std::atomic<std::uint64_t> frame{~0ull}, start_us{0}, end_us{0};
+};
+constexpr std::size_t kFrameTimes = 64;
+FrameTimes g_frame_times[kFrameTimes];
+std::uint64_t g_frames_committed = 0;  // the render thread's (or the device's) count
+
 void time_gpu(id<MTLCommandBuffer> cmd) {
+    const std::uint64_t frame = g_frames_committed++;
     [cmd addCompletedHandler:^(id<MTLCommandBuffer> done) {
         const double s = done.GPUEndTime - done.GPUStartTime;
         if (s > 0) g_gpu_us += static_cast<std::uint64_t>(s * 1e6);
         ++g_gpu_buffers;
+        FrameTimes& f = g_frame_times[frame % kFrameTimes];
+        f.start_us.store(static_cast<std::uint64_t>(done.GPUStartTime * 1e6), std::memory_order_relaxed);
+        f.end_us.store(static_cast<std::uint64_t>(done.GPUEndTime * 1e6), std::memory_order_relaxed);
+        f.frame.store(frame, std::memory_order_release);
     }];
 }
 
@@ -2127,7 +2141,9 @@ void submit() {
     if (!enabled()) return;
     Device& d = *g_dev;
     end_pass();
-    if (d.cmd == nil) return;
+    // Every present commits one command buffer, empty or not: the game's
+    // timestamp queries count frames by them (time_gpu).
+    if (d.cmd == nil) command_buffer();
     time_gpu(d.cmd);
     [d.cmd commit];
     profile_submitted(d.cmd);
@@ -2135,10 +2151,16 @@ void submit() {
     d.retired.clear();
     d.cmd = nil;
     ++d.stats.frames;
-    // At most two frames queued: the guest runs ahead of the GPU by one frame.
+    // At most two frames queued (DCUSA_FRAMES_IN_FLIGHT): the guest runs ahead
+    // of the GPU by one frame.
+    static const std::size_t in_flight = [] {
+        const char* v = std::getenv("DCUSA_FRAMES_IN_FLIGHT");
+        const int n = v ? std::atoi(v) : 2;
+        return static_cast<std::size_t>(n < 1 ? 1 : n > 4 ? 4 : n);
+    }();
     while (!d.in_flight.empty()) {
         auto& [cmd, arenas] = d.in_flight.front();
-        if (d.in_flight.size() > 2) [cmd waitUntilCompleted];
+        if (d.in_flight.size() > in_flight) [cmd waitUntilCompleted];
         else if (cmd.status < MTLCommandBufferStatusCompleted) break;
         check_completed(cmd);
         release_arenas(arenas);
@@ -2166,6 +2188,7 @@ bool read_rgba8(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t
     [blit endEncoding];
     id<MTLCommandBuffer> cmd = g_dev->cmd;
     g_dev->cmd = nil;
+    time_gpu(cmd);  // a present's command buffer, like submit's
     [cmd commit];
     [cmd waitUntilCompleted];
     check_completed(cmd);
@@ -2271,6 +2294,16 @@ const Stats& stats() {
 }
 
 }  // namespace direct
+
+std::uint64_t gpu_busy_us() { return direct::g_gpu_us.load(std::memory_order_relaxed); }
+
+bool frame_gpu_times(std::uint64_t frame, std::uint64_t* start_us, std::uint64_t* end_us) {
+    const direct::FrameTimes& f = direct::g_frame_times[frame % direct::kFrameTimes];
+    if (f.frame.load(std::memory_order_acquire) != frame) return false;
+    *start_us = f.start_us.load(std::memory_order_relaxed);
+    *end_us = f.end_us.load(std::memory_order_relaxed);
+    return true;
+}
 
 // DCUSA_MEM: what the device holds, by kind (MB). Reads the device's tables
 // from the game thread: use with DCUSA_GPU_THREAD=0.

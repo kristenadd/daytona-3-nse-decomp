@@ -110,6 +110,15 @@ struct LiveMap {
 };
 
 std::unordered_map<std::uint32_t, StoredBytes> stored;
+// TIMESTAMP queries: where in the command stream each last ended (query_end):
+// the present it belongs to, and whether a draw came before it in that frame.
+struct QueryMark {
+    std::uint64_t frame = 0;
+    bool after_draws = false;
+};
+std::unordered_map<std::uint32_t, QueryMark> query_marks;
+std::uint64_t g_frames_presented = 0;  // presents so far: the frame being recorded
+std::uint32_t g_frame_draws = 0;       // draws in it so far
 std::vector<LiveMap> live_maps;
 std::uint32_t scratch_used = 0;
 
@@ -1739,6 +1748,10 @@ void print_watch(const std::uint8_t* mem, int present_no) {
 // the display's 60 Hz (the capture shows 60 frames a second), so a present
 // returns no earlier than one 60 Hz period after the last one (SyncInterval
 // periods when it is above 1). DCUSA_NOPACE=1 runs unthrottled (benchmarks).
+// The same on iOS, although the layer's drawables also wait for the display:
+// running unpaced there, or paced a little faster (15.5 ms) so the two would
+// not stack, made races render wrong on an iPhone (static shadows and the
+// course map black): the game needs its frames no faster than 60 Hz.
 void pace_present(std::uint32_t sync_interval) {
     using clock = std::chrono::steady_clock;
     static const bool off = std::getenv("DCUSA_NOPACE") != nullptr;
@@ -1939,6 +1952,8 @@ void present(Cpu& c) {
         std::uint32_t w = 0, h = 0;
         if (!wanted) gpu::submit();
         else if (gpu::read_rgba8(pipe.backbuffer, &stored[pipe.backbuffer].bytes, &w, &h)) stored[pipe.backbuffer].row = w * 4u;
+        ++g_frames_presented;  // one command buffer per present (frame_gpu_times)
+        g_frame_draws = 0;
         publish_frame(pipe.backbuffer, wanted);
         if (g_presenter != nullptr) g_presenter->present();
         ret_stdcall(c, kSOk, 12);
@@ -2166,12 +2181,51 @@ void query_begin(Cpu& c) { ret_stdcall(c, kSOk, 8); }
 
 // 0x6B89F6. GetData. A non-zero HRESULT skips the copy, and the success path
 // reads the buffer (0x58 bytes of pipeline statistics, or 8 or 16). Zeros are
-// an empty result. 0x6B8AE4 then compares a dword of that buffer with EAX.
+// an empty result. 0x6B8AE4 then requires the disjoint flag to be clear.
+//
+// The game times each frame on the GPU (a TIMESTAMP query at its start and
+// end, a TIMESTAMP_DISJOINT for the frequency) and its dynamic resolution
+// (0x4DC250, GameData/config.ini DYNAMIC_RESOLUTION_MIN/MAX) steps the scene
+// width down past 16.7 ms and up below 14.6 ms. A timestamp is
+// the GPU start or end of the frame's command buffer, in microseconds, so a
+// frame's two differ by its GPU time. Zeros (frequency 0) left the width at
+// its maximum on a phone that needs about 30 ms of GPU a frame.
 void query_get_data(Cpu& c) {
+    const std::uint32_t query = arg(c, 1);
     const std::uint32_t data = arg(c, 2);
     const std::uint32_t size = arg(c, 3);
     if (data != 0 && size != 0 && size <= 0x100u)
         for (std::uint32_t i = 0; i < size; ++i) st8(c.mem, data + i, 0);
+    // DCUSA_GPU_QUERIES=0: zeros for every query, as before (no dynamic resolution).
+    static const bool queries = [] {
+        const char* v = std::getenv("DCUSA_GPU_QUERIES");
+        return v == nullptr || std::strcmp(v, "0") != 0;
+    }();
+    if (queries && data != 0 && query != 0 && gpu::enabled()) {
+        const std::uint32_t type = ld32(c.mem, query + 12);
+        if (type == 3 && size >= 12) {  // D3D11_QUERY_DATA_TIMESTAMP_DISJOINT: Frequency, Disjoint
+            st32(c.mem, data, 1000000u);
+            st32(c.mem, data + 4, 0);
+            st32(c.mem, data + 8, 0);
+        } else if (type == 2 && size >= 8) {  // TIMESTAMP
+            // The GPU time at that point of the stream: the start of its frame's
+            // command buffer when no draw came first, else the end. Not there
+            // yet (S_FALSE, 1) until that command buffer has run.
+            const auto it = query_marks.find(query);
+            std::uint64_t start = 0, end = 0;
+            if (it != query_marks.end() && !gpu::frame_gpu_times(it->second.frame, &start, &end)) {
+                ret_stdcall(c, 1u, 20);
+                return;
+            }
+            std::uint64_t t = it == query_marks.end() ? 0 : it->second.after_draws ? end : start;
+            // DCUSA_GPU_TIME_SCALE=<k>: GPU times k times longer, so a Mac sees what a
+            // phone's GPU makes the game do (dynamic resolution and bake frequency).
+            static const double scale = std::getenv("DCUSA_GPU_TIME_SCALE") ? std::atof(std::getenv("DCUSA_GPU_TIME_SCALE")) : 1.0;
+            if (scale != 1.0) t = static_cast<std::uint64_t>(static_cast<double>(t) * scale);
+            st32(c.mem, data, static_cast<std::uint32_t>(t));
+            st32(c.mem, data + 4, static_cast<std::uint32_t>(t >> 32));
+        }
+    }
     ret_stdcall(c, kSOk, 20);
 }
 
@@ -2286,6 +2340,23 @@ void map_resource(Cpu& c) {
         scratch_used += (size + 15u) & ~15u;
     }
     live_maps.push_back(LiveMap{resource, at, size, type != 1u});
+    // DCUSA_MAP_STATS=<presents>: Maps by type and bytes, every that many presents.
+    static const int map_stats = std::getenv("DCUSA_MAP_STATS") ? std::atoi(std::getenv("DCUSA_MAP_STATS")) : 0;
+    if (map_stats > 0) {
+        static std::uint64_t counts[8]{}, bytes[8]{};
+        static std::uint64_t last = 0;
+        ++counts[type & 7u];
+        bytes[type & 7u] += size;
+        if (g_frames_presented >= last + static_cast<std::uint64_t>(map_stats)) {
+            std::fprintf(stderr, "maps over %d presents: discard %llu (%llu KB) no-overwrite %llu (%llu KB) write %llu read %llu rw %llu\n",
+                         map_stats, (unsigned long long)counts[4], (unsigned long long)(bytes[4] >> 10),
+                         (unsigned long long)counts[5], (unsigned long long)(bytes[5] >> 10), (unsigned long long)counts[2],
+                         (unsigned long long)counts[1], (unsigned long long)counts[3]);
+            std::fill(std::begin(counts), std::end(counts), 0);
+            std::fill(std::begin(bytes), std::end(bytes), 0);
+            last = g_frames_presented;
+        }
+    }
     if (out != 0) {
         st32(c.mem, out, size == 0 ? kMapScratch : at);
         st32(c.mem, out + 4, pitch);
@@ -2387,6 +2458,7 @@ void draw_indexed(Cpu& c) {                                        // +0x30  0x6
     g_mem_for_trace = c.mem;
     if (gpu::enabled()) {
         resolve_shaders();
+        ++g_frame_draws;
         gpu::draw_indexed(gs, arg(c, 1), arg(c, 2), static_cast<std::int32_t>(arg(c, 3)));
     } else {
         draw_triangles(arg(c, 1), arg(c, 2), static_cast<std::int32_t>(arg(c, 3)));
@@ -2396,6 +2468,7 @@ void draw_indexed(Cpu& c) {                                        // +0x30  0x6
 void draw_plain(Cpu& c) {                                          // +0x34  Draw(count, start)
     if (!gpu::enabled()) fail_closed(Unported::Service, 0x34, "ID3D11DeviceContext+34 (Draw) without Metal");
     resolve_shaders();
+    ++g_frame_draws;
     gpu::draw(gs, arg(c, 1), arg(c, 2));
     ret_stdcall(c, kSOk, 12);
 }
@@ -2461,7 +2534,17 @@ void rs_set_state(Cpu& c) {                                        // +0xAC  0x6
     gs.raster = it != raster_states.end() ? it->second : gpu::RasterDesc{};
     ret_stdcall(c, kSOk, 8);
 }
-void query_end(Cpu& c) { ret_stdcall(c, kSOk, 8); }
+void query_end(Cpu& c) {
+    // End(query): a TIMESTAMP query takes the GPU time completed so far (query_get_data).
+    const std::uint32_t query = arg(c, 1);
+    if (query != 0 && gpu::enabled() && ld32(c.mem, query + 12) == 2) {
+        query_marks[query] = QueryMark{g_frames_presented, g_frame_draws != 0};
+        static const bool trace = std::getenv("DCUSA_QUERY_TRACE") != nullptr;
+        if (trace) std::fprintf(stderr, "timestamp %08x frame %llu after %u draws\n", query,
+                                static_cast<unsigned long long>(g_frames_presented), g_frame_draws);
+    }
+    ret_stdcall(c, kSOk, 8);
+}
 
 void device_call(Cpu& c, std::uint32_t slot) {
     switch (slot) {

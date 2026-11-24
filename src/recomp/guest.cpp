@@ -5,6 +5,7 @@
 #include <mutex>
 #include <unordered_set>
 
+#include "recomp/rt_lock.hpp"
 #include "recomp/threads.hpp"
 #include "runtime/fail_closed.hpp"
 
@@ -76,7 +77,11 @@ void debug_probe(Cpu& c, std::uint32_t va, std::uint32_t a, std::uint32_t b, std
 }
 
 void guest_preempt(Cpu& c) {
+    // A parallel guest thread (rt_lock.hpp) has no turn to give; it leaves the
+    // flag to the threads that take turns.
+    if (sched_on_free_thread()) return;
     g_preempt.store(false, std::memory_order_relaxed);
+    RtGuard locked;
     sched_yield(c);
 }
 

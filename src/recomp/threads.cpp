@@ -1,6 +1,7 @@
 #include "recomp/threads.hpp"
 
 #include <pthread.h>
+#include <TargetConditionals.h>
 #include <sys/mman.h>
 
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "recomp/dispatch.hpp"
+#include "recomp/rt_lock.hpp"
 #include "recomp/guest.hpp"
 #include "recomp/guest_memory.hpp"
 #include "recomp/x86ops.hpp"
@@ -25,9 +27,54 @@
 #include "runtime/hitch.hpp"
 
 namespace dcusa::recomp {
+
+// ---- the runtime lock (rt_lock.hpp) ----
+namespace {
+std::mutex g_rt;
+thread_local int t_rt_depth = 0;
+}  // namespace
+
+bool rt_parallel() {
+    static const bool on = [] {
+        const char* v = std::getenv("DCUSA_PARALLEL_THREADS");
+        return v != nullptr && *v != 0;
+    }();
+    return on;
+}
+
+void rt_lock() {
+    if (!rt_parallel()) return;
+    if (t_rt_depth++ == 0) g_rt.lock();
+}
+
+void rt_unlock() {
+    if (!rt_parallel()) return;
+    if (--t_rt_depth == 0) g_rt.unlock();
+}
+
+int rt_release_all() {
+    if (!rt_parallel()) return 0;
+    const int depth = t_rt_depth;
+    if (depth > 0) {
+        t_rt_depth = 0;
+        g_rt.unlock();
+    }
+    return depth;
+}
+
+void rt_reacquire(int depth) {
+    if (depth <= 0) return;
+    g_rt.lock();
+    t_rt_depth = depth;
+}
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// The slot of a parallel ("free") guest thread on this host thread, -1 on the
+// others (they are S().current while they run).
+thread_local int t_free_slot = -1;
 
 // Preemption: a host timer raises g_preempt every kQuantum while a second
 // guest thread exists; translated loops yield when they see it. Without it, a
@@ -40,6 +87,8 @@ void start_preempt_timer() {
     static std::once_flag once;
     std::call_once(once, [] {
         std::thread([] {
+            // A low-QoS timer has its sleeps coalesced (iOS): preemption would come late.
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
             for (;;) {
                 std::this_thread::sleep_for(kQuantum);
                 if (g_live_threads.load(std::memory_order_relaxed) > 1)
@@ -97,6 +146,9 @@ struct Object {
 
 struct Slot {
     bool used = false;
+    // Runs in parallel with the others (DCUSA_PARALLEL_THREADS): never takes a
+    // turn, waits by polling, enters the runtime under the runtime lock.
+    bool free = false;
     bool started = false;
     bool terminate = false;
     bool waiting_forever = false;
@@ -124,7 +176,11 @@ struct Timer {
 
 struct Sched {
     std::mutex mu;
-    std::condition_variable cv;
+    // One per slot: a thread waits on its own until `current` names it, and a
+    // handover wakes only that one. A single shared one woke every parked host
+    // thread (a dozen) at each switch, to look and sleep again: on an iPhone
+    // three of them took a core-fifth each, and every switch paid the herd.
+    std::condition_variable wake[kSlots];
     Slot slots[kSlots];
     std::vector<Object> objects;
     std::vector<Timer> timers;
@@ -177,11 +233,14 @@ void ensure(Cpu& c) {
     if (!S().ready) sched_reset(c);
 }
 
-std::uint32_t self_id() { return S().slots[S().current].id; }
+// The calling guest thread's slot.
+unsigned me_slot() { return t_free_slot >= 0 ? static_cast<unsigned>(t_free_slot) : S().current; }
+
+std::uint32_t self_id() { return S().slots[me_slot()].id; }
 
 bool runnable(unsigned i) {
     const Slot& t = S().slots[i];
-    return t.used && t.suspend == 0;
+    return t.used && t.suspend == 0 && !t.free;
 }
 
 unsigned live_count() {
@@ -227,8 +286,8 @@ void resumed(unsigned me) {
         // Hand the CPU to the main thread, which reports the failure, and park.
         std::unique_lock<std::mutex> lk(s.mu);
         s.current = 0;
-        s.cv.notify_all();
-        s.cv.wait(lk, [] { return false; });
+        s.wake[0].notify_one();
+        s.wake[me].wait(lk, [] { return false; });
     }
     Slot& t = s.slots[me];
     if (t.terminate && me != 0) throw GuestThreadExit{t.terminate_code};
@@ -237,10 +296,11 @@ void resumed(unsigned me) {
 void switch_to(unsigned me, unsigned next) {
     Sched& s = S();
     if (next != me) {
+        RtRelease released;  // the next thread may enter the runtime
         std::unique_lock<std::mutex> lk(s.mu);
         s.current = next;
-        s.cv.notify_all();
-        s.cv.wait(lk, [&] { return s.current == me; });
+        s.wake[next].notify_one();
+        s.wake[me].wait(lk, [&] { return s.current == me; });
     }
     resumed(me);
 }
@@ -284,6 +344,17 @@ std::string describe_threads() {
 template <class Ready> bool block(Cpu& c, Ready ready, std::uint32_t ms, bool counts_as_wait) {
     ensure(c);
     Sched& s = S();
+    if (t_free_slot >= 0) {
+        // A parallel thread polls, without the runtime lock while it sleeps.
+        const auto until = Clock::now() + std::chrono::milliseconds(ms == kInfinite ? 0 : ms);
+        for (;;) {
+            fire_timers();
+            if (ready()) return true;
+            if (ms == 0 || (ms != kInfinite && Clock::now() >= until)) return false;
+            RtRelease released;
+            std::this_thread::sleep_for(std::chrono::microseconds(250));
+        }
+    }
     const unsigned me = s.current;
     hitch::Timer timer(hitch::Wait, me == 0);  // the main thread's waits stall its frame
     const auto deadline = Clock::now() + std::chrono::milliseconds(ms == kInfinite ? 0 : ms);
@@ -310,7 +381,10 @@ template <class Ready> bool block(Cpu& c, Ready ready, std::uint32_t ms, bool co
                 std::string what = "every guest thread waits forever: " + describe_threads();
                 fail_closed(Unported::Function, s.slots[me].start, what.c_str());
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            {
+                RtRelease released;
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+            }
             s.idle = 0;
         }
         Slot& self = s.slots[me];
@@ -376,12 +450,48 @@ void finish(unsigned slot, std::uint32_t code) {
     g_live_threads.fetch_sub(1, std::memory_order_relaxed);
 }
 
+// A parallel thread: runs as soon as it is resumed, and gives no turn back.
+void* free_main(unsigned me) {
+    Sched& s = S();
+    t_free_slot = static_cast<int>(me);
+    // Off the performance cores on an iPhone (two of them; the main guest thread
+    // needs one): the sound server keeps up on an efficiency core.
+    if (TARGET_OS_IPHONE) pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    for (;;) {
+        {
+            RtGuard locked;
+            if (s.slots[me].suspend == 0) break;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(250));
+    }
+    std::uint32_t code = 0;
+    try {
+        Slot& t = s.slots[me];
+        t.started = true;
+        GuestFn fn = find_entry(t.start);
+        if (!fn) fail_closed(Unported::Function, t.start, "no translation for the thread procedure");
+        Cpu& c = *t.cpu;
+        fn(c);
+        code = c.r[Cpu::EAX];
+    } catch (const GuestThreadExit& e) {
+        code = e.code;
+    } catch (...) {
+        RtGuard locked;
+        if (!s.failure) s.failure = std::current_exception();
+        code = 0xC0000005u;
+    }
+    RtGuard locked;
+    finish(me, code);  // counts the thread out of g_live_threads
+    return nullptr;
+}
+
 void* host_main(void* p) {
     const unsigned me = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(p));
     Sched& s = S();
+    if (s.slots[me].free) return free_main(me);
     {
         std::unique_lock<std::mutex> lk(s.mu);
-        s.cv.wait(lk, [&] { return s.current == me; });
+        s.wake[me].wait(lk, [&] { return s.current == me; });
     }
     std::uint32_t code = 0;
     try {
@@ -399,11 +509,14 @@ void* host_main(void* p) {
         if (!s.failure) s.failure = std::current_exception();
         code = 0xC0000005u;
     }
-    finish(me, code);
+    {
+        RtGuard locked;
+        finish(me, code);
+    }
     std::unique_lock<std::mutex> lk(s.mu);
     s.current = s.failure ? 0u : pick_after(me);
     if (!runnable(s.current)) s.current = 0;
-    s.cv.notify_all();
+    s.wake[s.current].notify_one();
     return nullptr;
 }
 
@@ -471,6 +584,21 @@ std::uint32_t sched_create_thread(Cpu& c, std::uint32_t start, std::uint32_t par
     st32(M, teb + 0x24, t.id);
     st32(M, teb + 0x2C, kStaticTls);
     st32(M, teb + 0x30, kPeb);
+    // DCUSA_PARALLEL_THREADS=<hex start>[,...]: these run in parallel. The
+    // CRT's thread entry (0xC215BB) takes a thread block whose +0x54 holds the
+    // procedure (the CRI sound server is 0x59E660).
+    if (rt_parallel()) {
+        const std::uint32_t real = param != 0 && param + 0x58u > param ? ld32(M, param + 0x54u) : 0u;
+        const char* list = std::getenv("DCUSA_PARALLEL_THREADS");
+        for (const char* q = list; q != nullptr && *q;) {
+            char* end = nullptr;
+            const unsigned long v = std::strtoul(q, &end, 16);
+            if (end == q) break;
+            if (v != 0 && (v == start || v == real)) t.free = true;
+            q = *end ? end + 1 : end;
+        }
+        if (stats()) std::fprintf(stderr, "thread start %08X procedure %08X%s\n", start, real, t.free ? " (parallel)" : "");
+    }
     Cpu& n = *t.cpu;
     n.mem = M;
     n.fs_base = teb;
@@ -490,6 +618,9 @@ std::uint32_t sched_create_thread(Cpu& c, std::uint32_t start, std::uint32_t par
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, kHostStack);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    // Guest threads take turns with the main one: all of them are the game's
+    // frame (on iOS, default QoS may mean an efficiency core).
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
     pthread_t host;
     const int rc = pthread_create(&host, &attr, host_main, reinterpret_cast<void*>(static_cast<std::uintptr_t>(slot)));
     pthread_attr_destroy(&attr);
@@ -518,7 +649,7 @@ std::uint32_t sched_suspend(Cpu& c, std::uint32_t handle) {
     if (o->slot < 0) return 0;
     Slot& t = S().slots[o->slot];
     const std::uint32_t previous = t.suspend++;
-    const unsigned me = S().current;
+    const unsigned me = me_slot();
     if (static_cast<unsigned>(o->slot) == me) {
         if (me == 0) fail_closed(Unported::Function, handle, "the main thread suspends itself");
         // Not runnable now: the CPU comes back only after a ResumeThread.
@@ -535,7 +666,7 @@ bool sched_terminate(Cpu& c, std::uint32_t handle, std::uint32_t code) {
     if (o->slot < 0) return true;
     const unsigned slot = static_cast<unsigned>(o->slot);
     if (slot == 0) fail_closed(Unported::Function, handle, "TerminateThread of the main thread");
-    if (slot == S().current) throw GuestThreadExit{code};
+    if (slot == me_slot()) throw GuestThreadExit{code};
     Slot& t = S().slots[slot];
     t.terminate = true;
     t.terminate_code = code;
@@ -554,7 +685,7 @@ bool sched_exit_code(std::uint32_t handle, std::uint32_t* code) {
 
 std::uint32_t sched_current_handle(Cpu& c) {
     ensure(c);
-    return S().slots[S().current].handle;
+    return S().slots[me_slot()].handle;
 }
 
 std::uint32_t sched_thread_count() {
@@ -564,9 +695,16 @@ std::uint32_t sched_thread_count() {
     return n;
 }
 
+bool sched_on_free_thread() { return t_free_slot >= 0; }
+
 void sched_yield(Cpu& c) {
     ensure(c);
     Sched& s = S();
+    if (t_free_slot >= 0) {  // a parallel thread has no turn to give
+        RtRelease released;
+        std::this_thread::yield();
+        return;
+    }
     fire_timers();
     s.idle = 0;
     const unsigned me = s.current;

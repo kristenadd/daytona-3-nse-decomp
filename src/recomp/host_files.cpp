@@ -1,4 +1,6 @@
 #include "recomp/host_files.hpp"
+
+#include <TargetConditionals.h>
 #include "runtime/hitch.hpp"
 
 #include <algorithm>
@@ -711,8 +713,35 @@ std::uint32_t guest_find_close(std::uint32_t handle) {
     return 0;
 }
 
+// Settings of GameData/config.ini the host overrides: DCUSA_INI="Section.Key=Value;..."
+// (section and key in any case), on top of the platform's defaults (iOS: a
+// phone's GPU budget, see kPhoneIni).
+const char* const kPhoneIni = "";
+
+std::optional<std::string> ini_override(std::string_view windows_path, std::string_view section, std::string_view key) {
+    std::string file = lower_copy(windows_path);
+    if (file.size() < 10 || file.compare(file.size() - 10, 10, "config.ini") != 0) return std::nullopt;
+    const std::string want = lower_copy(section) + "." + lower_copy(key);
+    std::optional<std::string> found;
+    auto scan = [&](const char* list) {
+        if (list == nullptr) return;
+        std::string_view rest(list);
+        while (!rest.empty()) {
+            const std::size_t semi = rest.find(';');
+            std::string_view item = rest.substr(0, semi);
+            rest = semi == std::string_view::npos ? std::string_view{} : rest.substr(semi + 1);
+            const std::size_t eq = item.find('=');
+            if (eq != std::string_view::npos && lower_copy(item.substr(0, eq)) == want) found = std::string(item.substr(eq + 1));
+        }
+    };
+    if (TARGET_OS_IPHONE) scan(kPhoneIni);
+    scan(std::getenv("DCUSA_INI"));  // last: wins over the defaults
+    return found;
+}
+
 std::optional<std::string> guest_ini_get(std::string_view windows_path, std::string_view section, std::string_view key) {
     if (!guest_files_ready() || section.empty() || key.empty()) return std::nullopt;
+    if (auto forced = ini_override(windows_path, section, key)) return forced;
     Parsed p = parse_path(windows_path, false);
     if (!p.ok) return std::nullopt;
     Located loc = locate(p.parts);

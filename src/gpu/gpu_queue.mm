@@ -11,6 +11,10 @@
 // Calls that return something (read_rgba8, scan_targets, stats) hand over what
 // is recorded, wait until the render thread is idle, and then run directly.
 // DCUSA_GPU_THREAD=0 runs every call directly on the caller's thread.
+#include <pthread.h>
+#include <TargetConditionals.h>
+#include <cstdlib>
+#include <cstring>
 #include "gpu/metal.hpp"
 #include "gpu/metal_direct.hpp"
 #include "runtime/hitch.hpp"
@@ -122,6 +126,10 @@ bool threaded() {
 }
 
 void render_thread() {
+    // Frame-critical: on iOS a default-QoS thread may run on an efficiency core.
+    // (On an efficiency core it fell behind: the main thread waited 8.5 ms a
+    // race frame for it instead of 6.5.)
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     Queue& q = Q();
     for (;;) {
         Batch* b;

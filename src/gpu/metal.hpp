@@ -145,5 +145,11 @@ struct Stats {
 const Stats& stats();
 // DCUSA_MEM: Metal memory by kind, one line (MB).
 std::string memory_report();
+// GPU time of every command buffer completed so far, in microseconds
+// (GPUEndTime - GPUStartTime). D3D11 timestamp queries read it.
+std::uint64_t gpu_busy_us();
+// The GPU start and end (us) of present `frame`'s command buffer (presents
+// counted from 0), once it has completed; false until then.
+bool frame_gpu_times(std::uint64_t frame, std::uint64_t* start_us, std::uint64_t* end_us);
 
 }  // namespace dcusa::gpu
