@@ -15,6 +15,10 @@ graphics and services).
 - Unattended runs: `dcrun --headless` (or `DCUSA_WINDOW=0`) and `DCUSA_PAD=0`,
   so no window opens and a connected controller does not drive the game.
   `DCUSA_AUDIO_WAV=<file>` records the sound instead of playing it.
+- Settings are documented in README "Settings". When you add, remove or
+  change an environment variable, a `dcrun` option, a CMake option, an
+  iOS Settings entry or a built-in .ini override (`kPhoneIni`), update that
+  section in the same commit: its name, values, default and what it does.
 
 ## Work queue
 

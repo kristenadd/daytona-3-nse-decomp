@@ -109,8 +109,141 @@ gets the footprint every 10 s. Variables for a run go through devicectl with
 a `DEVICECTL_CHILD_` prefix; relative paths are in Documents, so
 `DEVICECTL_CHILD_DCUSA_FRAME=f DEVICECTL_CHILD_DCUSA_EVERY=500` saves frames there
 and `DEVICECTL_CHILD_DCUSA_PAD_SCRIPT=race.txt` plays a pad script.
-`DCUSA_INI="Section.Key=Value;..."` overrides the game's GameData/config.ini
-settings (shadow map sizes, the dynamic resolution range).
+## Settings
+
+The port has no settings file of its own. The game reads its two .ini
+files, and the port's own options are environment variables. On iOS the
+variables go through devicectl with a `DEVICECTL_CHILD_` prefix (see above).
+
+### GameData/config.ini (the game's settings)
+
+Location: `<game folder>/GameData/config.ini` (the 2019 edition keeps it under
+`Sega/`). The game reads it from the game folder. To override keys without
+editing the file, use `DCUSA_INI="Section.Key=Value;..."` (section and key in
+any case; the last value given wins). On iOS, `Render.DYNAMIC_RESOLUTION_MAX=960`
+is built in (`kPhoneIni`, `src/recomp/host_files.cpp`), and `DCUSA_INI`
+overrides that too.
+
+| Section | Keys (2019 defaults) |
+| --- | --- |
+| `Render` | `ENABLE_DYNAMIC_RESOLUTION=1`, `DYNAMIC_RESOLUTION_MAX=1920`, `DYNAMIC_RESOLUTION_MIN=960` (the scene width steps between them, driven by GPU time), `ENABLE_DYNAMIC_MSAA=0`, `ENABLE_DYNAMIC_BAKE_FREQUENCY=1` |
+| `ShadowMap` | `{CLASSIC,NEW}_{BIGINNER,ADVANCED,EXPERT}_SHADOW_MAP_SIZE` (1024, 1500 for classic expert), and the same with `_STATIC_` (4096, 6144 for expert) |
+| `Reflection` | `ENABLE_SKY_REFLECTION_ONLY_IN_NEW_BEGINNER=0`, `ENABLE_WATER_REFLECTION_IN_NEW_EXPERT=1` |
+| `CarTexture` | `ENABLE_CAR_TEXTURE_QUATER_SIZE=1` |
+| `Camera` | `FOVY_RATE=0.5` |
+| `FullHD` | `ENABLE_FULLHD=1`, `ENABLE_FULL_SCREEN=1` |
+| `SpeedScale` | `<course>_<difficulty>_<race length>` speed factors (0.7 to 1.0) |
+| `Wheel` | force feedback: `DEAD_ZONE`, `PERIOD1-3`, `FORCE1/2_S/N/W`, `GRASS_*`, `GARIGARI_FORCE_*`, `ANGLE_PARAM`, `VIB_*` |
+| `Network` | `FORCE_NET_VALID=0`, `NETWORK_TYPE=0` (0 slave, 1 master, 2 single play) |
+| `OpenCV` | camera capture (`ENABLE_CAPTURE`, `CAPTURE_FPS`, `DEFAULT_CROP_X/Y`) |
+| `Log`, `CarBox`, `HDR Texture` | debug switches, off |
+
+### ShellData/ShellData.ini (operator settings)
+
+The cabinet's operator menu belongs to `Shell.exe`, which does not run here.
+The game reads a copy of the file kept in a `container` folder next to the
+cache file: `build/mac-host/prepared/container/ShellData/ShellData.ini` with
+the usual cache path, `Documents/container/ShellData/ShellData.ini` on iOS.
+The copy is made from the game folder's file the first time you change a
+setting. Edit the copy directly, or use:
+
+```bash
+build/mac-host/dcrun --shell-setting Credit.Freeplay=0 --content "<folder>" build/mac-host/prepared/DCUSA2019.cache
+```
+
+| Section | Keys (defaults) |
+| --- | --- |
+| `Credit` | `Freeplay=1` (0: coins), `EntryType=0` |
+| `Audio` | `MusicVolume=80`, `SFXVolume=100`, `VoiceVolume=90`, `AttractMusic=3` |
+| `CalibrationData` | `AccelUp=30`, `AccelDown=200`, `BrakeUp=30`, `BrakeDown=200`, `SteeringLeft=15`, `SteeringRight=247`, `FeedbackStrength=2` |
+| `Network` | `Enabled=0`, `CabinetID=1`, `NumCabinets=1` |
+
+### iOS Settings app
+
+"Title boot screen" (on by default) shows the boot screen (`DCUSA_BOOT_SCREEN`).
+
+### Environment variables: playing
+
+| Variable | Effect |
+| --- | --- |
+| `DCUSA_WINDOW=0` | No window (the same as `--headless`). |
+| `DCUSA_PAD=0` | Ignore game controllers. |
+| `DCUSA_PAD_SCRIPT=<file>` | Play a pad script instead of a controller (`src/runtime/pad_script.hpp`; on iOS a file in Documents). Its frames count presents. |
+| `DCUSA_PAD_SCRIPT_FROM=attract` | Frame 1 of the script is the first present of attract, so one script fits both a paced and an unpaced boot. |
+| `DCUSA_AUDIO=0` | No speakers (silent output, paced in real time). |
+| `DCUSA_AUDIO_WAV=<file>` | Record the mix to a WAV file instead of playing it. |
+| `DCUSA_INI=Section.Key=Value;...` | Override GameData/config.ini keys (above). |
+| `DCUSA_RESOLUTION=<w>x<h>` | Display size the game is told about (default 1920x1080). |
+| `DCUSA_MSAA=4\|2\|0` | Multisampling (default 4). With 0, FXAA is on instead. |
+| `DCUSA_AA=1\|0\|split` | FXAA on, off, or on the right half only (default: on only without MSAA). |
+| `DCUSA_FRAME_SKIP=0\|1\|2` | Leave the scene render out of late ticks: 0 off (Mac default), 1 when late (iOS default), 2 every other tick (a test). |
+| `DCUSA_NOPACE=1` | No 60 Hz pacing (runs as fast as it can). |
+| `DCUSA_PACE_IDLE=0` | While waiting for the next frame, sleep instead of giving guest threads their turn. |
+| `DCUSA_BOOT_PACE=1\|0` | Pace the boot's loading screen too (default: only with a pad script). |
+| `DCUSA_BOOT_UNPACE_UNTIL=<percent>` | Leave the boot unpaced only below this loading percentage. |
+| `DCUSA_BOOT_GIVE=0` | During an unpaced boot, do not give the loader threads their turns first (the old behaviour). |
+| `DCUSA_BOOT_SCREEN=1` | The attract title with a progress bar during boot (Playing, above). |
+| `DCUSA_BOOT_SCREEN_IMAGE=<png>` | Title image (default `<prepared>/boot/title.png`). |
+| `DCUSA_BOOT_SCREEN_FONT=<ttf>` | Label font (default `font.ttf` beside the image, else Helvetica Neue Bold). |
+| `DCUSA_TEXTURE_LIMIT=<px>` | Largest texture size kept (default 1024 on iOS, none on the Mac). |
+| `DCUSA_BC_DECODE=1` | Decode BC textures on upload even where the GPU samples them (as on iOS). |
+| `DCUSA_METAL=0` | The 2D software reference instead of Metal (on by default in dcrun and on iOS). |
+| `DCUSA_SHADERS=<dir>` | Shader folder (default `<cache folder>/shaders`; `Documents/shaders` on iOS). |
+| `DCUSA_TRANSLATE=1` | Translate shaders that have no translation yet, during the run. dcrun always sets it (any value counts as on); iOS never translates. |
+
+### Environment variables: diagnostics and tests
+
+| Variable | Effect |
+| --- | --- |
+| `DCUSA_STATS=1` | Draw, texture and frame-time reports at presents 1, 30 and every `DCUSA_EVERY`; also host API logging. |
+| `DCUSA_EVERY=<n>` | Report (and with `DCUSA_FRAME`, write) every nth present. |
+| `DCUSA_FRAME=<prefix>` | Write frames as `<prefix>.<n>.ppm` (presents 1, 30, every `DCUSA_EVERY`). |
+| `DCUSA_FRAME_RANGE=<a>-<b>` | Write every present from a to b. |
+| `DCUSA_READBACK=1` | Read every frame back from the GPU. |
+| `DCUSA_EXIT_AT=<n>` | Exit cleanly after n presents (an instrumented build writes its profile). |
+| `DCUSA_HITCH=<ms>` | One line for each frame slower than this, with where the time went. |
+| `DCUSA_SKIP_LOG=<n>` | Every n presents, ticks per second and how many skipped the render. |
+| `DCUSA_MEM=<n>` | Every n presents, host memory by kind (with `DCUSA_GPU_THREAD=0`). |
+| `DCUSA_MEM_LIST=1` | List the Metal allocations in the memory report. |
+| `DCUSA_MAP_STATS=<n>` | Every n presents, D3D Map calls by type and bytes. |
+| `DCUSA_GPU_PASSES=1` | GPU time per render pass; `DCUSA_GPU_PASSES_LOG=1` also prints draws per frame. |
+| `DCUSA_GPU_QUERIES=0` | Zeros for GPU timestamp queries (turns off dynamic resolution). |
+| `DCUSA_GPU_QUERY_LAG=<k>` | Hold GPU times back k presents, as on a slower GPU. |
+| `DCUSA_GPU_TIME_SCALE=<k>` | Report GPU times k times longer (a phone's dynamic resolution on a Mac). |
+| `DCUSA_GPU_THREAD=0` | Encode Metal on the main thread instead of the render thread. |
+| `DCUSA_FRAMES_IN_FLIGHT=<1-4>` | Frames queued to the GPU (default 2). |
+| `DCUSA_ARENA=0` | New Metal storage for every buffer upload instead of the arenas. |
+| `DCUSA_METAL_TRACE=<n>` | One line per draw of frame n; `DCUSA_METAL_TRACE_FRAMES=<k>` for k frames; `DCUSA_METAL_TRACE_CB=1` command buffers. |
+| `DCUSA_METAL_SCAN=<n>` | Scan the render targets at present n. |
+| `DCUSA_SHADER_TRACE=1`, `DCUSA_QUERY_TRACE=1`, `DCUSA_SHOW_TRACE=1` | Trace shader binds, queries, presents and the boot screen. |
+| `DCUSA_SKIP_PS`, `DCUSA_SKIP_SRV`, `DCUSA_SKIP_PS_RT`, `DCUSA_SKIP_WIDTH`, `DCUSA_SKIP_SIZES`, `DCUSA_SKIP_TRACE` | Leave out matching overlay draws (used to capture the boot title without its text). |
+| `DCUSA_BOOT_SCREEN_DUMP=<prefix>` | Write the boot screen at 0, 50 and 100% and at the network check. |
+| `DCUSA_PAD_TRACE=1` | The pad snapshot and what the game made of it. |
+| `DCUSA_WATCH=<addr>[,...]` | Print guest memory at presents 1 and every `DCUSA_EVERY` (default 100). |
+| `DCUSA_IO=1` | Log guest file access; `DCUSA_IO_STACK=<text>` adds the call stack for paths containing it. |
+| `DCUSA_DEBUG_OUTPUT=1` | All of the game's OutputDebugString lines (with `DCUSA_STATS`; otherwise only the first 8). |
+| `DCUSA_DSOUND_TRACE=1` | DirectSound calls per buffer. |
+| `DCUSA_AUDIO_STATS=1`, `DCUSA_AUDIO_DUMP=<dir>` | Mixer statistics; dump each voice's buffer. |
+| `DCUSA_PARALLEL_THREADS=<hex entry>[,...]` | Run these guest threads in parallel. |
+| `DCUSA_SLICE=<ms>` | Time slice at a frame yield (default 0). |
+| `DCUSA_RELEASE_PAGES=0\|zero` | Keep freed heap pages, or clear them at once (a use-after-free test). |
+| `DCUSA_SELFTEST_MATH=1`, `DCUSA_SELFTEST_BC=1` | Compare the translated CRT maths, and the BC decoder, with the host. |
+
+### Build options (CMake)
+
+| Option | Effect |
+| --- | --- |
+| `DCUSA_GAME_LIBRARY` | Game folder for the tests (default `../Daytona Championship USA`). |
+| `DCUSA_PREPARED_CACHE` | Prepared image; the build translates it. |
+| `DCUSA_GENERATED_DIR` | A folder translated by hand, instead. |
+| `DCUSA_PYTHONPATH` | Python packages for the translator (default `build/pylib`). |
+| `DCUSA_GENERATED_OPT` | Optimisation level of the translated code (default `-O2`). |
+| `DCUSA_GENERATED_LINES` | Translated files built with line tables, or `all` (for profiling). |
+| `DCUSA_PGO` | `generate`, or a merged `.profdata` to optimise with. |
+| `DCUSA_ORDER_FILE` | Linker order file for dcrun. |
+| `DCUSA_IOS_TEAM` | Development team for a device build. |
+| `DCUSA_IOS_BUNDLE_ID` | iOS bundle identifier (default `local.dcusa.DaytonaUSA`). |
+| `DCUSA_BOOT_TITLE` | Title image put in the iOS app (default `<prepared>/boot/title.png`). |
 
 ## Building and testing (macOS, Apple silicon)
 
