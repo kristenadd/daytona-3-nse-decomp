@@ -75,18 +75,14 @@ agreed to this).
       (13 to 20%); the D3D layer's per-draw work (12%); memory stalls in the
       scene walk (object traversal 0x4423B0, 14% on the phone). Inlining the
       draw path, PGO and an order file gained nothing.
-   2. **Black stands: confirm on the phone, then unpin the width.** The
-      cause was found (6bf3344, Known issues). Have the user race on the
-      phone; if the stands stay right, try removing the 960 pin
-      (`kPhoneIni`) and race again with the dynamic resolution free.
-   3. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
+   2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
       A 512 cap, no MSAA and a 1280x720 display did not get it past 2.4 GB at
       10 s. Next: transcode BC to ASTC (same size as BC7/BC3, sampled by A15),
       best done on the Mac ahead of time and shipped beside the shaders,
       keyed by a hash of the uploaded data.
-   4. **Smaller items.** About 0.9 GB of Metal driver memory beyond its
+   3. **Smaller items.** About 0.9 GB of Metal driver memory beyond its
       allocations (render passes hold transient memory while the game
       renders; PHASE3 "Memory"). The boot's 44 s loading screen on the phone
       (Future work, "Boot time, further").
@@ -122,9 +118,9 @@ agreed to this).
   changes. Those writes now go through the GPU while a carry-over may be
   pending. A Mac race after an unpaced boot (`DCUSA_BOOT_PACE=0
   DCUSA_PAD_SCRIPT_FROM=attract`) reproduced it and now draws right, and
-  the user raced on the phone and the stands looked right. The 960 width
-  pin is removed (`kPhoneIni` empty) to see whether races also stay right
-  with the dynamic resolution free.
+  the user raced on the phone and the stands looked right, with the 960
+  width pin and again without it (`kPhoneIni` empty, dynamic resolution
+  free). Fixed.
 - **iPhone races are below 60 fps** (about 20.6 ms a frame; item 8, "Speed").
 - With `DCUSA_METAL=0` (the 2D software reference instead of Metal), a run
   stops at about present 120 on an `int3` at `0x6D14B8`, the end of
