@@ -1372,6 +1372,16 @@ SITE_OVERRIDES = {
         # back unchanged; both reach the Cpu only through SYNC.
         0xC45035: ('const uint32_t kept_ebx = ebx;',
                    'SYNC(); native_crt_unary(c); ebx = kept_ebx; esp += 4; SYNC(); return;'),
+        # The scene walk's loop over a node's objects (0x4423B0..0x4423C2: each
+        # object's virtual +0x2C) waits on memory: the object and its vtable
+        # were 14% of an iPhone's main thread. The load as before, plus a
+        # prefetch of the object two iterations on, when there is one (the
+        # count is [esp+0x3C] before the loop's push 0, so [esp+0x40] here).
+        # No flags change.
+        0x4423B5: ('',
+                   'ecx = ld32(M, eax + edi * 4u); '
+                   '{ const uint32_t n_ = edi + 2u; '
+                   'if ((int32_t)n_ < (int32_t)ld32(M, esp + 0x40u)) __builtin_prefetch(M + ld32(M, eax + n_ * 4u)); }'),
     },
 }
 

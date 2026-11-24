@@ -765,6 +765,15 @@ the GPU falls behind (6.5 ms a slow frame by default, 2.2 ms with a very light
 GPU load). The phone has two performance cores; the render thread does not keep
 up on an efficiency core.
 
+A prefetch in that loop (translate.py SITE_OVERRIDES 0x4423B5: the object two
+iterations on) took a phone race from about 21.6 to 20.6 ms a frame (within
+noise on a Mac). The render queue's two batches kept the capacity of a loading
+frame's texture uploads (hundreds of MB); a batch over 64 MB now gives it back.
+
+Memory in a phone race, with nothing but the footprint line: 4.2 to 4.5 GB,
+flat. `DCUSA_STATS=1` alone adds over a GB (it keeps records as it reports), so
+a run with it can reach the limit and be stopped; measure memory without it.
+
 `DCUSA_PARALLEL_THREADS=59E660` runs the CRI sound server (a fifth of a core)
 in parallel with the other guest threads instead of taking turns: imports and
 D3D calls take a runtime lock (rt_lock.hpp), waits give it up, and the dispatch

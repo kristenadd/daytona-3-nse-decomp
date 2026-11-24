@@ -56,6 +56,10 @@ struct Batch {
     void clear() {
         cmds.clear();
         bytes.clear();
+        // A loading frame's texture uploads grow this to hundreds of MB; kept,
+        // the two batches held over a GB on an iPhone (6 GB footprint, and the
+        // system stopped the game). Ordinary frames need a few MB.
+        if (bytes.capacity() > (64u << 20)) std::vector<std::uint8_t>().swap(bytes);
         used_states = 0;
         textures.clear();
         samplers.clear();

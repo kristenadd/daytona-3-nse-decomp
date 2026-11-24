@@ -64,7 +64,7 @@ agreed to this).
      A 512 cap, no MSAA and a 1280x720 display did not get it past 2.4 GB at
      10 s. Next: transcode BC to ASTC (same size as BC7/BC3, sampled by A15),
      best done on the Mac ahead of time and shipped beside the shaders.
-   - **Speed:** races run at about 21.5 ms a frame on the phone (25 before;
+   - **Speed:** races run at about 20.6 ms a frame on the phone (25 before;
      PHASE3 "Frame rate on an iPhone"). The limit is the game's main thread,
      about 16 ms of its own code a race frame, plus the render thread waiting
      on the GPU. Next: the main thread's object traversal (0x4423B0, 14%),
