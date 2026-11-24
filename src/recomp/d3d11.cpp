@@ -110,7 +110,22 @@ struct LiveMap {
     std::uint32_t at = 0;
     std::uint32_t size = 0;
     bool write = false;
+    bool home = false;  // `at` is the buffer's home (buffer_home), not scratch
 };
+
+// Buffer homes (with Metal): each buffer the game maps gets guest memory of its
+// own in [kBufferHomes, +kBufferHomeBytes), filled once from its stored bytes.
+// Map hands out the home, so its contents are always there (no copy in), and
+// Unmap uploads straight from it (no copy into the stored bytes, which go
+// stale). A race maps about 650 buffers a frame, 4.4 MB on the Mac: the copies
+// were about a tenth of an iPhone's main thread. UpdateSubresource on such a
+// buffer writes its home too.
+constexpr std::uint32_t kBufferHomes = 0x37000000u;
+constexpr std::uint32_t kBufferHomeBytes = 64u << 20;
+std::unordered_map<std::uint32_t, std::uint32_t> buffer_home;  // resource -> home
+std::unordered_map<std::uint32_t, std::uint32_t> home_size;    // home -> its 64-byte multiple
+std::unordered_multimap<std::uint32_t, std::uint32_t> free_homes;  // size -> home, from released buffers
+std::uint32_t buffer_home_used = 0;
 
 std::unordered_map<std::uint32_t, StoredBytes> stored;
 // TIMESTAMP queries: where in the command stream each last ended (query_end):
@@ -1856,6 +1871,12 @@ void show_boot_screen() {
 // DCUSA_FRAME_SKIP=0 off, 1 when late (iOS default), 2 every other tick (a test).
 std::chrono::steady_clock::time_point g_pace_next{};
 bool g_render_skipped = false;
+// The main thread's time per tick, from the end of one present's pacing to the
+// next present (the game's own work and any wait on the render thread), kept
+// apart for ticks that rendered and ticks that skipped (DCUSA_SKIP_LOG).
+std::chrono::steady_clock::time_point g_tick_start{};
+double g_tick_ms[2]{};
+std::uint32_t g_tick_n[2]{};
 int g_skip_run = 0;
 constexpr int kMaxSkips = 2;
 std::uint64_t g_skipped_total = 0;
@@ -2062,14 +2083,22 @@ void present(Cpu& c) {
         report_hitch(all_presents);
         // DCUSA_SKIP_LOG=<n>: every n presents, the game's tick rate (60 is full
         // speed) and how many of those ticks left out the scene render.
+        if (g_tick_start.time_since_epoch().count() != 0) {
+            const int kind = g_render_skipped ? 1 : 0;
+            g_tick_ms[kind] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_tick_start).count();
+            ++g_tick_n[kind];
+        }
         if (static const int skip_every = std::getenv("DCUSA_SKIP_LOG") ? std::atoi(std::getenv("DCUSA_SKIP_LOG")) : 0;
             skip_every > 0 && all_presents % skip_every == 0) {
             static auto last = std::chrono::steady_clock::now();
             static std::uint64_t last_skipped = 0;
             const auto t = std::chrono::steady_clock::now();
             const double s = std::chrono::duration<double>(t - last).count();
-            std::fprintf(stderr, "ticks %d: %.1f per second, %llu of %d skipped the render\n", all_presents,
-                         skip_every / s, static_cast<unsigned long long>(g_skipped_total - last_skipped), skip_every);
+            std::fprintf(stderr, "ticks %d: %.1f per second, %llu of %d skipped the render, tick %.2f ms rendered %.2f ms skipped\n",
+                         all_presents, skip_every / s, static_cast<unsigned long long>(g_skipped_total - last_skipped),
+                         skip_every, g_tick_n[0] ? g_tick_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_ms[1] / g_tick_n[1] : 0.0);
+            g_tick_ms[0] = g_tick_ms[1] = 0;
+            g_tick_n[0] = g_tick_n[1] = 0;
             last = t;
             last_skipped = g_skipped_total;
         }
@@ -2079,6 +2108,7 @@ void present(Cpu& c) {
         std::fprintf(stderr, "present: sync interval %u flags %u\n", arg(c, 1), arg(c, 2));
     }
     pace_present(c, arg(c, 1));
+    g_tick_start = std::chrono::steady_clock::now();
     // DCUSA_PAD_SCRIPT_FROM=attract: a pad script's frame 1 is the first present
     // of attract (boot state 8), so one script fits a paced or unpaced boot.
     static const bool from_attract = [] {
@@ -2236,6 +2266,16 @@ void update_subresource(Cpu& c) {
         return;
     }
     if (sub != 0 || src == 0 || it == stored.end() || (it->second.bytes.empty() && !it->second.gpu_only)) {
+        ret_stdcall(c, kSOk, 28);
+        return;
+    }
+    if (auto h = buffer_home.find(res); h != buffer_home.end() && ld32(c.mem, res + 4) != Texture) {
+        // A buffer with a home: its bytes live there (the stored ones are stale).
+        const std::uint32_t size = static_cast<std::uint32_t>(it->second.bytes.size());
+        std::uint32_t left = 0, right = size;
+        if (box != 0) left = ld32(c.mem, box), right = std::min(ld32(c.mem, box + 12), size);
+        if (right > left) std::memcpy(c.mem + h->second + left, c.mem + src, right - left);
+        gpu::upload_buffer(res, c.mem + h->second, size);
         ret_stdcall(c, kSOk, 28);
         return;
     }
@@ -2517,6 +2557,42 @@ void map_resource(Cpu& c) {
     } else if (resource >= kPool && resource < kPool + kPoolCap * 0x40u) {
         pitch = ld32(c.mem, resource + 12);
     }
+    static const bool homes = [] {
+        const char* e = std::getenv("DCUSA_BUFFER_HOMES");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    if (homes && size != 0 && it != stored.end() && gpu::enabled() && ld32(c.mem, resource + 4) != Texture) {
+        std::uint32_t home = 0;
+        if (auto h = buffer_home.find(resource); h != buffer_home.end()) {
+            home = h->second;
+        } else {
+            const std::uint32_t need = (size + 63u) & ~63u;
+            if (auto f = free_homes.find(need); f != free_homes.end()) {
+                home = f->second;
+                free_homes.erase(f);
+            } else if (buffer_home_used + need <= kBufferHomeBytes) {
+                if (buffer_home_used == 0 && mprotect(c.mem + kBufferHomes, kBufferHomeBytes, PROT_READ | PROT_WRITE) != 0)
+                    fail_closed(Unported::Service, kBufferHomes, "D3D11 buffer homes");
+                home = kBufferHomes + buffer_home_used;
+                buffer_home_used += need;
+                home_size[home] = need;
+            }
+            if (home != 0) {
+                std::memcpy(c.mem + home, it->second.bytes.data(), size);
+                buffer_home[resource] = home;
+            }
+        }
+        if (home != 0) {
+            live_maps.push_back(LiveMap{resource, home, size, type != 1u, true});
+            if (out != 0) {
+                st32(c.mem, out, home);
+                st32(c.mem, out + 4, pitch);
+                st32(c.mem, out + 8, 0);
+            }
+            ret_stdcall(c, kSOk, 24);
+            return;
+        }
+    }
     if (scratch_used + size > kMapBytes) scratch_used = 0;
     const std::uint32_t at = kMapScratch + scratch_used;
     if (size != 0) {
@@ -2528,7 +2604,7 @@ void map_resource(Cpu& c) {
         }
         scratch_used += (size + 15u) & ~15u;
     }
-    live_maps.push_back(LiveMap{resource, at, size, type != 1u});
+    live_maps.push_back(LiveMap{resource, at, size, type != 1u, false});
     // DCUSA_MAP_STATS=<presents>: Maps by type and bytes, every that many presents.
     static const int map_stats = std::getenv("DCUSA_MAP_STATS") ? std::atoi(std::getenv("DCUSA_MAP_STATS")) : 0;
     if (map_stats > 0) {
@@ -2554,26 +2630,39 @@ void map_resource(Cpu& c) {
     ret_stdcall(c, kSOk, 24);
 }
 
+// A constant buffer that starts like a projection matrix (for the 2D reference).
+void note_projection(const std::uint8_t* bytes) {
+    float row[4]{};
+    std::memcpy(row, bytes, sizeof row);
+    float next = 0;
+    std::memcpy(&next, bytes + 20, 4);
+    if (row[0] > 0.5f && row[0] < 8.0f && row[1] == 0 && row[2] == 0 && row[3] == 0 && next > 0.5f) {
+        std::memcpy(g_proj, bytes, sizeof g_proj);
+        g_have_proj = true;
+    }
+}
+
 // 0x6D66EE. Unmap. Both call sites push an extra zero, and the epilog only pops saved registers.
 // A write map copies the scratch back into the resource.
 void unmap_resource(Cpu& c) {
     const std::uint32_t resource = arg(c, 1);
     for (auto it = live_maps.begin(); it != live_maps.end(); ++it) {
         if (it->resource != resource) continue;
+        if (it->home) {
+            if (it->write) {
+                const std::uint8_t* bytes = c.mem + it->at;
+                if (it->size >= 64 && it->size <= 1024) note_projection(bytes);
+                gpu::upload_buffer(resource, bytes, it->size);
+            }
+            live_maps.erase(it);
+            break;
+        }
         auto stored_it = stored.find(resource);
         if (it->write && stored_it != stored.end() && it->size != 0) {
             std::memcpy(stored_it->second.bytes.data(), c.mem + it->at, it->size);
             if (stored_it->second.format == 0 && it->size >= 64 && it->size <= 1024 &&
-                stored_it->second.bytes.size() >= 64) {
-                float row[4]{};
-                std::memcpy(row, stored_it->second.bytes.data(), sizeof row);
-                float next = 0;
-                std::memcpy(&next, stored_it->second.bytes.data() + 20, 4);
-                if (row[0] > 0.5f && row[0] < 8.0f && row[1] == 0 && row[2] == 0 && row[3] == 0 && next > 0.5f) {
-                    std::memcpy(g_proj, stored_it->second.bytes.data(), sizeof g_proj);
-                    g_have_proj = true;
-                }
-            }
+                stored_it->second.bytes.size() >= 64)
+                note_projection(stored_it->second.bytes.data());
             if (stats_on() && stored_it->second.format == 0 && it->size >= 64 &&
                 it->size <= 8192) {
                 static int shown = 0;
@@ -3522,6 +3611,10 @@ void destroy(std::uint8_t* mem, std::uint32_t obj) {
     const std::uint32_t kind = ld32(mem, obj + 4);
     if (kind == Srv || kind == Rtv || kind == Dsv) drop_ref(mem, ld32(mem, obj + 12));
     stored.erase(obj);
+    if (auto h = buffer_home.find(obj); h != buffer_home.end()) {
+        free_homes.emplace(home_size[h->second], h->second);
+        buffer_home.erase(h);
+    }
     for (auto it = live_maps.begin(); it != live_maps.end();) it = it->resource == obj ? live_maps.erase(it) : it + 1;
     layouts.erase(obj);
     gpu_layouts.erase(obj);
