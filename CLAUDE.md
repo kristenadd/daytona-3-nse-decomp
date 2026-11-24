@@ -98,5 +98,9 @@ agreed to this).
   `DCUSA_AA` as an option). Phase 5 passes (colour p95 0.413) and the user
   confirmed the road and fence look right in the window. PHASE3 "Cube maps",
   "Anti-aliasing".
+- **Name entry and the next race.** The letter strip (an MS Video 1 AVI read
+  through Video for Windows) now shows, and the race after name entry starts
+  (the guest heap's free list had made the load crawl). The user confirmed
+  both in the window. PHASE4 "Video" correction and "Guest heap".
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.
