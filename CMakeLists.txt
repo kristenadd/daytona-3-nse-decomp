@@ -229,6 +229,22 @@ if(dcusa_generated_dir)
             MACOSX_BUNDLE_BUNDLE_NAME "DaytonaUSA"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
             MACOSX_BUNDLE_BUNDLE_VERSION "1")
+        # The app icon: the asset catalog compiled into the bundle (Assets.car and
+        # the 60/76 pt PNGs that Info.plist names), before the bundle is signed.
+        if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+            set(DCUSA_IOS_PLATFORM iphonesimulator)
+        else()
+            set(DCUSA_IOS_PLATFORM iphoneos)
+        endif()
+        add_custom_command(TARGET DaytonaUSA POST_BUILD
+            COMMAND xcrun actool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>"
+                    --platform ${DCUSA_IOS_PLATFORM}
+                    --minimum-deployment-target ${CMAKE_OSX_DEPLOYMENT_TARGET}
+                    --target-device iphone --target-device ipad --app-icon AppIcon
+                    --output-partial-info-plist "${CMAKE_CURRENT_BINARY_DIR}/assets-partial.plist"
+                    --output-format human-readable-text --errors --warnings
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Assets.xcassets"
+            COMMENT "Compiling the app icon")
         target_link_libraries(DaytonaUSA PRIVATE dcusa_generated dcusa_system "-framework UIKit" "-framework GameController"
                                                  "-framework QuartzCore" "-framework AudioToolbox" "-framework AVFoundation"
                                                  "-framework Metal" "-framework Foundation")
