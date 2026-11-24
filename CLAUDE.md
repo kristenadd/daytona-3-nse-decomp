@@ -58,13 +58,9 @@ agreed to this).
 
 8. **iOS and iPadOS.** **Verified in the Simulator and on an iPhone 15 Pro
    Max** (see below). Still to do, in this order:
-   1. **Frame skip in real play.** Checked only with scripted races
-      (PHASE3 "Frame skip"). Have the user play a race: does 43 pictures a
-      second at full game speed feel smooth, or do skipped pictures judder?
-      If they do, spread the skips more evenly.
-   2. **Touch controls.** The phone needs a game controller today.
-      On-screen steering, pedals and gear buttons, or tilt steering.
-   3. **More pictures a second.** Races take about 20.6 ms a frame on the
+   A game controller is required; touch controls are not wanted (the user's
+   decision).
+   1. **More pictures a second.** Races take about 20.6 ms a frame on the
       phone (25 before; PHASE3 "Frame rate on an iPhone"). Frame skip keeps
       the game at 60 ticks a second, drawing about 43 pictures. The limit is
       the game's main thread, about 16 ms of its own code a race frame, plus
@@ -75,18 +71,18 @@ agreed to this).
       (13 to 20%); the D3D layer's per-draw work (12%); memory stalls in the
       scene walk (object traversal 0x4423B0, 14% on the phone). Inlining the
       draw path, PGO and an order file gained nothing.
-   4. **Black stands after a width change, root cause.** Worked around by
+   2. **Black stands after a width change, root cause.** Worked around by
       pinning the phone's width (Known issues). It will come back wherever
       the dynamic resolution steps the width (Vision Pro, a future iPad).
       Make the Mac step widths back and forth, then compare frames.
-   5. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
+   3. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
       A 512 cap, no MSAA and a 1280x720 display did not get it past 2.4 GB at
       10 s. Next: transcode BC to ASTC (same size as BC7/BC3, sampled by A15),
       best done on the Mac ahead of time and shipped beside the shaders,
       keyed by a hash of the uploaded data.
-   6. **Smaller items.** About 0.9 GB of Metal driver memory beyond its
+   4. **Smaller items.** About 0.9 GB of Metal driver memory beyond its
       allocations (render passes hold transient memory while the game
       renders; PHASE3 "Memory"). The boot's 44 s loading screen on the phone
       (Future work, "Boot time, further").
@@ -193,5 +189,14 @@ agreed to this).
   a Mac renders races at 1920 wide (1280 before, with zeros), the iPhone
   settles at 960. Phase 5 attract passes (colour p95 0.428; median luma 102.0
   against the capture's 101.6, saturation 0.336 against 0.336).
+- **Frame skip** (item 8). An iPhone race holds 59.5 to 60 ticks a second
+  (48 before), lap 1 as on the Mac; the user played races and it feels good.
+  PHASE3 "Frame skip".
+- **Boot screen** (optional, `DCUSA_BOOT_SCREEN`). The attract title with a
+  progress bar from the game's loading percentage, then a blinking
+  "Checking network", handing over to the CRIWARE logo without a black
+  flash. The user approved it in a Mac window; on the iPhone the launch
+  image shows on a cold start and the boot screen goes straight to the
+  CRIWARE logo. README "Playing".
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.
