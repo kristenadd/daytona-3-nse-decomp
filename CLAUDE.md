@@ -99,6 +99,19 @@ agreed to this).
 
 ## Known issues
 
+- **iPhone: fence and stands black, races slow (cf63f88).** On the iPhone 15
+  Pro Max the fence and grandstands sometimes draw black in races; the user
+  saw it again on cf63f88 in normal play (the rival lines, black before, are
+  now right). It comes and goes between runs and builds, so it depends on
+  timing. Ruled out so far: the 60 Hz pacing is on (unpaced and 15.5 ms
+  pacing broke rendering too, worse); a phone race with the old all-zero GPU
+  timestamps (`DCUSA_GPU_QUERIES=0`) drew correctly at present 12000, but
+  that was one run; a Mac race with GPU times scaled by 3
+  (`DCUSA_GPU_TIME_SCALE=3`, the game's dynamic resolution then drops as on
+  the phone) drew the stands correctly. Not yet compared: a bad phone frame
+  against the Mac by present number (`DCUSA_METAL_SCAN`/`DCUSA_METAL_TRACE`).
+  Races also still slow down on the phone (about 20.6 ms a frame; item 8,
+  "Speed").
 - With `DCUSA_METAL=0` (the 2D software reference instead of Metal), a run
   stops at about present 120 on an `int3` at `0x6D14B8`, the end of
   `0x6D1460`. The Metal path, the default, is unaffected. Not investigated.
