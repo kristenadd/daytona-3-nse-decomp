@@ -67,6 +67,17 @@ agreed to this).
   the time goes. Caching ideas, once the cost is known: skip the pacing
   while the loading screen is up, keep decompressed or decoded data on disk
   between runs, or snapshot guest memory after boot.
+- **Service / test mode.** On the cabinet the Test and Service buttons open
+  the operator menu of `Shell.exe` (driven by `shell/GameTest*.ini` and
+  `GameAdvancedTest*.ini`), a separate program that does not run here. The
+  game's own path is closed in this release: no input profile maps actions
+  0 / 1 or SW1 / SW2, the keyboard source `0x47CB80` returns false, and no
+  shell message sets them (PHASE4 "Operator settings"). Today settings go
+  through `dcrun --shell-setting Section.Key=Value`, which edits
+  `ShellData.ini`. Options: rebuild the shell's menu natively from those
+  .ini files (a host-side menu that writes `ShellData.ini`), translate and
+  run `Shell.exe` itself, or look for test-mode classes in the game that a
+  host-side switch could still reach.
 
 ## Known issues
 
