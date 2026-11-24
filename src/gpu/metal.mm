@@ -1309,10 +1309,12 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
     std::uint32_t full = 1;
     for (std::uint32_t w = std::max(desc.width, desc.height); w > 1; w >>= 1) ++full;
     if (chain) levels = desc.mips > 1 ? std::min(full, desc.mips) : full;
-    // A cube map's faces and levels, and a texture created with initial data
-    // for all its levels, arrive from the guest (upload_texture_sub). Without
-    // the smaller levels, distant fences and signs shimmered.
-    if ((t.cube || (desc.initial && !chain)) && desc.mips != 1) levels = desc.mips == 0 ? full : std::min(full, desc.mips);
+    // A texture the game fills itself (initial data, or UpdateSubresource per
+    // level, which is how it loads most of them) keeps every level it declares:
+    // without the smaller levels distant fences and signs shimmered and the
+    // road's normal-mapped sheen broke up into speckles.
+    if ((t.cube || !chain) && desc.mips != 1 && (desc.bind & 0x60u) == 0)
+        levels = desc.mips == 0 ? full : std::min(full, desc.mips);
     t.tex = new_texture(desc, format, depth, levels);
     if (desc.samples > 1 && (desc.bind & 0x60u) != 0 && !t.cube && [g_dev->dev supportsTextureSampleCount:desc.samples]) {
         MTLTextureDescriptor* md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:desc.width

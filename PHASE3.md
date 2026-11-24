@@ -226,10 +226,12 @@ with `MISC_TEXTURECUBE` and a multiple of six slices is an `MTLTextureTypeCube`
 subresource (`upload_texture_sub`); a `TEXTURE2DARRAY` render target view
 keeps its first slice (view +20, `DrawState::rtv_slice`) for draws and clears;
 mip views keep all six faces; and an empty `texturecube` slot gets a 1x1 zero
-cube. 2D textures created with initial data now get all their mip levels
-too (they used to get level 0 only, so distant fences, signs and markings
-shimmered with moire); `UpdateSubresource` of a level other than 0 goes
-straight to that level, and a texture replaced while the GPU still reads it
+cube. 2D textures now keep all the mip levels they declare (render targets
+excepted, which keep their own chains): the game creates most of its ~1,200
+mipmapped textures empty and fills each level with `UpdateSubresource`, and
+only level 0 used to arrive, so distant fences, signs and markings shimmered
+and the road's normal-mapped sheen broke into speckles. `UpdateSubresource`
+of a level other than 0 goes straight to that level, and a texture replaced while the GPU still reads it
 carries its smaller levels over. Blend states with `AlphaToCoverageEnable`
 (eight of them, the foliage cards among them) now turn on the pipeline's
 alpha to coverage; with one sample a pixel that is an alpha test at 0.5, as in
