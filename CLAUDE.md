@@ -92,5 +92,11 @@ agreed to this).
   cube maps were created as 2D textures. Consecutive headless frames now keep
   the cars' shading, Phase 5 passes (colour p95 0.432), and the user
   confirmed in the window that the flashing is gone. PHASE3 "Cube maps".
+- **Image quality** (mips, trees, anti-aliasing). Textures keep every mip
+  level the game uploads (road sheen and distant shimmer), foliage uses alpha
+  to coverage, and 4x MSAA is native and on by default (`DCUSA_MSAA`, FXAA via
+  `DCUSA_AA` as an option). Phase 5 passes (colour p95 0.413) and the user
+  confirmed the road and fence look right in the window. PHASE3 "Cube maps",
+  "Anti-aliasing".
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.
