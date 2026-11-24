@@ -1324,12 +1324,13 @@ void create_texture(std::uint32_t key, const TextureDesc& desc) {
         switch (bc_decoded_bytes(desc.format)) {
         case 1: format = MTLPixelFormatR8Unorm; break;
         case 2: format = MTLPixelFormatRG8Unorm; break;
+        case 8: format = MTLPixelFormatRGBA16Float; break;  // BC6H
         case 4:
             format = desc.format == 72 || desc.format == 75 || desc.format == 78 || desc.format == 99
                          ? MTLPixelFormatRGBA8Unorm_sRGB
                          : MTLPixelFormatRGBA8Unorm;
             break;
-        default: format = MTLPixelFormatInvalid; break;  // BC6H and the signed BC4 / BC5: not decoded
+        default: format = MTLPixelFormatInvalid; break;  // the signed BC4 / BC5: not decoded
         }
         t.bc_decoded = true;
     }

@@ -6,7 +6,7 @@
 namespace dcusa::gpu {
 namespace {
 
-enum class Kind { None, BC1, BC2, BC3, BC4, BC5, BC7 };
+enum class Kind { None, BC1, BC2, BC3, BC4, BC5, BC6U, BC6S, BC7 };
 
 Kind kind(std::uint32_t dxgi) {
     switch (dxgi) {
@@ -15,6 +15,8 @@ Kind kind(std::uint32_t dxgi) {
     case 76: case 77: case 78: return Kind::BC3;
     case 79: case 80: return Kind::BC4;
     case 82: case 83: return Kind::BC5;
+    case 94: case 95: return Kind::BC6U;
+    case 96: return Kind::BC6S;
     case 97: case 98: case 99: return Kind::BC7;
     default: return Kind::None;
     }
@@ -255,12 +257,175 @@ void bc7_block(const std::uint8_t* b, std::uint8_t* out) {
     }
 }
 
+
+// ---- BC6H --------------------------------------------------------------------
+
+// Endpoint fields: w x (subset 0), y z (subset 1); d is the partition.
+enum Field : std::uint8_t { RW, GW, BW, RX, GX, BX, RY, GY, BY, RZ, GZ, BZ, D };
+
+// One run of header bits: they go to `field`, from bit `first` to bit `last`
+// (downward when last < first, as modes 13 and 14 store their top bits).
+struct Seg {
+    std::uint8_t field, first, last;
+};
+
+struct Bc6Mode {
+    bool transformed;
+    int subsets, endpoint_bits, delta_bits[3];
+    Seg segs[32];
+};
+
+#define W10 {RW, 0, 9}, {GW, 0, 9}, {BW, 0, 9}
+constexpr Bc6Mode kBc6Modes[14] = {
+    {true, 2, 10, {5, 5, 5}, {{GY, 4, 4}, {BY, 4, 4}, {BZ, 4, 4}, W10, {RX, 0, 4}, {GZ, 4, 4}, {GY, 0, 3}, {GX, 0, 4},
+                              {BZ, 0, 0}, {GZ, 0, 3}, {BX, 0, 4}, {BZ, 1, 1}, {BY, 0, 3}, {RY, 0, 4}, {BZ, 2, 2},
+                              {RZ, 0, 4}, {BZ, 3, 3}, {D, 0, 4}}},
+    {true, 2, 7, {6, 6, 6}, {{GY, 5, 5}, {GZ, 4, 4}, {GZ, 5, 5}, {RW, 0, 6}, {BZ, 0, 0}, {BZ, 1, 1}, {BY, 4, 4},
+                             {GW, 0, 6}, {BY, 5, 5}, {BZ, 2, 2}, {GY, 4, 4}, {BW, 0, 6}, {BZ, 3, 3}, {BZ, 5, 5},
+                             {BZ, 4, 4}, {RX, 0, 5}, {GY, 0, 3}, {GX, 0, 5}, {GZ, 0, 3}, {BX, 0, 5}, {BY, 0, 3},
+                             {RY, 0, 5}, {RZ, 0, 5}, {D, 0, 4}}},
+    {true, 2, 11, {5, 4, 4}, {W10, {RX, 0, 4}, {RW, 10, 10}, {GY, 0, 3}, {GX, 0, 3}, {GW, 10, 10}, {BZ, 0, 0},
+                              {GZ, 0, 3}, {BX, 0, 3}, {BW, 10, 10}, {BZ, 1, 1}, {BY, 0, 3}, {RY, 0, 4}, {BZ, 2, 2},
+                              {RZ, 0, 4}, {BZ, 3, 3}, {D, 0, 4}}},
+    {true, 2, 11, {4, 5, 4}, {W10, {RX, 0, 3}, {RW, 10, 10}, {GZ, 4, 4}, {GY, 0, 3}, {GX, 0, 4}, {GW, 10, 10},
+                              {GZ, 0, 3}, {BX, 0, 3}, {BW, 10, 10}, {BZ, 1, 1}, {BY, 0, 3}, {RY, 0, 3}, {BZ, 0, 0},
+                              {BZ, 2, 2}, {RZ, 0, 3}, {GY, 4, 4}, {BZ, 3, 3}, {D, 0, 4}}},
+    {true, 2, 11, {4, 4, 5}, {W10, {RX, 0, 3}, {RW, 10, 10}, {BY, 4, 4}, {GY, 0, 3}, {GX, 0, 3}, {GW, 10, 10},
+                              {BZ, 0, 0}, {GZ, 0, 3}, {BX, 0, 4}, {BW, 10, 10}, {BY, 0, 3}, {RY, 0, 3}, {BZ, 1, 1},
+                              {BZ, 2, 2}, {RZ, 0, 3}, {BZ, 4, 4}, {BZ, 3, 3}, {D, 0, 4}}},
+    {true, 2, 9, {5, 5, 5}, {{RW, 0, 8}, {BY, 4, 4}, {GW, 0, 8}, {GY, 4, 4}, {BW, 0, 8}, {BZ, 4, 4}, {RX, 0, 4},
+                             {GZ, 4, 4}, {GY, 0, 3}, {GX, 0, 4}, {BZ, 0, 0}, {GZ, 0, 3}, {BX, 0, 4}, {BZ, 1, 1},
+                             {BY, 0, 3}, {RY, 0, 4}, {BZ, 2, 2}, {RZ, 0, 4}, {BZ, 3, 3}, {D, 0, 4}}},
+    {true, 2, 8, {6, 5, 5}, {{RW, 0, 7}, {GZ, 4, 4}, {BY, 4, 4}, {GW, 0, 7}, {BZ, 2, 2}, {GY, 4, 4}, {BW, 0, 7},
+                             {BZ, 3, 3}, {BZ, 4, 4}, {RX, 0, 5}, {GY, 0, 3}, {GX, 0, 4}, {BZ, 0, 0}, {GZ, 0, 3},
+                             {BX, 0, 4}, {BZ, 1, 1}, {BY, 0, 3}, {RY, 0, 5}, {RZ, 0, 5}, {D, 0, 4}}},
+    {true, 2, 8, {5, 6, 5}, {{RW, 0, 7}, {BZ, 0, 0}, {BY, 4, 4}, {GW, 0, 7}, {GY, 5, 5}, {GY, 4, 4}, {BW, 0, 7},
+                             {GZ, 5, 5}, {BZ, 4, 4}, {RX, 0, 4}, {GZ, 4, 4}, {GY, 0, 3}, {GX, 0, 5}, {GZ, 0, 3},
+                             {BX, 0, 4}, {BZ, 1, 1}, {BY, 0, 3}, {RY, 0, 4}, {BZ, 2, 2}, {RZ, 0, 4}, {BZ, 3, 3},
+                             {D, 0, 4}}},
+    {true, 2, 8, {5, 5, 6}, {{RW, 0, 7}, {BZ, 1, 1}, {BY, 4, 4}, {GW, 0, 7}, {BY, 5, 5}, {GY, 4, 4}, {BW, 0, 7},
+                             {BZ, 5, 5}, {BZ, 4, 4}, {RX, 0, 4}, {GZ, 4, 4}, {GY, 0, 3}, {GX, 0, 4}, {BZ, 0, 0},
+                             {GZ, 0, 3}, {BX, 0, 5}, {BY, 0, 3}, {RY, 0, 4}, {BZ, 2, 2}, {RZ, 0, 4}, {BZ, 3, 3},
+                             {D, 0, 4}}},
+    {false, 2, 6, {6, 6, 6}, {{RW, 0, 5}, {GZ, 4, 4}, {BZ, 0, 0}, {BZ, 1, 1}, {BY, 4, 4}, {GW, 0, 5}, {GY, 5, 5},
+                              {BY, 5, 5}, {BZ, 2, 2}, {GY, 4, 4}, {BW, 0, 5}, {GZ, 5, 5}, {BZ, 3, 3}, {BZ, 5, 5},
+                              {BZ, 4, 4}, {RX, 0, 5}, {GY, 0, 3}, {GX, 0, 5}, {GZ, 0, 3}, {BX, 0, 5}, {BY, 0, 3},
+                              {RY, 0, 5}, {RZ, 0, 5}, {D, 0, 4}}},
+    {false, 1, 10, {10, 10, 10}, {W10, {RX, 0, 9}, {GX, 0, 9}, {BX, 0, 9}}},
+    {true, 1, 11, {9, 9, 9}, {W10, {RX, 0, 8}, {RW, 10, 10}, {GX, 0, 8}, {GW, 10, 10}, {BX, 0, 8}, {BW, 10, 10}}},
+    {true, 1, 12, {8, 8, 8}, {W10, {RX, 0, 7}, {RW, 11, 10}, {GX, 0, 7}, {GW, 11, 10}, {BX, 0, 7}, {BW, 11, 10}}},
+    {true, 1, 16, {4, 4, 4}, {W10, {RX, 0, 3}, {RW, 15, 10}, {GX, 0, 3}, {GW, 15, 10}, {BX, 0, 3}, {BW, 15, 10}}},
+};
+#undef W10
+
+int sign_extend(std::uint32_t v, int bits) {
+    const std::uint32_t m = 1u << (bits - 1);
+    return static_cast<int>((v ^ m) - m);
+}
+
+int unquantize(int v, int bits, bool sign) {
+    if (!sign) {
+        if (bits >= 15 || v == 0) return v;
+        if (v == (1 << bits) - 1) return 0xFFFF;
+        return ((v << 16) + 0x8000) >> bits;
+    }
+    if (bits >= 16) return v;
+    const bool neg = v < 0;
+    int a = neg ? -v : v;
+    if (a == 0) return 0;
+    if (a >= (1 << (bits - 1)) - 1)
+        a = 0x7FFF;
+    else
+        a = ((a << 15) + 0x4000) >> (bits - 1);
+    return neg ? -a : a;
+}
+
+std::uint16_t finish(int v, bool sign) {
+    if (!sign) return static_cast<std::uint16_t>((v * 31) >> 6);
+    const bool neg = v < 0;
+    const int a = ((neg ? -v : v) * 31) >> 5;
+    return static_cast<std::uint16_t>(a | (neg ? 0x8000 : 0));
+}
+
+// Out: RGBA16Float, alpha 1.
+void bc6_block(const std::uint8_t* b, std::uint16_t* out, bool sign) {
+    Bits bits{};
+    std::memcpy(&bits.lo, b, 8);
+    std::memcpy(&bits.hi, b + 8, 8);
+    std::uint32_t m = bits.take(2);
+    int mode;
+    if (m < 2) {
+        mode = static_cast<int>(m);
+    } else {
+        m |= bits.take(3) << 2;
+        switch (m) {
+        case 0x02: mode = 2; break;
+        case 0x06: mode = 3; break;
+        case 0x0A: mode = 4; break;
+        case 0x0E: mode = 5; break;
+        case 0x12: mode = 6; break;
+        case 0x16: mode = 7; break;
+        case 0x1A: mode = 8; break;
+        case 0x1E: mode = 9; break;
+        case 0x03: mode = 10; break;
+        case 0x07: mode = 11; break;
+        case 0x0B: mode = 12; break;
+        case 0x0F: mode = 13; break;
+        default: mode = -1; break;
+        }
+    }
+    if (mode < 0) {  // reserved
+        for (int i = 0; i < 16; ++i) out[4 * i] = out[4 * i + 1] = out[4 * i + 2] = 0, out[4 * i + 3] = 0x3C00;
+        return;
+    }
+    const Bc6Mode& md = kBc6Modes[mode];
+    std::uint32_t f[13] = {};
+    for (const Seg& sg : md.segs) {
+        if (sg.first == 0 && sg.last == 0 && sg.field == RW) break;  // end of the list
+        const int step = sg.last >= sg.first ? 1 : -1;
+        for (int bit = sg.first;; bit += step) {
+            f[sg.field] |= bits.take(1) << bit;
+            if (bit == sg.last) break;
+        }
+    }
+    const int eb = md.endpoint_bits;
+    int ep[4][3];  // w x y z, channel
+    for (int c = 0; c < 3; ++c) {
+        const std::uint32_t raw[4] = {f[RW + c], f[RX + c], f[RY + c], f[RZ + c]};
+        ep[0][c] = sign ? sign_extend(raw[0], eb) : static_cast<int>(raw[0]);
+        for (int e = 1; e < 2 * md.subsets; ++e) {
+            if (md.transformed) {
+                const int delta = sign_extend(raw[e], md.delta_bits[c]);
+                const std::uint32_t v = static_cast<std::uint32_t>(static_cast<int>(raw[0]) + delta) & ((1u << eb) - 1u);
+                ep[e][c] = sign ? sign_extend(v, eb) : static_cast<int>(v);
+            } else {
+                ep[e][c] = sign ? sign_extend(raw[e], eb) : static_cast<int>(raw[e]);
+            }
+        }
+        for (int e = 0; e < 2 * md.subsets; ++e) ep[e][c] = unquantize(ep[e][c], eb, sign);
+    }
+    const std::uint32_t partition = f[D];
+    const int ib = md.subsets == 2 ? 3 : 4;
+    const std::uint8_t* w = ib == 3 ? kWeight3 : kWeight4;
+    for (int px = 0; px < 16; ++px) {
+        const bool anchor = px == 0 || (md.subsets == 2 && px == kAnchor2[partition]);
+        const std::uint32_t idx = bits.take(ib - (anchor ? 1 : 0));
+        const int s = md.subsets == 2 ? kPart2[partition][px] : 0;
+        for (int c = 0; c < 3; ++c) {
+            const int v = ((64 - w[idx]) * ep[2 * s][c] + w[idx] * ep[2 * s + 1][c] + 32) >> 6;
+            out[4 * px + c] = finish(v, sign);
+        }
+        out[4 * px + 3] = 0x3C00;
+    }
+}
+
 }  // namespace
 
 std::uint32_t bc_decoded_bytes(std::uint32_t dxgi) {
     switch (kind(dxgi)) {
     case Kind::BC4: return 1;
     case Kind::BC5: return 2;
+    case Kind::BC6U: case Kind::BC6S: return 8;
     case Kind::None: return 0;
     default: return 4;
     }
@@ -285,6 +450,12 @@ void bc_decode_block(std::uint32_t dxgi, const std::uint8_t* b, std::uint8_t* ou
         single_block(b, out, 2);
         single_block(b + 8, out + 1, 2);
         break;
+    case Kind::BC6U: case Kind::BC6S: {
+        std::uint16_t px[64];
+        bc6_block(b, px, kind(dxgi) == Kind::BC6S);
+        std::memcpy(out, px, sizeof px);
+        break;
+    }
     case Kind::BC7: bc7_block(b, out); break;
     case Kind::None: break;
     }
@@ -297,7 +468,7 @@ bool bc_decode(std::uint32_t dxgi, const std::uint8_t* src, std::size_t size, st
     const std::uint32_t bpp = bc_decoded_bytes(dxgi), bb = block_bytes(k);
     const std::uint32_t bw = (width + 3) / 4, bh = (height + 3) / 4;
     if (row_pitch < bw * bb || static_cast<std::size_t>(row_pitch) * (bh - 1) + bw * bb > size) return false;
-    std::uint8_t px[16 * 4];
+    std::uint8_t px[16 * 8];
     for (std::uint32_t by = 0; by < bh; ++by)
         for (std::uint32_t bx = 0; bx < bw; ++bx) {
             bc_decode_block(dxgi, src + static_cast<std::size_t>(by) * row_pitch + bx * bb, px);

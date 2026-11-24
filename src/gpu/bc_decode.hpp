@@ -1,5 +1,5 @@
 #pragma once
-// Block-compressed textures (BC1-BC5, BC7) decoded to plain pixels, for GPUs
+// Block-compressed textures (BC1-BC7) decoded to plain pixels, for GPUs
 // without BC support: the iOS Simulator and iPhones before the A-series
 // chips that added it (MTLDevice.supportsBCTextureCompression). The decoded
 // pixels are what the GPU's own BC sampling returns, bit for bit
@@ -10,8 +10,9 @@
 namespace dcusa::gpu {
 
 // What a BC format decodes to: RGBA8 (BC1-3, BC7; the sRGB variants too, the
-// bytes are the same), R8 (BC4) or RG8 (BC5). Bytes per pixel, or 0 when the
-// format is not one this decodes (BC6H, the signed BC4/BC5, anything else).
+// bytes are the same), R8 (BC4), RG8 (BC5) or RGBA16Float (BC6H, alpha 1).
+// Bytes per pixel, or 0 when the format is not one this decodes (the signed
+// BC4 / BC5, anything else).
 std::uint32_t bc_decoded_bytes(std::uint32_t dxgi);
 
 // Decodes a `width` x `height` image whose 4x4 blocks are `row_pitch` bytes

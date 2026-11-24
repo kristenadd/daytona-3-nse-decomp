@@ -56,10 +56,14 @@ agreed to this).
 7. **Phase 5.** **Verified** (see below). CTest `phase5_attract` and
    `phase5_controls` (label `phase5`; [PHASE5.md](PHASE5.md)).
 
-8. **iOS and iPadOS.** **Verified in the Simulator** (see below). Next: a
-   real device (signing team, extended-virtual-addressing and
-   increased-memory-limit entitlements), touch controls, BC6H decoding if the
-   game uses it.
+8. **iOS and iPadOS.** **Verified in the Simulator** (see below). On devices
+   the app builds, signs (`ios-device` preset, both memory entitlements),
+   installs and starts, but the system kills it for memory before attract:
+   iPad mini 6 (4 GB) at about 2.8 GB resident after 5 s of CPU, iPhone 15
+   Pro Max (8 GB) at about 5.4 GB after 52 s (JetsamEvent reports). The Mac
+   build has the same appetite (footprint 2.2 GB at 2 s, 3.7 GB at 12 s: about
+   2 GB of Metal memory, 1 GB malloc, 0.7 GB touched guest memory), so cutting
+   it is the next step. Then touch controls.
 
 ## Future work
 
@@ -138,7 +142,9 @@ agreed to this).
   and game folder in the app's Documents, the iPad Pro 13-inch Simulator boots
   through Data Loading to attract and draws the 3D demo with the ranking board.
   The Simulator has no BC textures; they are decoded on upload, and
-  `test_bc_decode` matches the Mac GPU (BC1-3 and BC7 exactly, BC4/5 to the
-  nearest value).
+  `test_bc_decode` matches the Mac GPU (BC1-3, BC6H and BC7 exactly, BC4/5 to the
+  nearest value). With the decoder forced on the Mac (`DCUSA_BC_DECODE=1`)
+  Phase 5 attract passes (colour p95 0.429, median 0.212); before BC6H was
+  decoded it failed (saturation 0.071 over).
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.

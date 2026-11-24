@@ -224,7 +224,22 @@ if(dcusa_generated_dir)
         target_link_libraries(DaytonaUSA PRIVATE dcusa_generated dcusa_system "-framework UIKit" "-framework GameController"
                                                  "-framework QuartzCore" "-framework AudioToolbox" "-framework AVFoundation"
                                                  "-framework Metal" "-framework Foundation")
-        if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+        if(CMAKE_GENERATOR STREQUAL "Xcode" AND NOT CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+            # A device: Xcode's automatic signing registers the app ID with these
+            # entitlements and fetches a profile for the team's devices
+            # (cmake --build --preset ios-device passes -allowProvisioningUpdates).
+            set(DCUSA_IOS_TEAM "" CACHE STRING "Apple development team ID for device builds")
+            if(NOT DCUSA_IOS_TEAM)
+                message(FATAL_ERROR "A device build needs -DDCUSA_IOS_TEAM=<team id>")
+            endif()
+            set_target_properties(DaytonaUSA PROPERTIES
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${DCUSA_IOS_BUNDLE_ID}"
+                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${DCUSA_IOS_TEAM}"
+                XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
+                XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/DaytonaUSA.entitlements"
+                XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+        elseif(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
             add_custom_command(TARGET DaytonaUSA POST_BUILD
                 COMMAND codesign --force --sign - --timestamp=none "$<TARGET_BUNDLE_DIR:DaytonaUSA>"
                 COMMENT "Signing DaytonaUSA.app ad hoc for the simulator")

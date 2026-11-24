@@ -97,6 +97,10 @@ std::filesystem::path find_cache(const std::filesystem::path& docs) {
 void* run_game(void*) {
     Game& g = game();
     const std::filesystem::path docs = g.documents;
+    // stderr (the runtime's messages) goes to Documents/log.txt, which the
+    // Files app and devicectl can read back from a device.
+    if (std::freopen((docs / "log.txt").c_str(), "w", stderr) != nullptr) setvbuf(stderr, nullptr, _IOLBF, 0);
+    std::fprintf(stderr, "ios: game thread started\n");
     const std::filesystem::path cache = find_cache(docs);
     const std::filesystem::path shaders = docs / "shaders";
     std::error_code ec;
@@ -123,11 +127,13 @@ void* run_game(void*) {
         say("Cannot read " + cache.filename().string() + ":\n" + error);
         return nullptr;
     }
+    std::fprintf(stderr, "ios: cache loaded\n");
     g.process = std::make_unique<dcusa::recomp::GuestProcess>();
     if (!g.process->load(g.image, &error)) {
         say("Cannot load the game: " + error);
         return nullptr;
     }
+    std::fprintf(stderr, "ios: guest loaded\n");
     const dcusa::InstallScan scan = dcusa::find_installs(docs);
     const dcusa::GameInstall* install = dcusa::pick_install(scan, g.image.edition);
     if (install == nullptr) {
@@ -151,6 +157,7 @@ void* run_game(void*) {
     g.audio = dcusa::make_core_audio_output();
     if (!g.audio->start(dcusa::audio::DsMixer::kOutputRate, dcusa::audio::DsMixer::pull, &dcusa::recomp::sound_mixer()))
         g.audio.reset();
+    std::fprintf(stderr, "ios: starting the game\n");
     try {
         g.process->start(dcusa::recomp::translated_entries());
         say("The game ended.");

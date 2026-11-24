@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -54,6 +55,13 @@ int main() {
             {83, MTLPixelFormatBC5_RGUnorm, "BC5", -1}, {98, MTLPixelFormatBC7_RGBAUnorm, "BC7", -1},
         };
         for (int mode = 0; mode < 8; ++mode) formats.push_back({98, MTLPixelFormatBC7_RGBAUnorm, "BC7 mode", mode});
+        // BC6H, unsigned and signed: random blocks, then each of the 14 modes.
+        formats.push_back({95, MTLPixelFormatBC6H_RGBUfloat, "BC6H U", -1});
+        formats.push_back({96, MTLPixelFormatBC6H_RGBFloat, "BC6H S", -1});
+        for (int mode = 0; mode < 14; ++mode) {
+            formats.push_back({95, MTLPixelFormatBC6H_RGBUfloat, "BC6H U mode", mode});
+            formats.push_back({96, MTLPixelFormatBC6H_RGBFloat, "BC6H S mode", mode});
+        }
 
         std::mt19937 rng(1234);
         constexpr std::uint32_t kBw = 64, kBh = 64, kW = kBw * 4, kH = kBh * 4;
@@ -62,7 +70,16 @@ int main() {
             const std::uint32_t bpp = dcusa::gpu::bc_decoded_bytes(f.dxgi);
             std::vector<std::uint8_t> blocks(static_cast<std::size_t>(kBw) * kBh * bb);
             for (auto& b : blocks) b = static_cast<std::uint8_t>(rng());
-            if (f.bc7_mode >= 0)
+            const bool bc6 = f.dxgi == 95 || f.dxgi == 96;
+            // The mode bits of BC6H modes 1-14 (two bits for 1 and 2, five for the rest).
+            static constexpr std::uint8_t kBc6Mode[14] = {0x00, 0x01, 0x02, 0x06, 0x0A, 0x0E, 0x12,
+                                                          0x16, 0x1A, 0x1E, 0x03, 0x07, 0x0B, 0x0F};
+            if (bc6 && f.bc7_mode >= 0)
+                for (std::size_t i = 0; i < blocks.size(); i += 16) {
+                    const int n = f.bc7_mode < 2 ? 2 : 5;
+                    blocks[i] = static_cast<std::uint8_t>((blocks[i] & ~((1u << n) - 1u)) | kBc6Mode[f.bc7_mode]);
+                }
+            else if (f.bc7_mode >= 0)
                 for (std::size_t i = 0; i < blocks.size(); i += 16) {
                     const std::uint8_t low = static_cast<std::uint8_t>(1u << f.bc7_mode);
                     blocks[i] = static_cast<std::uint8_t>((blocks[i] & ~(2u * low - 1u)) | low);
@@ -93,8 +110,16 @@ int main() {
             double worst = 0;
             std::size_t off = 0, first = ~std::size_t{0};
             for (std::uint32_t p = 0; p < kW * kH; ++p)
-                for (std::uint32_t c = 0; c < bpp; ++c) {
-                    const double d = std::fabs(static_cast<double>(gpu[4 * p + c]) * 255.0 - cpu[p * bpp + c]);
+                for (std::uint32_t c = 0; c < (bc6 ? 4u : bpp); ++c) {
+                    double d;
+                    if (bc6) {  // half floats: exact
+                        __fp16 h;
+                        std::memcpy(&h, &cpu[p * bpp + 2 * c], 2);
+                        const float want = h, got = gpu[4 * p + c];
+                        d = want == got || (std::isnan(want) && std::isnan(got)) ? 0.0 : 1.0;
+                    } else {
+                        d = std::fabs(static_cast<double>(gpu[4 * p + c]) * 255.0 - cpu[p * bpp + c]);
+                    }
                     if (d > 0.5 + 1e-3) {
                         ++off;
                         if (first == ~std::size_t{0}) first = p;
@@ -110,9 +135,18 @@ int main() {
                 std::printf("  first at (%u,%u) block", x, y);
                 for (std::uint32_t i = 0; i < bb; ++i) std::printf(" %02x", blk[i]);
                 std::printf("\n  gpu");
-                for (std::uint32_t c = 0; c < bpp; ++c) std::printf(" %ld", std::lround(gpu[4 * first + c] * 255.0f));
+                for (std::uint32_t c = 0; c < (bc6 ? 4u : bpp); ++c)
+                    std::printf(" %g", bc6 ? gpu[4 * first + c] : gpu[4 * first + c] * 255.0f);
                 std::printf("  cpu");
-                for (std::uint32_t c = 0; c < bpp; ++c) std::printf(" %d", cpu[first * bpp + c]);
+                for (std::uint32_t c = 0; c < (bc6 ? 4u : bpp); ++c) {
+                    if (!bc6) {
+                        std::printf(" %d", cpu[first * bpp + c]);
+                        continue;
+                    }
+                    __fp16 h;
+                    std::memcpy(&h, &cpu[first * bpp + 2 * c], 2);
+                    std::printf(" %g", static_cast<float>(h));
+                }
                 std::printf("\n");
             }
             CHECK(off == 0);

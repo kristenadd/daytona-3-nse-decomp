@@ -42,7 +42,8 @@ shift up/down, Y/X/B/A views 1-4. Menus are confirmed with the gas.
 
 The same game code builds as an iOS / iPadOS app (`src/platform/ios`). It is
 verified in the Simulator (iPad Pro 13-inch, iOS 27.2): it boots to attract and
-draws the 3D demo. A real device is not tried yet.
+draws the 3D demo. On an iPad mini 6 and an iPhone 15 Pro Max it starts and
+then is stopped by the system for using too much memory (see CLAUDE.md, item 8).
 
 ```bash
 cmake --preset ios-sim
@@ -59,14 +60,29 @@ with `xcrun simctl get_app_container booted local.dcusa.DaytonaUSA data` and
 copy into its `Documents`; `cp -cR` clones the 5 GB game folder without using
 space. (A symlink does not work: the install scan does not follow links.)
 
-GPUs without BC texture support (the Simulator, older iPhones) get BC1-BC5 and
-BC7 decoded on upload (`src/gpu/bc_decode`), matching the Mac GPU's own decode
-(`test_bc_decode`). BC6H is not decoded yet. `DCUSA_BC_DECODE=1` forces the
+GPUs without BC texture support (the Simulator, older iPhones) get every BC
+format the game uses (BC1-BC7) decoded on upload (`src/gpu/bc_decode`), matching the Mac GPU's own decode
+(`test_bc_decode`). `DCUSA_BC_DECODE=1` forces the
 decoder on a Mac.
 
-For a device, still to do: a signing team (`-DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM`
-or a codesign identity), and the extended-virtual-addressing and
-increased-memory-limit entitlements, since the guest address space is 4 GB.
+On a device (an Xcode project, signed automatically for your team):
+
+```bash
+cmake --preset ios-device -DDCUSA_IOS_TEAM=<team id> -DDCUSA_GENERATED_DIR=$PWD/build/x86tr/2019/gen
+xcodebuild -project build/ios-device/DaytonaUSA.xcodeproj -target DaytonaUSA -configuration RelWithDebInfo -allowProvisioningUpdates
+xcrun devicectl device install app --device <udid> build/ios-device/RelWithDebInfo-iphoneos/DaytonaUSA.app
+```
+
+`-allowProvisioningUpdates` registers the app ID (`DCUSA_IOS_BUNDLE_ID`) with
+the two entitlements in `src/platform/ios/DaytonaUSA.entitlements`: extended
+virtual addressing (the guest's 4 GB address space) and the increased memory
+limit. Xcode must be signed in to an account of that team. Copy the files in
+with `xcrun devicectl device copy to --domain-type appDataContainer
+--domain-identifier local.dcusa.DaytonaUSA --source <file or folder>
+--destination Documents/<name>` (folders copy whole), or the Files app. The
+app writes its messages to `Documents/log.txt`; read it back with
+`devicectl device copy from ... --source Documents/log.txt`. A memory kill
+leaves a `JetsamEvent-*.ips` in `--domain-type systemCrashLogs`.
 
 ## Building and testing (macOS, Apple silicon)
 
