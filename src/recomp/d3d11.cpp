@@ -1822,7 +1822,13 @@ constexpr std::uint32_t kOverlayTexture = 0xFFFFB008u;
 // (toggle_fps_overlay). Called for every picture shown.
 std::atomic<int> g_fps_overlay{-1};  // -1 not read yet, 0 off, 1 on
 
-void count_shown_picture() {
+std::uint32_t race_timer(const std::uint8_t* mem);
+
+// The clocks it also shows, so a moment of a recording can be found again:
+// A, the time since attract began in game ticks (1/60 s, the same moment in
+// any run of the same script), and R, the race timer the HUD shows (when one
+// runs; demos included).
+void count_shown_picture(int attract_ticks, std::uint32_t race64) {
     if (g_fps_overlay.load(std::memory_order_relaxed) < 0) {
         const char* e = std::getenv("DCUSA_SHOW_FPS");
         int expected = -1;
@@ -1830,6 +1836,7 @@ void count_shown_picture() {
     }
     static auto since = std::chrono::steady_clock::now();
     static int shown = 0;
+    static double fps = 0;
     static bool created = false, showing = false;
     const bool on = g_fps_overlay.load(std::memory_order_relaxed) == 1;
     if (!on) {
@@ -1842,9 +1849,21 @@ void count_shown_picture() {
     ++shown;
     const auto now = std::chrono::steady_clock::now();
     const double s = std::chrono::duration<double>(now - since).count();
-    if (s < 0.5 && created) return;
-    char text[96];
-    std::snprintf(text, sizeof text, "%.0f FPS   %s", created ? shown / s : 0.0, DCUSA_BUILD_ID);
+    if (s >= 0.5 || !created) {
+        fps = created ? shown / s : 0.0;
+        since = now;
+        shown = 0;
+    }
+    // The text redrawn ten times a second (CoreGraphics on the game thread).
+    static auto drawn = std::chrono::steady_clock::time_point{};
+    if (created && now - drawn < std::chrono::milliseconds(100)) return;
+    drawn = now;
+    char text[160];
+    int n = std::snprintf(text, sizeof text, "%.0f FPS   %s", fps, DCUSA_BUILD_ID);
+    if (attract_ticks >= 0 && n > 0 && n < static_cast<int>(sizeof text))
+        n += std::snprintf(text + n, sizeof text - n, "   A %d:%04.1f", attract_ticks / 3600, (attract_ticks % 3600) / 60.0);
+    if (race64 != 0 && n > 0 && n < static_cast<int>(sizeof text))
+        std::snprintf(text + n, sizeof text - n, "   R %u:%05.2f", race64 / 3840, (race64 % 3840) / 64.0);
     std::uint32_t w = 0, h = 0;
     const auto& px = gpu::overlay_compose(text, &w, &h);
     if (!created) {
@@ -1858,8 +1877,6 @@ void count_shown_picture() {
         created = true;
     }
     gpu::upload_texture(kOverlayTexture, px.data(), px.size(), w * 4);
-    since = now;
-    shown = 0;
 }
 bool boot_screen_shown() {
     static const bool on = [] {
@@ -2425,7 +2442,11 @@ void present(Cpu& c) {
         const bool skipped = g_render_skipped;
         g_render_skipped = false;
         if (!skipped && (!g_boot_loading || now - last_shown >= std::chrono::milliseconds(16))) {
-            count_shown_picture();
+            {
+                static int attract_at = 0;  // the present attract began (boot state 8)
+                if (attract_at == 0 && g_boot_state >= 8) attract_at = presents_count;
+                count_shown_picture(attract_at != 0 ? presents_count - attract_at : -1, race_timer(c.mem));
+            }
             if (boot_screen_shown()) {
                 show_boot_screen();
             } else {

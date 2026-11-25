@@ -89,7 +89,7 @@ const std::vector<std::uint8_t>& overlay_compose(const std::string& text, std::u
     CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
     const CGFloat white[4] = {1, 1, 1, 1};
     const double tw = draw_line(nullptr, rgb, text, kSize, white, 0, 0, true);
-    constexpr std::uint32_t w = 640;  // fixed: the texture is made once; the pill fits the text
+    constexpr std::uint32_t w = 1024;  // fixed: the texture is made once; the pill fits the text
     const CGFloat pill = std::min<CGFloat>(w, static_cast<CGFloat>(tw) + 32);
     g_overlay.assign(static_cast<std::size_t>(w) * kH * 4, 0);
     CGContextRef g = CGBitmapContextCreate(g_overlay.data(), w, kH, 8, w * 4, rgb,

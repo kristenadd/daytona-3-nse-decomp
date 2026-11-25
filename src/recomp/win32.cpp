@@ -610,10 +610,22 @@ void IsProcessorFeaturePresent(Cpu& c) {
 
 // 100 ns ticks since 1601-01-01. Callers convert this to a Unix time by adding
 // a fixed bias, so a zero value would come out centuries off.
+// DCUSA_FIXED_CLOCK=1: the wall clock (date and time of day) stands still at
+// 2020-01-01 12:00:00 UTC, so whatever the game seeds from it repeats from run
+// to run (attract mode as a test). The steady clocks pacing uses stay real.
+bool fixed_clock() {
+    static const bool on = [] {
+        const char* v = std::getenv("DCUSA_FIXED_CLOCK");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    return on;
+}
+constexpr std::time_t kFixedClock = 1577880000;  // 2020-01-01 12:00:00 UTC
+
 void GetSystemTimeAsFileTime(Cpu& c) {
     const std::uint32_t out = arg(c, 0);
     using namespace std::chrono;
-    const auto since_unix = system_clock::now().time_since_epoch();
+    const auto since_unix = fixed_clock() ? system_clock::from_time_t(kFixedClock).time_since_epoch() : system_clock::now().time_since_epoch();
     const auto ticks = duration_cast<duration<std::uint64_t, std::ratio<1, 10000000>>>(since_unix).count();
     constexpr std::uint64_t kUnixBias = 11644473600ull * 10000000ull;
     const auto file_time = ticks + kUnixBias;
@@ -2633,7 +2645,7 @@ void GetTickCount(Cpu& c) {
 void write_system_time(Cpu& c, bool local) {
     const std::uint32_t out = arg(c, 0);
     if (out != 0) {
-        const std::time_t now = std::time(nullptr);
+        const std::time_t now = fixed_clock() ? kFixedClock : std::time(nullptr);
         std::tm tm {};
         if (local) localtime_r(&now, &tm);
         else gmtime_r(&now, &tm);

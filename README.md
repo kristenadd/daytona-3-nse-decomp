@@ -43,7 +43,11 @@ commit, `+` when built with uncommitted changes, and the build time) in the
 lower-left corner; the boot screen always shows the build under its bar. On
 iOS it is the Settings app's "Show frame rate"; for the Mac app,
 `defaults write local.dcusa.mac ShowFPS -bool true`. Those set how it starts;
-in game, pressing the right stick (R3) turns it on or off.
+in game, pressing the right stick (R3) turns it on or off. It also shows two
+clocks, to find a moment of a recording again: `A m:ss.s`, the time since
+attract began in game ticks (60 a second; the same moment in any run, since
+attract plays the same course order after every boot), and `R m:ss.cc`, the
+race timer the HUD shows while a race or demo runs.
 
 **Boot screen (optional).** In place of the black "Data Loading" and network
 check screens, the boot can show the attract title with a progress bar in its
@@ -295,6 +299,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_PAD_TRACE=1` | The pad snapshot and what the game made of it. |
 | `DCUSA_WATCH=<addr>[,...]` | Print guest memory at presents 1 and every `DCUSA_EVERY` (default 100). |
 | `DCUSA_MEMDUMP=<prefix>:<n>,...` | At those presents after attract starts, write the guest's readable memory to `<prefix>.<n>` (runs of address, length, bytes), to find a value by how it changes. |
+| `DCUSA_FIXED_CLOCK=1` | The wall clock (date and time of day) stands still at 2020-01-01 12:00 UTC, so anything seeded from it repeats; the steady clocks pacing uses stay real. |
 | `DCUSA_MEMDUMP_IMAGE=1` | `DCUSA_MEMDUMP` writes only the program image (its globals, 32 MB a dump). |
 | `DCUSA_WRITE_WATCH=<hex address>` | (dcrun) Logs each host pc that writes that guest dword ("write watch: ... host pc ... slide ...", for atos), from `DCUSA_WRITE_WATCH_AFTER` seconds (default 30): its host page is kept read-only and every write to the page faults. Slow; for finding who writes a value. |
 | `DCUSA_IO=1` | Log guest file access; `DCUSA_IO_STACK=<text>` adds the call stack for paths containing it. |
