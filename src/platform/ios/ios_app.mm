@@ -143,6 +143,8 @@ void* run_game(void*) {
     // bundle (tools/bootscreen/capture_title.py, from the player's game on a Mac).
     {
         NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+        // "Show frame rate": pictures per second and the build, lower left.
+        if ([defaults boolForKey:@"show_fps"]) setenv("DCUSA_SHOW_FPS", "1", 0);
         const bool on = [defaults objectForKey:@"boot_screen"] == nil || [defaults boolForKey:@"boot_screen"];
         std::string image = (docs / "boot" / "title.png").string();
         if (!std::filesystem::exists(image, ec)) {

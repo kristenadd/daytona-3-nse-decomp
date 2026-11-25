@@ -1942,6 +1942,10 @@ namespace {
 CAMetalLayer* g_layer = nil;
 id<MTLRenderPipelineState> g_show_pipeline = nil;
 id<MTLSamplerState> g_show_sampler = nil;
+// The overlay (set_overlay): a texture drawn over the shown frame, lower left,
+// blended (premultiplied alpha).
+id<MTLRenderPipelineState> g_overlay_pipeline = nil;
+std::atomic<std::uint32_t> g_overlay_key{0};
 
 // A full-screen triangle that samples the frame; the viewport does the scaling.
 constexpr const char* kShowSource = R"(
@@ -1978,6 +1982,12 @@ bool make_show_pipeline() {
         problem(std::string("show pipeline: ") + (error ? error.localizedDescription.UTF8String : "?"));
         return false;
     }
+    pd.colorAttachments[0].blendingEnabled = YES;
+    pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+    pd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    pd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    g_overlay_pipeline = [d.dev newRenderPipelineStateWithDescriptor:pd error:&error];
     MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
     sd.minFilter = MTLSamplerMinMagFilterLinear;
     sd.magFilter = MTLSamplerMinMagFilterLinear;
@@ -2186,6 +2196,17 @@ void show(std::uint32_t key) {
     [e setFragmentTexture:mip_view(*t, 0, 1) atIndex:0];
     [e setFragmentSamplerState:g_show_sampler atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    // The overlay, 4.5% of the picture's height, in its lower-left corner.
+    if (const std::uint32_t ok = g_overlay_key.load(std::memory_order_relaxed); ok != 0 && g_overlay_pipeline != nil) {
+        if (Texture* o = texture(ok); o != nullptr && o->tex != nil && o->desc.height != 0) {
+            const double oh = h * 0.045, ow = oh * o->desc.width / o->desc.height;
+            const double ox = (pixels.width - w) / 2 + h * 0.015, oy = (pixels.height + h) / 2 - oh - h * 0.015;
+            [e setViewport:MTLViewport{ox, oy, ow, oh, 0, 1}];
+            [e setRenderPipelineState:g_overlay_pipeline];
+            [e setFragmentTexture:o->tex atIndex:0];
+            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        }
+    }
     [e endEncoding];
     [command_buffer() presentDrawable:drawable];
 }
@@ -2465,5 +2486,7 @@ void rt_waits(double* gpu_ms, double* drawable_ms) {
     *gpu_ms = g_rt_gpu_wait_ms;
     *drawable_ms = g_rt_drawable_ms;
 }
+
+void set_overlay(std::uint32_t texture) { direct::g_overlay_key.store(texture, std::memory_order_relaxed); }
 
 }  // namespace dcusa::gpu

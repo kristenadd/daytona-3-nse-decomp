@@ -57,6 +57,12 @@ add_library(dcusa_runtime STATIC
 target_include_directories(dcusa_runtime PUBLIC src)
 dcusa_warnings(dcusa_runtime)
 
+# The build stamp (cmake/build_info.cmake), refreshed at every build.
+add_custom_target(dcusa_build_info
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.hpp
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_info.cmake
+    BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.hpp)
+
 # ---- recomp: guest memory, machine state, dispatch, helpers for translated code ----
 add_library(dcusa_recomp STATIC
     src/recomp/guest_memory.cpp
@@ -77,6 +83,8 @@ add_library(dcusa_recomp STATIC
     src/gpu/boot_screen.mm
     src/gpu/gpu_queue.mm)
 target_include_directories(dcusa_recomp PUBLIC src)
+target_include_directories(dcusa_recomp PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+add_dependencies(dcusa_recomp dcusa_build_info)
 target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal" "-framework QuartzCore"
                       "-framework CoreGraphics" "-framework CoreText" "-framework ImageIO")
 set_source_files_properties(src/gpu/metal.mm src/gpu/gpu_queue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")

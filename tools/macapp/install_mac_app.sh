@@ -43,6 +43,8 @@ here=\${0:A:h}
 res=\$here/../Resources
 export DCUSA_SHADERS="$prepared/shaders"
 export DCUSA_BOOT_SCREEN=\${DCUSA_BOOT_SCREEN:-1}
+# defaults write local.dcusa.mac ShowFPS -bool true: the frame rate and build, lower left.
+[[ \$(defaults read local.dcusa.mac ShowFPS 2>/dev/null) == 1 ]] && export DCUSA_SHOW_FPS=\${DCUSA_SHOW_FPS:-1}
 [[ -f \$res/boot_title.png ]] && export DCUSA_BOOT_SCREEN_IMAGE=\${DCUSA_BOOT_SCREEN_IMAGE:-\$res/boot_title.png}
 [[ -f \$res/boot_font.ttf ]] && export DCUSA_BOOT_SCREEN_FONT=\${DCUSA_BOOT_SCREEN_FONT:-\$res/boot_font.ttf}
 mkdir -p ~/Library/Logs

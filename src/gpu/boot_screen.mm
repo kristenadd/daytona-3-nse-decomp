@@ -13,6 +13,43 @@ namespace {
 
 CGImageRef g_title = nullptr;
 CGFontRef g_font = nullptr;  // boot_screen_font
+std::string g_stamp;          // boot_screen_stamp
+std::vector<std::uint8_t> g_overlay;
+
+// One line of text at (x, baseline) in a top-down context, in the given
+// font (or Helvetica Neue Bold) and colour; returns its width.
+double draw_line(CGContextRef g, CGColorSpaceRef rgb, const std::string& text, CGFloat size, const CGFloat color[4],
+                 CGFloat x, CGFloat baseline, bool measure_only = false) {
+    CTFontRef font = g_font != nullptr ? CTFontCreateWithGraphicsFont(g_font, size, nullptr, nullptr)
+                                       : CTFontCreateWithName(CFSTR("HelveticaNeue-Bold"), size, nullptr);
+    CGColorRef c = CGColorCreate(rgb, color);
+    const float kern_value = 1.0f;
+    CFNumberRef kern = CFNumberCreate(nullptr, kCFNumberFloatType, &kern_value);
+    const void* keys[3] = {kCTFontAttributeName, kCTForegroundColorAttributeName, kCTKernAttributeName};
+    const void* values[3] = {font, c, kern};
+    CFDictionaryRef attrs = CFDictionaryCreate(nullptr, keys, values, 3, &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    CFStringRef str = CFStringCreateWithCString(nullptr, text.c_str(), kCFStringEncodingUTF8);
+    CFAttributedStringRef astr = CFAttributedStringCreate(nullptr, str, attrs);
+    CTLineRef line = CTLineCreateWithAttributedString(astr);
+    const double w = CTLineGetTypographicBounds(line, nullptr, nullptr, nullptr);
+    if (!measure_only) {
+        CGContextSaveGState(g);
+        CGContextTranslateCTM(g, x, baseline);
+        CGContextScaleCTM(g, 1, -1);
+        CGContextSetTextPosition(g, 0, 0);
+        CTLineDraw(line, g);
+        CGContextRestoreGState(g);
+    }
+    CFRelease(line);
+    CFRelease(astr);
+    CFRelease(str);
+    CFRelease(attrs);
+    CFRelease(kern);
+    CGColorRelease(c);
+    CFRelease(font);
+    return w;
+}
 std::vector<std::uint8_t> g_pixels;
 constexpr std::uint32_t kWidth = 1920, kHeight = 1080;
 
@@ -43,6 +80,36 @@ bool boot_screen_load(const std::string& path) {
 }
 
 bool boot_screen_loaded() { return g_title != nullptr; }
+
+void boot_screen_stamp(const std::string& text) { g_stamp = text; }
+
+const std::vector<std::uint8_t>& overlay_compose(const std::string& text, std::uint32_t* width, std::uint32_t* height) {
+    constexpr std::uint32_t kH = 48;
+    constexpr CGFloat kSize = 28;
+    CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+    const CGFloat white[4] = {1, 1, 1, 1};
+    const double tw = draw_line(nullptr, rgb, text, kSize, white, 0, 0, true);
+    constexpr std::uint32_t w = 640;  // fixed: the texture is made once; the pill fits the text
+    const CGFloat pill = std::min<CGFloat>(w, static_cast<CGFloat>(tw) + 32);
+    g_overlay.assign(static_cast<std::size_t>(w) * kH * 4, 0);
+    CGContextRef g = CGBitmapContextCreate(g_overlay.data(), w, kH, 8, w * 4, rgb,
+                                           kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    if (g != nullptr) {
+        CGContextTranslateCTM(g, 0, kH);
+        CGContextScaleCTM(g, 1, -1);
+        CGContextSetRGBFillColor(g, 0, 0, 0, 0.55);
+        CGPathRef p = CGPathCreateWithRoundedRect(CGRectMake(0, 0, pill, kH), 12, 12, nullptr);
+        CGContextAddPath(g, p);
+        CGContextFillPath(g);
+        CGPathRelease(p);
+        draw_line(g, rgb, text, kSize, white, 16, 34);
+        CGContextRelease(g);
+    }
+    CGColorSpaceRelease(rgb);
+    *width = w;
+    *height = kH;
+    return g_overlay;
+}
 
 bool boot_screen_font(const std::string& path) {
     if (g_font != nullptr) return true;
@@ -159,6 +226,13 @@ const std::vector<std::uint8_t>& boot_screen_compose(int percent, const std::str
         CGColorRelease(edge_color);
         CGColorRelease(white);
         CFRelease(font);
+    }
+    // The build stamp, small and grey, centred under the label (the corners
+    // are the swirl's).
+    if (!g_stamp.empty()) {
+        const CGFloat grey[4] = {0.55, 0.55, 0.55, 1};
+        const double sw = draw_line(g, rgb, g_stamp, 15, grey, 0, 0, true);
+        draw_line(g, rgb, g_stamp, 15, grey, (kWidth - sw) / 2, track.origin.y + track.size.height + 62);
     }
     CGContextRelease(g);
     CGColorSpaceRelease(rgb);

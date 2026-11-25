@@ -29,6 +29,7 @@
 #include "recomp/guest_memory.hpp"
 #include "recomp/threads.hpp"
 #include "gpu/boot_screen.hpp"
+#include "build_info.hpp"
 #include "recomp/win32.hpp"
 #include "recomp/x86ops.hpp"
 #include "runtime/fail_closed.hpp"
@@ -1787,6 +1788,41 @@ int g_boot_percent = -1;         // "Data Loading" percentage (boot_progress), -
 // folder (tools/bootscreen/capture_title.py makes it). Frame dumps still
 // read the game's own frame.
 constexpr std::uint32_t kBootScreenTexture = 0xFFFFB007u;
+constexpr std::uint32_t kOverlayTexture = 0xFFFFB008u;
+
+// DCUSA_SHOW_FPS=1: the pictures shown per second and the build, lower left
+// (gpu::set_overlay), refreshed twice a second. Called for every picture shown.
+void count_shown_picture() {
+    static const bool on = [] {
+        const char* e = std::getenv("DCUSA_SHOW_FPS");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    if (!on) return;
+    static auto since = std::chrono::steady_clock::now();
+    static int shown = 0;
+    static bool created = false;
+    ++shown;
+    const auto now = std::chrono::steady_clock::now();
+    const double s = std::chrono::duration<double>(now - since).count();
+    if (s < 0.5 && created) return;
+    char text[96];
+    std::snprintf(text, sizeof text, "%.0f FPS   %s", created ? shown / s : 0.0, DCUSA_BUILD_ID);
+    std::uint32_t w = 0, h = 0;
+    const auto& px = gpu::overlay_compose(text, &w, &h);
+    if (!created) {
+        gpu::TextureDesc d;
+        d.width = w;
+        d.height = h;
+        d.format = 28;  // R8G8B8A8_UNORM
+        d.bind = 0x8;
+        gpu::create_texture(kOverlayTexture, d);
+        gpu::set_overlay(kOverlayTexture);
+        created = true;
+    }
+    gpu::upload_texture(kOverlayTexture, px.data(), px.size(), w * 4);
+    since = now;
+    shown = 0;
+}
 bool boot_screen_shown() {
     static const bool on = [] {
         const char* e = std::getenv("DCUSA_BOOT_SCREEN");
@@ -1800,6 +1836,7 @@ bool boot_screen_shown() {
         if (const char* f = std::getenv("DCUSA_BOOT_SCREEN_FONT")) font = f;
         else if (!path.empty()) font = (std::filesystem::path(path).parent_path() / "font.ttf").string();
         if (!font.empty() && std::filesystem::exists(font)) gpu::boot_screen_font(font);
+        gpu::boot_screen_stamp("build " DCUSA_BUILD_ID);
         if (path.empty() || !gpu::boot_screen_load(path)) {
             std::fprintf(stderr, "boot screen: no title image at %s\n", path.c_str());
             return false;
@@ -2166,6 +2203,7 @@ void present(Cpu& c) {
         const bool skipped = g_render_skipped;
         g_render_skipped = false;
         if (!skipped && (!g_boot_loading || now - last_shown >= std::chrono::milliseconds(16))) {
+            count_shown_picture();
             if (boot_screen_shown()) {
                 show_boot_screen();
             } else {

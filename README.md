@@ -38,6 +38,12 @@ start, right/left trigger gas/brake, left stick steering, right/left shoulder
 shift up/down, Y/X/B/A views 1-4. Menus are confirmed with the gas.
 `--headless` (or `DCUSA_WINDOW=0`) runs without a window, for scripted runs.
 
+`DCUSA_SHOW_FPS=1` shows the pictures drawn per second and the build (the
+commit, `+` when built with uncommitted changes, and the build time) in the
+lower-left corner; the boot screen always shows the build under its bar. On
+iOS it is the Settings app's "Show frame rate"; for the Mac app,
+`defaults write local.dcusa.mac ShowFPS -bool true`.
+
 **Boot screen (optional).** In place of the black "Data Loading" and network
 check screens, the boot can show the attract title with a progress bar in its
 colours, filled from the game's own loading percentage, then "Checking

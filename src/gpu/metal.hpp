@@ -126,6 +126,9 @@ void antialias(std::uint32_t texture);
 // Draws `texture` (the back buffer) into the layer's next drawable, scaled to
 // fit with black bars, and presents it with the frame. Call before submit().
 void show(std::uint32_t texture);
+// A texture drawn over every shown frame, lower left (0: none). Set from any
+// thread; the texture is created and uploaded through the queue as usual.
+void set_overlay(std::uint32_t texture);
 
 // Commits the frame, waits, and copies `texture` (an RGBA8 or BGRA8 target) out
 // as RGBA8 rows. False when it has no Metal texture.
