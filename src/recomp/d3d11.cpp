@@ -4434,7 +4434,10 @@ std::uint32_t cube_faces_cap() {
 bool shadow_cascade_skipped(std::uint32_t index) {
     static const std::uint32_t drawn = [] {
         const char* e = std::getenv("DCUSA_SHADOW_CASCADES");
-        const int n = e != nullptr ? std::atoi(e) : (TARGET_OS_IPHONE ? 2 : 3);
+        // All three everywhere: with two on iOS, trees past the second cascade
+        // lost their shadow and turned bright (Three Seven Speedway's forest),
+        // and the third costs an iPhone little since the native glow.
+        const int n = e != nullptr ? std::atoi(e) : 3;
         return static_cast<std::uint32_t>(n < 0 ? 0 : n);
     }();
     return index >= drawn;
