@@ -108,7 +108,12 @@ agreed to this).
       user later found it running much better. A hit adds debris drawn as
       small models through every pass (about 280 more draws a frame, 20%).
       Not explained: a coarse black checkerboard over the car in one of the
-      user's pictures (smoke drawn dithered?). Next: native shadows. Then: the main thread's spread of 1-5%
+      user's pictures (smoke drawn dithered?). Shadows: dropping the far
+      cascade (the heaviest, 1.28 M indices) or it and the 512 map changes
+      nothing on the phone (53.4 / 54.0 / 53.9 pictures), so with the native
+      glow the shadow maps no longer limit it (`DCUSA_SHADOW_DROP=<k,...>`
+      stays as a test). The limit is now the main thread in busy scenes
+      (grandstand straight, packs of cars: 1,700-1,900 draws). Then: the main thread's spread of 1-5%
       costs (scene walk loop memory misses, draw path 0x6CFDB0, 0x458BC0,
       the Model 2 interpreter loop).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit

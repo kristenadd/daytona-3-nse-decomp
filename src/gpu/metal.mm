@@ -1940,7 +1940,50 @@ bool shadow_phase_skips() {
     return phase != 0;
 }
 
+// DCUSA_SHADOW_DROP=<k>: the k-th dynamic shadow map drawn each frame (1-based,
+// in the order the game first draws into them) gets no draws, only its clear,
+// so it holds no shadows (a test for which map is which; 0: none).
+// A list is allowed ("3,4"); the result is a bit mask of ranks.
+unsigned shadow_drop() {
+    static const unsigned mask = [] {
+        unsigned m = 0;
+        if (const char* v = std::getenv("DCUSA_SHADOW_DROP"))
+            for (const char* p = v; *p;) {
+                const int k = std::atoi(p);
+                if (k >= 1 && k <= 8) m |= 1u << (k - 1);
+                while (*p && *p != ',') ++p;
+                if (*p == ',') ++p;
+            }
+        return m;
+    }();
+    return mask;
+}
+
+bool shadow_dropped(const DrawState& s) {
+    if (shadow_drop() == 0 || s.rtv[0] != 0 || s.dsv == 0) return false;
+    auto it = g_dev->textures.find(s.dsv);
+    if (it == g_dev->textures.end()) return false;
+    const Texture& t = it->second;
+    if (!t.depth || t.desc.width != t.desc.height || t.desc.width > 1024) return false;
+    static std::uint64_t frame = ~0ull;
+    static std::uint32_t seen[8];
+    static unsigned n = 0;
+    if (g_dev->stats.frames != frame) {
+        frame = g_dev->stats.frames;
+        n = 0;
+    }
+    unsigned rank = 0;
+    for (unsigned i = 0; i < n; ++i)
+        if (seen[i] == s.dsv) rank = i + 1;
+    if (rank == 0 && n < 8) {
+        seen[n++] = s.dsv;
+        rank = n;
+    }
+    return rank != 0 && (shadow_drop() & (1u << (rank - 1))) != 0;
+}
+
 bool shadow_skipped(const DrawState& s) {
+    if (shadow_dropped(s)) return true;
     if (shadow_every() == 1 || s.rtv[0] != 0 || s.dsv == 0) return false;
     auto it = g_dev->textures.find(s.dsv);
     if (it == g_dev->textures.end()) return false;
