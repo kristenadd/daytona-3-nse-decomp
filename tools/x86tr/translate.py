@@ -327,7 +327,8 @@ class FunctionTranslator(X87Mixin, SseMixin):
         return '\n'.join(lines)
 
     XMM_REF = re.compile(r'\bxm([0-7])_')
-    SYNC_CALL = re.compile(r'\b(SYNC|SYNC_R|RELOAD)\(\)|\bSYNC_TO\(0x[0-9A-F]+u\)')
+    SYNC_CALL = re.compile(r'\b(SYNC|SYNC_R|RELOAD)\(\)|\bSYNC_TO\(0x[0-9A-F]+u\)'
+                           r'|\b(RELOAD)_(?:AFTER\(0x[0-9A-F]+u, [01]\)|M\(\d+\))')
 
     def keep_xmm_local(self, body):
         """The xmm registers a function uses live in locals, like the GPRs.
@@ -346,7 +347,7 @@ class FunctionTranslator(X87Mixin, SseMixin):
         out.append('#define XR_() (%s)' % ', '.join('xm%d_ = c.xmm[%d]' % (n, n) for n in used))
         for line in body[1:]:
             out.append(self.SYNC_CALL.sub(lambda m: '(%s, %s())' % (
-                m.group(0), 'XR_' if m.group(1) == 'RELOAD' else 'XS_'), line))
+                m.group(0), 'XR_' if 'RELOAD' in (m.group(1) or '', m.group(2) or '') else 'XS_'), line))
         out.append('#undef XS_')
         out.append('#undef XR_')
         return out
@@ -410,6 +411,87 @@ class FunctionTranslator(X87Mixin, SseMixin):
         if self.inside(nxt):
             out.append(nxt)
         return out
+
+    PRESERVABLE = (('ebx', 1), ('ebp', 2), ('esi', 4), ('edi', 8))
+
+    def writes_reg(self, insn, name):
+        """`insn` writes the 32-bit register `name` (or a part of it)."""
+        try:
+            _, written = insn.regs_access()
+        except Exception:
+            return True
+        parts = {'ebx': ('ebx', 'bx', 'bl', 'bh'), 'ebp': ('ebp', 'bp'), 'esi': ('esi', 'si'), 'edi': ('edi', 'di')}[name]
+        return any(insn.reg_name(r) in parts for r in written)
+
+    def preserved_regs(self):
+        """A mask of ebx (1), ebp (2), esi (4), edi (8) that this function returns
+        with their entry values, by the MSVC pattern: pushed in the straight-line
+        prologue before anything writes them, and popped in the straight-line run
+        of instructions before every ret, with nothing writing them between that
+        pop and the ret. Anything else (a tail jmp or other exit, an indirect jmp,
+        no ret, a prologue helper such as __SEH_prolog) preserves nothing. Callers
+        then reload only what the callee may change (RELOAD_AFTER)."""
+        if self.inlined or self.fn.indirect_jumps or not self.order:
+            return 0
+        rets = [va for va in self.order if self.insns[va].mnemonic.split()[-1] == 'ret']
+        if not rets or any(self.leaves(va) for va in self.order):
+            return 0
+        # The prologue: from the entry, straight line, until a branch target, a
+        # jump, call or ret.
+        pushed = 0
+        written = 0
+        va = self.entry
+        while va in self.insns:
+            insn = self.insns[va]
+            m = insn.mnemonic.split()[-1]
+            if va != self.entry and va in self.branch_in:
+                break
+            if m in ('call', 'ret', 'jmp') or F.cc_of(m) is not None or m.startswith('j'):
+                break
+            for name, bit in self.PRESERVABLE:
+                if m == 'push' and insn.op_str == name and not (written & bit):
+                    pushed |= bit
+                elif self.writes_reg(insn, name):
+                    written |= bit
+            va += insn.size
+        if not pushed:
+            return 0
+        cookies = set(COOKIE_CHECKS.get(getattr(self.tr.img, 'edition', None), {}))
+        index = {a: i for i, a in enumerate(self.order)}
+        keep = pushed
+        for r in rets:
+            popped = 0
+            dirty = 0  # written after its pop (walking back: seen before the pop)
+            i = index[r]
+            while i > 0:
+                prev = self.order[i - 1]
+                cur = self.order[i]
+                if self.insns[prev].address + self.insns[prev].size != cur or cur in self.branch_in:
+                    break  # another path joins here: earlier pops are not on it
+                insn = self.insns[prev]
+                m = insn.mnemonic.split()[-1]
+                if m == 'call':
+                    op = insn.operands[0]
+                    if not (op.type == X.X86_OP_IMM and (op.imm & 0xFFFFFFFF) in cookies):
+                        break
+                elif m == 'leave':
+                    if not (dirty & 2):
+                        popped |= 2
+                elif m == 'pop' and insn.op_str in ('ebx', 'ebp', 'esi', 'edi'):
+                    bit = dict(self.PRESERVABLE)[insn.op_str]
+                    if not (dirty & bit):
+                        popped |= bit
+                else:
+                    if F.cc_of(m) is not None or m.startswith('j'):
+                        break
+                    for name, bit in self.PRESERVABLE:
+                        if not (popped & bit) and self.writes_reg(insn, name):
+                            dirty |= bit
+                i -= 1
+            keep &= popped & ~dirty
+            if not keep:
+                return 0
+        return keep
 
     def leaves(self, va):
         """True when control can go from `va` to code outside this function
@@ -1239,18 +1321,33 @@ class FunctionTranslator(X87Mixin, SseMixin):
                 # register, so the call's SYNC / RELOAD (and the callee's own)
                 # are skipped. The flags it sets are dead here; the return
                 # address stays below esp as the real call leaves it.
-                s.append('if (ecx == ld32(M, %s)) { esp += 4; } else { %s; %s; RELOAD(); }' % (
-                    h(cookie[0]), self.sync_to(t), self.call_expr(t)))
+                s.append('if (ecx == ld32(M, %s)) { esp += 4; } else { %s; %s; %s; }' % (
+                    h(cookie[0]), self.sync_to(t), self.call_expr(t), self.reload_after(insn, t)))
             else:
-                s.append('%s; %s; RELOAD();' % (self.sync_to(t), self.call_expr(t)))
+                s.append('%s; %s; %s;' % (self.sync_to(t), self.call_expr(t), self.reload_after(insn, t)))
         elif self.inline_import(insn, op, ret, s):
             pass
         else:
-            s.append('{ uint32_t t_ = %s; esp -= 4; st32(M, esp, %s); SYNC(); call_indirect(c, t_); RELOAD(); }' % (
-                self.read(insn, op, 4), h(ret)))
+            s.append('{ uint32_t t_ = %s; esp -= 4; st32(M, esp, %s); SYNC(); call_indirect(c, t_); %s; }' % (
+                self.read(insn, op, 4), h(ret), self.reload_after(insn, None)))
         if insn.address in self.fn.noreturn_calls:
             s.append('SYNC(); trap(c, %s, "returned from a call that never returns");' % h(insn.address))
         self.out.extend(s)
+
+    def flags_live_after(self, insn):
+        if self.tr.flags_live_at_exit or self.entry in self.tr.flags_returned:
+            return True  # a ret may hand them on
+        return bool(self.live_out[insn.address] & F.ALL)
+
+    def reload_after(self, insn, target):
+        """The registers read back after a call: RELOAD_AFTER(target, flags) is
+        resolved once every function is translated (resolve_sync_to), to the
+        registers `target` may change; an indirect call reloads them all, the
+        flags only when something reads them before writing them."""
+        flags = 1 if self.flags_live_after(insn) else 0
+        if target is None:
+            return 'RELOAD()' if flags else 'RELOAD_M(15)'
+        return 'RELOAD_AFTER(%s, %d)' % (h(target), flags)
 
     # kernel32 imports called through the IAT that are done in place: the same
     # work as the host handler (win32.cpp), without leaving translated code.
@@ -1410,6 +1507,13 @@ SITE_OVERRIDES = {
     },
 }
 
+# TRANSLATE_PRESERVE=1: callers reload only the registers a callee may change
+# (preserved_regs, RELOAD_AFTER). Correct on the Mac tests and Phase 5, but it
+# gained nothing on an iPhone (52.6 / 53.3 pictures a second against 53.4 /
+# 54.0): the reloads hit the L1 cache and overlap other work. Off by default.
+import os as _os
+PRESERVE_ANALYSIS = _os.environ.get('TRANSLATE_PRESERVE', '0') == '1'
+
 # Callers whose direct callees are inlined up to a larger size than
 # Translator.INLINE_MAX: caller -> limit. Tried on the engine's draw path
 # ({0x6CFDB0: 300, 0x733490: 300}: every direct call in the draw function
@@ -1457,6 +1561,7 @@ class Translator:
         self.flags_returned = set()  # see find_flag_returning
         self.inline_cache = {}
         self.entry_reads_flags = set()
+        self.preserves = {}  # entry -> registers it returns unchanged (preserved_regs)
         self.imports = image.imports()
         self.functions = {fn['entry']: fn for fn in data['functions']}
         self.entries = set(self.functions)
@@ -1514,6 +1619,8 @@ class Translator:
         text = ft.translate()
         if ft.live_in.get(entry, F.ALL) & F.ALL:
             self.entry_reads_flags.add(entry)
+        if PRESERVE_ANALYSIS:
+            self.preserves[entry] = ft.preserved_regs()
         return text, ft.refs, len(fn.insns), ft.trapped
 
     SYNC_TO = re.compile(r'\bSYNC_TO\(0x([0-9A-F]+)u\)')
@@ -1524,7 +1631,15 @@ class Translator:
         def one(m):
             t = int(m.group(1), 16)
             return 'SYNC_R()' if t in translated and t not in self.entry_reads_flags else 'SYNC()'
-        return self.SYNC_TO.sub(one, text)
+
+        def after(m):
+            t, flags = int(m.group(1), 16), int(m.group(2))
+            kept = self.preserves.get(t, 0) if t in translated else 0
+            mask = (15 & ~kept) | (16 if flags else 0)
+            return 'RELOAD()' if mask == 31 else 'RELOAD_M(%d)' % mask
+        return self.RELOAD_AFTER.sub(after, self.SYNC_TO.sub(one, text))
+
+    RELOAD_AFTER = re.compile(r'\bRELOAD_AFTER\(0x([0-9A-F]+)u, ([01])\)')
 
 
 def find_flag_returning(tr, entries):

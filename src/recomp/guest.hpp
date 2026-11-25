@@ -249,6 +249,16 @@ using namespace dcusa::recomp;
 #define SYNC_R()                                                                                     \
     (c.r[0] = eax, c.r[1] = ecx, c.r[2] = edx, c.r[3] = ebx, c.r[4] = esp, c.r[5] = ebp, c.r[6] = esi, \
      c.r[7] = edi)
+// The read-back after a call to a callee that returns some registers
+// unchanged (translate.py preserved_regs): eax, ecx, edx and esp always, then
+// by `m`: 1 ebx, 2 ebp, 4 esi, 8 edi, 16 the flags. RELOAD() is RELOAD_M(31).
+#define RELOAD_M(m)                                                                                  \
+    (eax = c.r[0], ecx = c.r[1], edx = c.r[2], esp = c.r[4], ((m) & 1 ? (void)(ebx = c.r[3]) : (void)0), \
+     ((m) & 2 ? (void)(ebp = c.r[5]) : (void)0), ((m) & 4 ? (void)(esi = c.r[6]) : (void)0),          \
+     ((m) & 8 ? (void)(edi = c.r[7]) : (void)0),                                                       \
+     ((m) & 16 ? (void)(cf = c.cf, pf = c.pf, af = c.af, zf = c.zf, sf = c.sf, of = c.of) : (void)0))
+// Left unresolved (the semantics tests): everything.
+#define RELOAD_AFTER(target, flags) RELOAD()
 #define RELOAD()                                                                                     \
     (eax = c.r[0], ecx = c.r[1], edx = c.r[2], ebx = c.r[3], esp = c.r[4], ebp = c.r[5], esi = c.r[6], \
      edi = c.r[7], cf = c.cf, pf = c.pf, af = c.af, zf = c.zf, sf = c.sf, of = c.of)

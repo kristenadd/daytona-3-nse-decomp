@@ -36,4 +36,7 @@ private:
     std::uint32_t entry_ = 0;
 };
 
+// The loaded game image's guest address range (0, 0 before one is loaded).
+inline std::uint32_t g_image_lo = 0, g_image_hi = 0;
+
 }

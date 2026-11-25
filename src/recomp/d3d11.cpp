@@ -27,6 +27,8 @@
 #include "gpu/metal.hpp"
 #include "recomp/guest.hpp"
 #include "recomp/guest_memory.hpp"
+#include "recomp/loader.hpp"
+#include "recomp/host_files.hpp"
 #include "recomp/threads.hpp"
 #include "gpu/boot_screen.hpp"
 #include "build_info.hpp"
@@ -1967,7 +1969,8 @@ void pace_present(Cpu& c, std::uint32_t sync_interval) {
     static std::uint32_t last_state = 0;
     static std::uint32_t presents = 0;
     ++presents;
-    const std::uint32_t state = ld32(c.mem, 0x1735608u);
+    // Only a loaded game image has the boot state (a test's guest memory has no image there).
+    const std::uint32_t state = g_image_lo <= 0x1735608u && 0x1735608u + 4u <= g_image_hi ? ld32(c.mem, 0x1735608u) : 8u;
     g_boot_state = state;
     if (state != last_state) {
         std::fprintf(stderr, "boot state %u at %.1f s, present %u\n", state,

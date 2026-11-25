@@ -113,7 +113,13 @@ agreed to this).
       nothing on the phone (53.4 / 54.0 / 53.9 pictures), so with the native
       glow the shadow maps no longer limit it (`DCUSA_SHADOW_DROP=<k,...>`
       stays as a test). The limit is now the main thread in busy scenes
-      (grandstand straight, packs of cars: 1,700-1,900 draws). Then: the main thread's spread of 1-5%
+      (grandstand straight, packs of cars: 1,700-1,900 draws). There 84% of
+      the main thread is the translated game code; our host code is about
+      16% (virtual call dispatch 4.7%, queue byte copies 2.8%). Reloading only
+      the registers a callee may change and skipping dead flags after calls
+      (`TRANSLATE_PRESERVE=1`, translate.py preserved_regs) passed every
+      test but gained nothing on the phone, so register traffic around calls
+      is not the cost. Then: the main thread's spread of 1-5%
       costs (scene walk loop memory misses, draw path 0x6CFDB0, 0x458BC0,
       the Model 2 interpreter loop).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit

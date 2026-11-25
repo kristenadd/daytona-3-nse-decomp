@@ -111,6 +111,8 @@ bool GuestProcess::load(const dcusa::ExeImage& image, std::string* error) {
     if (!memory_.reserve(error)) return false;
     if (!memory_.commit(view.image_base, view.image_size, error)) return false;
     std::memcpy(memory_.host(view.image_base), image.bytes.data(), view.image_size);
+    g_image_lo = view.image_base;
+    g_image_hi = view.image_base + view.image_size;
 
     std::uint8_t* M = memory_.base();
     std::vector<std::uint32_t> slots;
