@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -193,7 +194,13 @@ std::unordered_map<std::uint32_t, gpu::DepthDesc> depth_states;
 std::uint32_t g_last_blend = ~0u, g_last_depth = ~0u, g_last_raster = ~0u;
 
 std::unordered_map<std::uint32_t, gpu::RasterDesc> raster_states;
-std::unordered_map<std::uint32_t, std::vector<gpu::VertexElement>> gpu_layouts;
+// Each InputLayout's elements, kept for good (a draw state points at them).
+struct StoredLayout {
+    const std::vector<gpu::VertexElement>* elements = nullptr;
+    std::uint32_t serial = 0;
+};
+std::unordered_map<std::uint32_t, StoredLayout> gpu_layouts;
+std::deque<std::vector<gpu::VertexElement>> layout_store;
 float g_proj[16]{};
 bool g_have_proj = false;
 bool g_world_tri = false;
@@ -1413,7 +1420,8 @@ void create_layout(Cpu& c) {
         }
         elements.push_back(g);
     }
-    gpu_layouts[obj] = std::move(elements);
+    layout_store.push_back(std::move(elements));
+    gpu_layouts[obj] = StoredLayout{&layout_store.back(), static_cast<std::uint32_t>(layout_store.size())};
     layouts[obj] = std::move(layout);
     if (out != 0) st32(c.mem, out, obj);
     ret_stdcall(c, kSOk, 24);
@@ -2895,8 +2903,13 @@ void ps_set_constants(Cpu& c) {                                    // +0x40  0x6
 }
 void ia_set_layout(Cpu& c) {                                      // +0x44  0x6D0723
     pipe.layout = arg(c, 1);
-    if (const auto it = gpu_layouts.find(arg(c, 1)); it != gpu_layouts.end()) gs.layout = it->second;
-    else gs.layout.clear();
+    if (const auto it = gpu_layouts.find(arg(c, 1)); it != gpu_layouts.end()) {
+        gs.layout = it->second.elements;
+        gs.layout_serial = it->second.serial;
+    } else {
+        gs.layout = nullptr;
+        gs.layout_serial = 0;
+    }
     ret_stdcall(c, kSOk, 8);
 }
 void ia_set_vertices(Cpu& c) {                                     // +0x48  0x6CFF35

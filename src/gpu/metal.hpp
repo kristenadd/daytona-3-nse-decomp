@@ -82,7 +82,10 @@ constexpr unsigned kTargets = 8, kSlots = 16, kBuffers = 14, kStreams = 8;
 // Everything a draw reads. Resource fields are guest object addresses (0 = none).
 struct DrawState {
     std::uint64_t vs = 0, ps = 0;  // compile request keys
-    std::vector<VertexElement> layout;
+    // The input layout: a stored copy that is never freed (InputLayout objects
+    // are few), so a draw copies a pointer, and its serial keys the pipeline.
+    const std::vector<VertexElement>* layout = nullptr;
+    std::uint32_t layout_serial = 0;
     std::uint32_t vb[kStreams]{}, stride[kStreams]{}, voff[kStreams]{};
     std::uint32_t ib = 0, ib_format = 0, ib_off = 0, topology = 4;
     std::uint32_t vs_cb[kBuffers]{}, ps_cb[kBuffers]{};

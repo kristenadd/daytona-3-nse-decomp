@@ -1007,14 +1007,7 @@ const Pipeline* pipeline(const DrawState& s, Program& vs, Program& ps) {
     auto put = [](std::uint64_t v) { k.append(reinterpret_cast<const char*>(&v), sizeof v); };
     put(s.vs);
     put(s.ps);
-    for (const VertexElement& e : s.layout) {
-        k.append(e.semantic);
-        k.push_back('\0');
-        put(std::uint64_t(e.index) | std::uint64_t(e.format) << 32);
-        put(std::uint64_t(e.slot) | std::uint64_t(e.offset) << 32);
-        put(std::uint64_t(e.instance) | std::uint64_t(e.step) << 32);
-    }
-    k.push_back('\1');
+    put(s.layout_serial);
     for (unsigned i = 0; i < kStreams; ++i) put(s.stride[i]);
     for (unsigned i = 0; i < kTargets; ++i) {
         Texture* t = s.rtv[i] ? texture(s.rtv[i]) : nullptr;
@@ -1038,8 +1031,9 @@ const Pipeline* pipeline(const DrawState& s, Program& vs, Program& ps) {
     bool used[kStreams]{};
     for (const Program::Input& in : vs.inputs) {
         const VertexElement* found = nullptr;
-        for (const VertexElement& e : s.layout)
-            if (upper(e.semantic) == in.semantic && e.index == in.index) found = &e;
+        if (s.layout != nullptr)
+            for (const VertexElement& e : *s.layout)
+                if (upper(e.semantic) == in.semantic && e.index == in.index) found = &e;
         if (found == nullptr || found->slot >= kStreams) {
             problem("input layout has no " + in.semantic + std::to_string(in.index) + " for VS " + key_text(s.vs));
             d.pipelines[k] = Pipeline{};
@@ -1346,8 +1340,9 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
             }
         }
     std::uint32_t streams = 0;
-    for (const VertexElement& el : s.layout)
-        if (el.slot < kStreams) streams |= 1u << el.slot;
+    if (s.layout != nullptr)
+        for (const VertexElement& el : *s.layout)
+            if (el.slot < kStreams) streams |= 1u << el.slot;
     for (std::uint32_t m = streams; m != 0; m &= m - 1) {
         const unsigned i = static_cast<unsigned>(__builtin_ctz(m));
         auto it = s.vb[i] ? d.buffers.find(s.vb[i]) : d.buffers.end();

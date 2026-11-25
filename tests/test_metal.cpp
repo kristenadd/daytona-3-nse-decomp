@@ -107,7 +107,10 @@ int main() {
     gpu::DrawState s;
     s.vs = kVs;
     s.ps = kPs;
-    s.layout = {{"POSITION", 0, 6, 0, 0, false, 0}, {"TEXCOORD", 0, 16, 0, 12, false, 0}};
+    static const std::vector<dcusa::gpu::VertexElement> layout = {{"POSITION", 0, 6, 0, 0, false, 0},
+                                                                   {"TEXCOORD", 0, 16, 0, 12, false, 0}};
+    s.layout = &layout;
+    s.layout_serial = 1;
     s.vb[0] = kVb;
     s.stride[0] = sizeof(Vertex);
     s.ib = kIb;
