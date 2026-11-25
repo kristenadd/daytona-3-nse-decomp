@@ -1833,7 +1833,9 @@ void clear_depth(std::uint32_t key, float depth, std::uint8_t stencil, std::uint
     if (!enabled()) return;
     Texture* t = texture(key);
     if (t == nullptr || !t->depth) return;
-    if (t->shadow && shadow_every() > 1 && shadow_phase_skips()) return;  // keeps the last shadows
+    // Every n-th frame: the skipped frames keep the last shadows. Off (0): the
+    // maps are still cleared each frame, so they hold no shadows.
+    if (t->shadow && shadow_every() > 1 && shadow_phase_skips()) return;
     if (attached(key)) end_pass();
     ++t->written;
     if (flags & 1u) t->clear_depth = depth;
@@ -1887,17 +1889,19 @@ bool small_source(const DrawState& s) {
 }
 
 // The glow chain (the bloom / glare passes' small downsample and blur draws).
-// DCUSA_GLOW_EVERY=<n>: drawn on every n-th frame that has them (iOS 2,
-// elsewhere 1); in between its targets keep the last frame's glow, which the
+// DCUSA_GLOW_EVERY=<n>: drawn on every n-th frame that has them (default 1;
+// 0 off, the targets cleared). On an iPhone every other frame showed stale,
+// broken glow in between, so it is not the default there; in between its targets keep the last frame's glow, which the
 // composite reads one frame late. The game does not clear these targets.
 bool glow_skipped(std::uint64_t ps) {
     if (ps != 0x4ae3dda931a688a0ull && ps != 0xbe32070ae50eb03bull && ps != 0x49ba19fcf203dc15ull) return false;
     static const unsigned every = [] {
         const char* e = std::getenv("DCUSA_GLOW_EVERY");
-        const int n = e != nullptr ? std::atoi(e) : (TARGET_OS_IPHONE ? 2 : 1);
-        return static_cast<unsigned>(n < 1 ? 1 : n);
+        const int n = e != nullptr ? std::atoi(e) : 1;
+        return static_cast<unsigned>(n < 0 ? 1 : n);
     }();
     if (every == 1) return false;
+    if (every == 0) return true;  // off: the targets are cleared instead (skipped_draw)
     static std::uint64_t frame = ~0ull;
     static unsigned phase = 0;
     if (g_dev->stats.frames != frame) {  // the first glow draw of a frame
@@ -1909,19 +1913,22 @@ bool glow_skipped(std::uint64_t ps) {
 
 // The dynamic shadow maps (the cascades: depth textures of at most 1024
 // drawn into with no colour target). DCUSA_SHADOW_EVERY=<n>: drawn on every
-// n-th frame that draws them (iOS 2, elsewhere 1). In between, their clear
+// n-th frame that draws them (default 1; 0 off, the maps only cleared). On
+// an iPhone every other frame flickered with stale shadows, so it is not the
+// default there. In between, their clear
 // and draws are left out, so they keep the last frame's shadows. The static
 // shadow maps (2048 and up, baked now and then) are never left out.
 unsigned shadow_every() {
     static const unsigned every = [] {
         const char* e = std::getenv("DCUSA_SHADOW_EVERY");
-        const int n = e != nullptr ? std::atoi(e) : (TARGET_OS_IPHONE ? 2 : 1);
-        return static_cast<unsigned>(n < 1 ? 1 : n);
+        const int n = e != nullptr ? std::atoi(e) : 1;
+        return static_cast<unsigned>(n < 0 ? 1 : n);
     }();
     return every;
 }
 
 bool shadow_phase_skips() {
+    if (shadow_every() == 0) return true;
     static std::uint64_t frame = ~0ull;
     static unsigned phase = 0;
     if (g_dev->stats.frames != frame) {  // the first shadow work of a frame
@@ -1943,8 +1950,19 @@ bool shadow_skipped(const DrawState& s) {
     return shadow_phase_skips();
 }
 
+void clear_target(std::uint32_t key, std::uint32_t mip, std::uint32_t slice, const float rgba[4]);
+
 bool skipped_draw(const DrawState& s) {
-    if (glow_skipped(s.ps) || shadow_skipped(s)) return true;
+    if (glow_skipped(s.ps)) {
+        // Off (DCUSA_GLOW_EVERY=0): a glow target holds no glow rather than an old one.
+        static const bool off = [] { const char* e = std::getenv("DCUSA_GLOW_EVERY"); return e != nullptr && std::atoi(e) == 0; }();
+        if (off && s.rtv[0] != 0) {
+            const float zero[4] = {0, 0, 0, 0};
+            clear_target(s.rtv[0], s.rtv_mip[0], s.rtv_slice[0], zero);
+        }
+        return true;
+    }
+    if (shadow_skipped(s)) return true;
     static const std::vector<std::uint64_t> ps = hex_list("DCUSA_SKIP_PS"), srv = hex_list("DCUSA_SKIP_SRV");
     static const std::pair<std::uint64_t, std::uint32_t> ps_rt = [] {
         std::pair<std::uint64_t, std::uint32_t> out{0, 0};
