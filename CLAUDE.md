@@ -152,7 +152,8 @@ agreed to this).
 
 ## Future work
 
-- **Attract playlist** (`DCUSA_ATTRACT_PLAYLIST=1,2,3,4,5,6`, repeating; one
+- **Attract playlist** (not wanted for now: the user is content with the fixed
+  order after boot as the test) (`DCUSA_ATTRACT_PLAYLIST=1,2,3,4,5,6`, repeating; one
   number forces that course; blank keeps the game's choice; an iOS Settings
   field and a Mac app default). Courses by the user's numbering: 1 Daytona
   International Speedway, 2 Three Seven Speedway, 3 Lakeside Castle, 4
