@@ -64,18 +64,23 @@ agreed to this).
    Max** (see below). Still to do, in this order:
    A game controller is required; touch controls are not wanted (the user's
    decision).
-   1. **More pictures a second.** Races take about 20.6 ms a frame on the
-      phone (25 before; PHASE3 "Frame rate on an iPhone"). Frame skip keeps
-      the game at 60 ticks a second, drawing about 45 pictures (43 before the
-      scene walk fast path, PHASE3). The limit is
-      the game's main thread, about 16 ms of its own code a race frame, plus
-      the render thread waiting on the GPU (about 6.5 ms of back-pressure).
-      In a Mac race profile the scene render `0x4DC120` is about 80% of the
-      main thread, the scene walk `0x43FA90` about half. Candidates: the
-      Model 2 (i960) code translated to native code instead of interpreted
-      (13 to 20%); the D3D layer's per-draw work (12%); memory stalls in the
-      scene walk (object traversal 0x4423B0, 14% on the phone). Inlining the
-      draw path, PGO and an order file gained nothing.
+   1. **More pictures a second (goal: a steady 60 on the iPhone).** Races
+      run at 60 ticks with frame skip, drawing about 44 pictures a second
+      (`DCUSA_SKIP_LOG` averages over ticks 16,500 to 21,500 of the scripted
+      race, `race_attract.txt`, `DCUSA_PAD_SCRIPT_FROM=attract
+      DCUSA_BOOT_PACE=0`; runs vary by about 1 picture and up to 3 ms of tick
+      CPU, so compare same-build A/B runs). Done: the scene walk fast path
+      and buffer homes took a rendered tick's main-thread CPU from about 17
+      to 9.4 ms. Now the main thread mostly waits: a skipped tick is 1.5 ms
+      of CPU in 15 ms, the render thread waits about 10 ms a batch on the
+      GPU (`DCUSA_RT_LOG`). A heavy frame has 49 GPU passes; the bloom /
+      glare chain's small passes (64x64, 128x128, 1x1, one draw each) take
+      1.6 to 3.5 ms each in `DCUSA_GPU_PASSES` (inflated by the profiling).
+      No gain from: more frames in flight, a third render-queue batch (the
+      main thread slowed: two P cores), MSAA 2 or off, 1280x720 output,
+      smaller shadow maps, the 120 Hz layer, GPU times scaled 1.4,
+      prefetching the dirty flags. Next ideas: fewer, merged post passes on
+      iOS (a visual change), cheaper render-thread encoding.
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
