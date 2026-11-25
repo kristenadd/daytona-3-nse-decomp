@@ -1927,11 +1927,15 @@ bool g_render_skipped = false;
 // next present (the game's own work and any wait on the render thread), kept
 // apart for ticks that rendered and ticks that skipped (DCUSA_SKIP_LOG).
 std::chrono::steady_clock::time_point g_tick_start{};
+double g_gpu_sum = 0, g_gpu_max = 0;
+int g_gpu_n = 0;
 double g_tick_ms[2]{}, g_tick_cpu_ms[2]{}, g_tick_draws[2]{};
 std::uint32_t g_tick_n[2]{};
 // The slowest tick of each logged interval: its wall and CPU time, present
 // number and draws, and the time since the first present (DCUSA_SKIP_LOG).
-double g_slow_ms = 0, g_slow_cpu = 0;
+double g_slow_pipe = 0, g_slow_tex = 0; unsigned g_slow_pipes = 0;
+double g_slow_ms = 0, g_slow_cpu = 0, g_slow_handover = 0, g_slow_preempt = 0, g_slow_yield = 0, g_slow_wait = 0;
+std::uint64_t g_tick_preempt0 = 0, g_tick_yield0 = 0;
 int g_slow_present = 0;
 std::uint32_t g_slow_draws = 0;
 double g_tick_cpu_start = 0;
@@ -2151,6 +2155,9 @@ void present(Cpu& c) {
         static double handover_ms = 0, wait_ms = 0;
         handover_ms += hitch::g_ns[hitch::Handover].load() / 1e6;
         wait_ms += hitch::g_ns[hitch::Wait].load() / 1e6;
+        const double tick_handover = hitch::g_ns[hitch::Handover].load() / 1e6, tick_wait = hitch::g_ns[hitch::Wait].load() / 1e6;
+        const double tick_pipe = hitch::g_ns[hitch::Pipeline].load() / 1e6, tick_tex = (hitch::g_ns[hitch::Texture].load() + hitch::g_ns[hitch::Buffer].load()) / 1e6;
+        const unsigned tick_pipes = hitch::g_calls[hitch::Pipeline].load();
         report_hitch(all_presents);
         // DCUSA_SKIP_LOG=<n>: every n presents, the game's tick rate (60 is full
         // speed) and how many of those ticks left out the scene render.
@@ -2165,6 +2172,13 @@ void present(Cpu& c) {
                 g_slow_cpu = cpu_now;
                 g_slow_present = all_presents;
                 g_slow_draws = g_frame_draws;
+                g_slow_handover = tick_handover;
+                g_slow_pipe = tick_pipe;
+                g_slow_pipes = tick_pipes;
+                g_slow_tex = tick_tex;
+                g_slow_wait = tick_wait;
+                g_slow_preempt = (g_preempt_ns.load() - g_tick_preempt0) / 1e6;
+                g_slow_yield = (g_yield_ns.load() - g_tick_yield0) / 1e6;
             }
             g_tick_draws[kind] += g_frame_draws;
             ++g_tick_n[kind];
@@ -2181,6 +2195,13 @@ void present(Cpu& c) {
                          g_tick_n[0] ? g_tick_cpu_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_cpu_ms[1] / g_tick_n[1] : 0.0,
                          g_tick_n[0] ? g_tick_draws[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_draws[1] / g_tick_n[1] : 0.0);
             {
+                // GPU time per frame over the interval (command buffer start to end).
+                std::fprintf(stderr, "gpu %d: %.2f ms mean, %.2f ms max per frame\n", all_presents, g_gpu_n ? g_gpu_sum / g_gpu_n : 0.0, g_gpu_max);
+                g_gpu_sum = 0;
+                g_gpu_max = 0;
+                g_gpu_n = 0;
+            }
+            {
                 static std::uint64_t last_yield = 0;
                 const std::uint64_t y = g_yield_ns.load();
                 static std::uint64_t last_pre = 0;
@@ -2195,9 +2216,9 @@ void present(Cpu& c) {
                              handover_ms / skip_every, wait_ms / skip_every);
             {
                 static const auto first = std::chrono::steady_clock::now();
-                std::fprintf(stderr, "slowest %d: present %d at %.1f s, %.1f ms (cpu %.1f ms), %u draws\n", all_presents,
+                std::fprintf(stderr, "slowest %d: present %d at %.1f s, %.1f ms (cpu %.1f ms), %u draws, handover %.1f wait %.1f preempt %.1f yield %.1f ms, pipelines %u %.1f ms, resources %.1f ms\n", all_presents,
                              g_slow_present, std::chrono::duration<double>(std::chrono::steady_clock::now() - first).count(),
-                             g_slow_ms, g_slow_cpu, g_slow_draws);
+                             g_slow_ms, g_slow_cpu, g_slow_draws, g_slow_handover, g_slow_wait, g_slow_preempt, g_slow_yield, g_slow_pipes, g_slow_pipe, g_slow_tex);
                 g_slow_ms = 0;
             }
             handover_ms = wait_ms = 0;
@@ -2215,6 +2236,17 @@ void present(Cpu& c) {
     }
     pace_present(c, arg(c, 1));
     g_tick_start = std::chrono::steady_clock::now();
+    if (g_frames_presented > 4) {  // a frame the GPU has finished by now
+        std::uint64_t a = 0, b = 0;
+        if (gpu::frame_gpu_times(g_frames_presented - 4, &a, &b) && b > a) {
+            const double ms = (b - a) / 1000.0;
+            g_gpu_sum += ms;
+            g_gpu_max = std::max(g_gpu_max, ms);
+            ++g_gpu_n;
+        }
+    }
+    g_tick_preempt0 = g_preempt_ns.load();
+    g_tick_yield0 = g_yield_ns.load();
     g_tick_cpu_start = thread_cpu_ms();
     // DCUSA_PAD_SCRIPT_FROM=attract: a pad script's frame 1 is the first present
     // of attract (boot state 8), so one script fits a paced or unpaced boot.

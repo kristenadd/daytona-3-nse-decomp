@@ -262,7 +262,7 @@ only the keys given, and whether that edition reads one is not checked.
 | `DCUSA_READBACK=1` | Read every frame back from the GPU. |
 | `DCUSA_EXIT_AT=<n>` | Exit cleanly after n presents (an instrumented build writes its profile). |
 | `DCUSA_HITCH=<ms>` | One line for each frame slower than this, with where the time went. |
-| `DCUSA_SKIP_LOG=<n>` | Every n presents, ticks per second and how many skipped the render. |
+| `DCUSA_SKIP_LOG=<n>` | Every n presents, ticks per second and how many skipped the render, tick wall and CPU times, draws, GPU time per frame (mean and max), time given to other guest threads, and the slowest frame with its breakdown. |
 | `DCUSA_MEM=<n>` | Every n presents, host memory by kind (with `DCUSA_GPU_THREAD=0`). |
 | `DCUSA_MEM_LIST=1` | List the Metal allocations in the memory report. |
 | `DCUSA_MAP_STATS=<n>` | Every n presents, D3D Map calls by type and bytes. |
