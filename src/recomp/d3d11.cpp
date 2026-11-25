@@ -92,6 +92,7 @@ constexpr std::uint32_t kMapBytes = 64u << 20;
 // Shader reflection adds a buffer, variable and type object per constant. The
 // pool ends at 0x220000, below the image at 0x400000.
 constexpr std::uint32_t kPoolCap = 1u << 20;
+
 std::uint32_t pool_used = 0;
 
 struct StoredBytes {
@@ -126,8 +127,17 @@ struct LiveMap {
 // stale). A race maps about 650 buffers a frame, 4.4 MB on the Mac: the copies
 // were about a tenth of an iPhone's main thread. UpdateSubresource on such a
 // buffer writes its home too.
-constexpr std::uint32_t kBufferHomes = 0x37000000u;
+// In high memory nothing else uses: above the object pool (kPool), below the
+// COM thunks. They were at 0x37000000 at first, which is the process heap's
+// second region (kHeap2): the game's constants were written over heap objects
+// and the game faulted minutes later (attract, after races).
+constexpr std::uint32_t kBufferHomes = 0xF0000000u;
 constexpr std::uint32_t kBufferHomeBytes = 64u << 20;
+static_assert(kBufferHomes >= kPool + kPoolCap * 0x40u, "buffer homes overlap the object pool");
+static_assert(std::uint64_t(kBufferHomes) + kBufferHomeBytes <= kComCall, "buffer homes overlap the COM thunks");
+static_assert(kBufferHomes >= kHeap2 + kHeap2Bytes || std::uint64_t(kBufferHomes) + kBufferHomeBytes <= kHeap2,
+              "buffer homes overlap the heap's second region");
+static_assert(kBufferHomes >= 0xE0000000u, "buffer homes overlap the heap's third region or VirtualAlloc's");
 std::unordered_map<std::uint32_t, std::uint32_t> buffer_home;  // resource -> home
 std::unordered_map<std::uint32_t, std::uint32_t> home_size;    // home -> its 64-byte multiple
 std::unordered_multimap<std::uint32_t, std::uint32_t> free_homes;  // size -> home, from released buffers
@@ -2180,7 +2190,10 @@ void memdump(const std::uint8_t* mem, int present_no) {
                                  reinterpret_cast<vm_address_t>(page.data()), &got) == KERN_SUCCESS &&
                got == kPage;
     };
-    for (std::uint64_t a = 0x10000; a < 0x80000000ull; a += kPage) {
+    // DCUSA_MEMDUMP_IMAGE=1: only the program image (its globals).
+    static const bool image_only = std::getenv("DCUSA_MEMDUMP_IMAGE") != nullptr;
+    const std::uint64_t lo = image_only ? g_image_lo : 0x10000, hi = image_only ? g_image_hi : 0x80000000ull;
+    for (std::uint64_t a = lo / kPage * kPage; a < hi; a += kPage) {
         if (watch_readable(static_cast<std::uint32_t>(a)) && mapped(a)) {
             if (len == 0) run = static_cast<std::uint32_t>(a);
             len += kPage;

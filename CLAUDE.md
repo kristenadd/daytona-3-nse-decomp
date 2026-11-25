@@ -185,10 +185,6 @@ agreed to this).
   width pin and again without it (`kPhoneIni` empty, dynamic resolution
   free). Fixed.
 - **iPhone races are below 60 fps** (about 20.6 ms a frame; item 8, "Speed").
-- Unpaced Mac runs (`DCUSA_NOPACE=1`, the scripted race) sometimes end in a
-  guest fault after the race, minutes past the measured window (unmapped
-  guest addresses 0x69DA4F, 0x42C9CB and others). Not investigated; normal
-  paced play has not shown it.
 - With `DCUSA_METAL=0` (the 2D software reference instead of Metal), a run
   stops at about present 120 on an `int3` at `0x6D14B8`, the end of
   `0x6D1460`. The Metal path, the default, is unaffected. Not investigated.
@@ -266,5 +262,13 @@ agreed to this).
   flash. The user approved it in a Mac window; on the iPhone the launch
   image shows on a cold start and the boot screen goes straight to the
   CRIWARE logo. README "Playing".
+- **Guest heap overwritten by buffer homes.** From 4a217e6 the D3D buffer
+  homes sat at 0x37000000, the process heap's second region (`kHeap2`): the
+  game's constants were written over heap objects and it faulted later, in
+  attract or after a race (a float such as 0x3DCCCCCD, 0.1, read as a pointer
+  in the pool walk at 0x6A3BD0). Unpaced 150 s attract runs faulted 4 of 6
+  times with homes, 0 of 6 without; with the homes at 0xF0000000 (static
+  asserts against the heaps, pool and COM thunks) 0 of 6, and a race with the
+  velocity skip ran 321 intervals (it had faulted at about 156, 9 of 9).
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.
