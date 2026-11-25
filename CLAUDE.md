@@ -152,6 +152,25 @@ agreed to this).
 
 ## Future work
 
+- **Attract playlist** (`DCUSA_ATTRACT_PLAYLIST=1,2,3,4,5,6`, repeating; one
+  number forces that course; blank keeps the game's choice; an iOS Settings
+  field and a Mac app default). Courses by the user's numbering: 1 Daytona
+  International Speedway, 2 Three Seven Speedway, 3 Lakeside Castle, 4
+  Dinosaur Canyon, 5 Metro City, 6 Seaside Street Galaxy. Found so far:
+  attract plays the same course order after every boot (Three Seven,
+  Lakeside, Metro, Canyon, Daytona, Metro, then Seaside among others; five
+  Mac runs), so it already works as a test, with the overlay's A (attract
+  ticks) and R (race timer) clocks to find a moment; demo start times drift
+  a second or two between runs. The choice is made by the emulated Model 2
+  code: the game runs the Daytona USA ROM (`rom/daytona_rom`; `fv_rom` is
+  Fighting Vipers) in an interpreter, whose stores go through 0x5E4B00 at
+  [0x1DE8830] + offset. 0x19C9CC4 (emulated RAM) alternates 1 and 2 across
+  demos; 0x15C1740 is 1 while a demo runs. No byte of the program image or
+  heap matched the course across labelled demos (`DCUSA_MEMDUMP`, grpscan).
+  Next: find the ROM's demo-course variable (the order is fixed, so a
+  counter or table in emulated RAM) and write it as each demo starts.
+  Tools: `DCUSA_WRITE_WATCH` (dcrun), `DCUSA_MEMDUMP[_IMAGE]`, `DCUSA_FIXED_CLOCK`.
+
 - **Boot time, further.** Boot to attract is now 37 s on the Mac and 56 s on
   the iPhone (131 s and 103 s before; PHASE3 "Boot time"). On the phone, 44 s
   of that is the loading screen, which advances with presents. Next ideas:
