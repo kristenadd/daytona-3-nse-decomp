@@ -1494,6 +1494,15 @@ SITE_OVERRIDES = {
         0x4423BA: ('', '{ const uint32_t t_ = ld32(M, eax + 0x2Cu); '
                        'if (t_ == 0x459580u && scene_object_clean(M, ecx)) { esp += 4u; } '
                        'else { esp -= 4; st32(M, esp, 0x4423BDu); SYNC(); call_indirect(c, t_); RELOAD(); } }'),
+        # The car reflection cube map: each frame the game re-renders [esp+0x10]
+        # of its six faces round-robin (its dynamic bake frequency, from GPU
+        # time; 0x442BF5 marks them, 0x43C7F0 renders them, 0x442C38 advances
+        # the face counter by the same count). cube_faces_cap (native.hpp) caps
+        # it (DCUSA_CUBE_FACES; iOS 1: the whole cube every six frames), written
+        # back so the counter moves on by what was drawn. The next instruction
+        # is a mov, and test esi, esi follows, so no flags are read here.
+        0x442BDF: ('', '{ uint32_t v_ = ld32(M, esp + 0x10u); const uint32_t cap_ = cube_faces_cap(); '
+                       'if ((int32_t)v_ > (int32_t)cap_) { v_ = cap_; st32(M, esp + 0x10u, v_); } esi = v_; }'),
         # The frame routine's scene render (0x4DD160: subsystem updates, the
         # Model 2 step, then this call). Left out when the frame is late
         # (frame_skip_render, d3d11.cpp); the call takes no arguments, and

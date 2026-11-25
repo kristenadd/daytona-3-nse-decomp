@@ -2833,8 +2833,46 @@ void resolve_shaders() {
         }
     }
 }
+// DCUSA_DRAW_STACK=<w>x<h>: for the first few draws into a render target of
+// that viewport size each 600 presents, the code addresses on the guest stack
+// (an approximate call chain), to find the game code behind a pass.
+void draw_stack_probe(Cpu& c) {
+    static const char* want = std::getenv("DCUSA_DRAW_STACK");
+    if (want == nullptr) return;
+    // DCUSA_DRAW_STACK=all: every draw of present DCUSA_DRAW_STACK_AT, one line each.
+    if (std::strcmp(want, "all") == 0) {
+        static const std::uint64_t at = std::getenv("DCUSA_DRAW_STACK_AT") ? std::atoll(std::getenv("DCUSA_DRAW_STACK_AT")) : 0;
+        if (g_frames_presented != at) return;
+        std::fprintf(stderr, "draw stack %gx%g:", gs.viewport[2], gs.viewport[3]);
+        const std::uint32_t esp = c.r[Cpu::ESP];
+        int n = 0;
+        for (std::uint32_t p = esp; p < esp + 0x3000u && n < 40; p += 4) {
+            const std::uint32_t v = ld32(c.mem, p);
+            if (v >= 0x401000u && v < 0xD00000u) std::fprintf(stderr, " %08X", v), ++n;
+        }
+        std::fprintf(stderr, "\n");
+        return;
+    }
+    char vp[32];
+    std::snprintf(vp, sizeof vp, "%gx%g", gs.viewport[2], gs.viewport[3]);
+    if (std::strcmp(vp, want) != 0) return;
+    static std::uint64_t last_frame = ~0ull;
+    static int shown = 0;
+    if (g_frames_presented / 600 != last_frame) last_frame = g_frames_presented / 600, shown = 0;
+    if (shown++ >= 3) return;
+    std::fprintf(stderr, "draw stack %s present %llu:", vp, static_cast<unsigned long long>(g_frames_presented));
+    const std::uint32_t esp = c.r[Cpu::ESP];
+    int n = 0;
+    for (std::uint32_t p = esp; p < esp + 0x2000u && n < 28; p += 4) {
+        const std::uint32_t v = ld32(c.mem, p);
+        if (v >= 0x401000u && v < 0xD00000u) std::fprintf(stderr, " %08X", v), ++n;
+    }
+    std::fprintf(stderr, "\n");
+}
+
 void draw_indexed(Cpu& c) {                                        // +0x30  0x6D0792
     g_mem_for_trace = c.mem;
+    draw_stack_probe(c);
     if (gpu::enabled()) {
         resolve_shaders();
         ++g_frame_draws;
@@ -4165,5 +4203,14 @@ bool frame_skip_render() {
 }
 
 void boot_progress(std::uint32_t percent) { g_boot_percent = static_cast<int>(std::min<std::uint32_t>(percent, 100)); }
+
+std::uint32_t cube_faces_cap() {
+    static const std::uint32_t cap = [] {
+        const char* e = std::getenv("DCUSA_CUBE_FACES");
+        const int n = e != nullptr ? std::atoi(e) : (TARGET_OS_IPHONE ? 1 : 6);
+        return static_cast<std::uint32_t>(n < 0 ? 0 : n);
+    }();
+    return cap;
+}
 
 }
