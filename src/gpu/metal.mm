@@ -33,6 +33,7 @@ struct Texture {
     TextureDesc desc;
     MTLPixelFormat format = MTLPixelFormatInvalid;
     bool depth = false;
+    bool shadow = false;  // drawn into with no colour target, square, at most 1024 (shadow_skipped)
     bool cube = false;  // a cube map (D3D11_RESOURCE_MISC_TEXTURECUBE): six faces per element
     // A BC texture on a GPU without BC sampling: held decoded (gpu/bc_decode),
     // each upload decoded on the way in.
@@ -1825,10 +1826,14 @@ void clear_target(std::uint32_t key, std::uint32_t mip, std::uint32_t slice, con
     ++g_dev->stats.clears;
 }
 
+unsigned shadow_every();
+bool shadow_phase_skips();
+
 void clear_depth(std::uint32_t key, float depth, std::uint8_t stencil, std::uint32_t flags) {
     if (!enabled()) return;
     Texture* t = texture(key);
     if (t == nullptr || !t->depth) return;
+    if (t->shadow && shadow_every() > 1 && shadow_phase_skips()) return;  // keeps the last shadows
     if (attached(key)) end_pass();
     ++t->written;
     if (flags & 1u) t->clear_depth = depth;
@@ -1902,8 +1907,44 @@ bool glow_skipped(std::uint64_t ps) {
     return phase != 0;
 }
 
+// The dynamic shadow maps (the cascades: depth textures of at most 1024
+// drawn into with no colour target). DCUSA_SHADOW_EVERY=<n>: drawn on every
+// n-th frame that draws them (iOS 2, elsewhere 1). In between, their clear
+// and draws are left out, so they keep the last frame's shadows. The static
+// shadow maps (2048 and up, baked now and then) are never left out.
+unsigned shadow_every() {
+    static const unsigned every = [] {
+        const char* e = std::getenv("DCUSA_SHADOW_EVERY");
+        const int n = e != nullptr ? std::atoi(e) : (TARGET_OS_IPHONE ? 2 : 1);
+        return static_cast<unsigned>(n < 1 ? 1 : n);
+    }();
+    return every;
+}
+
+bool shadow_phase_skips() {
+    static std::uint64_t frame = ~0ull;
+    static unsigned phase = 0;
+    if (g_dev->stats.frames != frame) {  // the first shadow work of a frame
+        frame = g_dev->stats.frames;
+        phase = (phase + 1) % shadow_every();
+    }
+    return phase != 0;
+}
+
+bool shadow_skipped(const DrawState& s) {
+    if (shadow_every() == 1 || s.rtv[0] != 0 || s.dsv == 0) return false;
+    auto it = g_dev->textures.find(s.dsv);
+    if (it == g_dev->textures.end()) return false;
+    Texture& t = it->second;
+    if (!t.shadow) {
+        if (!t.depth || t.desc.width != t.desc.height || t.desc.width > 1024) return false;
+        t.shadow = true;
+    }
+    return shadow_phase_skips();
+}
+
 bool skipped_draw(const DrawState& s) {
-    if (glow_skipped(s.ps)) return true;
+    if (glow_skipped(s.ps) || shadow_skipped(s)) return true;
     static const std::vector<std::uint64_t> ps = hex_list("DCUSA_SKIP_PS"), srv = hex_list("DCUSA_SKIP_SRV");
     static const std::pair<std::uint64_t, std::uint32_t> ps_rt = [] {
         std::pair<std::uint64_t, std::uint32_t> out{0, 0};

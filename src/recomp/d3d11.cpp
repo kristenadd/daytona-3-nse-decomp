@@ -1919,6 +1919,11 @@ bool g_render_skipped = false;
 std::chrono::steady_clock::time_point g_tick_start{};
 double g_tick_ms[2]{}, g_tick_cpu_ms[2]{}, g_tick_draws[2]{};
 std::uint32_t g_tick_n[2]{};
+// The slowest tick of each logged interval: its wall and CPU time, present
+// number and draws, and the time since the first present (DCUSA_SKIP_LOG).
+double g_slow_ms = 0, g_slow_cpu = 0;
+int g_slow_present = 0;
+std::uint32_t g_slow_draws = 0;
 double g_tick_cpu_start = 0;
 double thread_cpu_ms() {
     timespec t{};
@@ -2141,7 +2146,15 @@ void present(Cpu& c) {
         if (g_tick_start.time_since_epoch().count() != 0) {
             const int kind = g_render_skipped ? 1 : 0;
             g_tick_ms[kind] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_tick_start).count();
-            g_tick_cpu_ms[kind] += thread_cpu_ms() - g_tick_cpu_start;
+            const double cpu_now = thread_cpu_ms() - g_tick_cpu_start;
+            g_tick_cpu_ms[kind] += cpu_now;
+            if (const double wall_now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_tick_start).count();
+                wall_now > g_slow_ms) {
+                g_slow_ms = wall_now;
+                g_slow_cpu = cpu_now;
+                g_slow_present = all_presents;
+                g_slow_draws = g_frame_draws;
+            }
             g_tick_draws[kind] += g_frame_draws;
             ++g_tick_n[kind];
         }
@@ -2159,6 +2172,13 @@ void present(Cpu& c) {
             if (hitch::enabled())
                 std::fprintf(stderr, "waits %d: handover %.2f ms, guest threads %.2f ms per tick\n", all_presents,
                              handover_ms / skip_every, wait_ms / skip_every);
+            {
+                static const auto first = std::chrono::steady_clock::now();
+                std::fprintf(stderr, "slowest %d: present %d at %.1f s, %.1f ms (cpu %.1f ms), %u draws\n", all_presents,
+                             g_slow_present, std::chrono::duration<double>(std::chrono::steady_clock::now() - first).count(),
+                             g_slow_ms, g_slow_cpu, g_slow_draws);
+                g_slow_ms = 0;
+            }
             handover_ms = wait_ms = 0;
             g_tick_ms[0] = g_tick_ms[1] = 0;
             g_tick_cpu_ms[0] = g_tick_cpu_ms[1] = 0;

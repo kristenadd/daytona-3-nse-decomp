@@ -92,7 +92,11 @@ agreed to this).
       them off or the GPU reported slow). The CRI sound server in parallel on
       an efficiency core (`DCUSA_PARALLEL_THREADS=59E660
       DCUSA_PARALLEL_QOS=utility`) shortens a rendered tick by 1.2 ms but
-      not the average. Next: the main thread's spread of 1-5%
+      not the average. Shadow cascades every other frame on iOS
+      (`DCUSA_SHADOW_EVERY`): 53.1 and 53.2 pictures (51.1 same build).
+      Glow and dynamic shadows both off: 57.4, with slowest frames of 26 to
+      42 ms (some 17-18 ms of main-thread CPU at 1,850-2,080 draws, some
+      waits); the skip log's "slowest" line shows them. Next: the main thread's spread of 1-5%
       costs (scene walk loop memory misses, draw path 0x6CFDB0, 0x458BC0,
       the Model 2 interpreter loop).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
