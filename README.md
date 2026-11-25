@@ -235,6 +235,9 @@ only the keys given, and whether that edition reads one is not checked.
 | `DCUSA_INI=Section.Key=Value;...` | Override GameData/config.ini keys (above). |
 | `DCUSA_RESOLUTION=<w>x<h>` | Display size the game is told about (default 1920x1080). |
 | `DCUSA_MSAA=4\|2\|0` | Multisampling (default 4). With 0, FXAA is on instead. |
+| `DCUSA_MS_STORE=1\|never` | Multisampled samples: by default a pass only resolves them, and keeps them when the pass is ended by a blit, clear or mip generation in its middle (it resumes) or once a later pass has loaded them. `1`: always kept (as before); `never`: never kept (a test). `DCUSA_MS_LOG=1` logs surfaces that start keeping them (2: every load, 3: with who ended the pass). |
+| `DCUSA_TRIM_VS=1` | Each vertex shader compiled per pixel shader with only the outputs it reads (position only for depth-only passes). Off by default: no gain on an iPhone. |
+| `DCUSA_ENCODER_LABELS=1` | Names each Metal render encoder after its targets, for Instruments' Metal System Trace. |
 | `DCUSA_AA=1\|0\|split` | FXAA on, off, or on the right half only (default: on only without MSAA). |
 | `DCUSA_FRAME_SKIP=0\|1\|2` | Leave the scene render out of late ticks: 0 off (Mac default), 1 when late (iOS default), 2 every other tick (a test). |
 | `DCUSA_NOPACE=1` | No 60 Hz pacing (runs as fast as it can). |
@@ -259,10 +262,11 @@ only the keys given, and whether that edition reads one is not checked.
 | `DCUSA_EVERY=<n>` | Report (and with `DCUSA_FRAME`, write) every nth present. |
 | `DCUSA_FRAME=<prefix>` | Write frames as `<prefix>.<n>.ppm` (presents 1, 30, every `DCUSA_EVERY`). |
 | `DCUSA_FRAME_RANGE=<a>-<b>` | Write every present from a to b. |
+| `DCUSA_RACE_RANGE=<a>-<b>` | Write every present while the HUD's race timer reads a to b seconds (finds a phone run's slow moment in a Mac run). |
 | `DCUSA_READBACK=1` | Read every frame back from the GPU. |
 | `DCUSA_EXIT_AT=<n>` | Exit cleanly after n presents (an instrumented build writes its profile). |
 | `DCUSA_HITCH=<ms>` | One line for each frame slower than this, with where the time went. |
-| `DCUSA_SKIP_LOG=<n>` | Every n presents, ticks per second and how many skipped the render, tick wall and CPU times, draws, GPU time per frame (mean and max), time given to other guest threads, and the slowest frame with its breakdown. |
+| `DCUSA_SKIP_LOG=<n>` | Every n presents, ticks per second and how many skipped the render, tick wall and CPU times, draws, GPU time per frame (mean and max), time given to other guest threads, and the slowest frame with its breakdown: the race timer then (the HUD's, guest 0x19C98EC in 1/64 s), and the guest thread that took the most of its time (by procedure). The handover / wait / pipeline / resource columns need `DCUSA_HITCH`. |
 | `DCUSA_MEM=<n>` | Every n presents, host memory by kind (with `DCUSA_GPU_THREAD=0`). |
 | `DCUSA_MEM_LIST=1` | List the Metal allocations in the memory report. |
 | `DCUSA_MAP_STATS=<n>` | Every n presents, D3D Map calls by type and bytes. |
@@ -280,6 +284,7 @@ only the keys given, and whether that edition reads one is not checked.
 | `DCUSA_BOOT_SCREEN_DUMP=<prefix>` | Write the boot screen at 0, 50 and 100% and at the network check. |
 | `DCUSA_PAD_TRACE=1` | The pad snapshot and what the game made of it. |
 | `DCUSA_WATCH=<addr>[,...]` | Print guest memory at presents 1 and every `DCUSA_EVERY` (default 100). |
+| `DCUSA_MEMDUMP=<prefix>:<n>,...` | At those presents after attract starts, write the guest's readable memory to `<prefix>.<n>` (runs of address, length, bytes), to find a value by how it changes. |
 | `DCUSA_IO=1` | Log guest file access; `DCUSA_IO_STACK=<text>` adds the call stack for paths containing it. |
 | `DCUSA_DEBUG_OUTPUT=1` | All of the game's OutputDebugString lines (with `DCUSA_STATS`; otherwise only the first 8). |
 | `DCUSA_DSOUND_TRACE=1` | DirectSound calls per buffer. |

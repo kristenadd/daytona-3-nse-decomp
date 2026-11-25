@@ -58,6 +58,9 @@ bool sched_on_free_thread();
 void sched_frame_yield(Cpu& c);
 // Nanoseconds the frame loop's poll has given to other guest threads so far.
 extern std::atomic<std::uint64_t> g_yield_ns;
+// Time each guest thread slot has held the turn (ns, cumulative) and its start
+// address: which thread took a slow frame's time (DCUSA_SKIP_LOG).
+void sched_thread_time(std::uint64_t ns[32], std::uint32_t start[32]);
 // Nanoseconds spent in preemption switches so far (guest.cpp).
 extern std::atomic<std::uint64_t> g_preempt_ns;
 // Gives the other threads turns until each is blocked or the deadline passes.

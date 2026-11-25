@@ -5,6 +5,8 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <execinfo.h>
+#include <map>
 #import <QuartzCore/CAMetalLayer.h>
 #include <TargetConditionals.h>
 
@@ -48,6 +50,11 @@ struct Texture {
     // MSAA (DCUSA_MSAA): the multisampled surface passes render into; `tex` is
     // its resolve, which everything that reads the texture sees.
     id<MTLTexture> ms = nil;
+    // The multisampled surface's samples are kept past a pass only once
+    // something has needed them: a pass that loads them or a shader that
+    // reads texture2d_ms (ms_store). Until then a pass resolves and drops them.
+    bool ms_needed = false;
+    bool ms_dropped = false;  // its last pass resolved without keeping the samples
     std::uint32_t samples = 1;
     // A depth texture the shaders read as Texture2D: an R32Float copy, taken
     // again after each pass or clear that may have changed the depth.
@@ -69,6 +76,9 @@ struct Texture {
 
 struct Program {
     id<MTLFunction> fn = nil;
+    std::string source;                    // as compiled
+    std::vector<std::uint32_t> locations;  // a fragment function's user(locnN) inputs
+    bool trimmed_from = false;             // a vertex function cut to a fragment function's inputs
     struct Input {
         std::uint32_t location;
         std::string semantic;
@@ -126,6 +136,10 @@ struct Device {
     std::uint8_t enc_mip[kTargets]{};
     std::uint8_t enc_slice[kTargets]{};
     std::uint32_t enc_dsv = 0;
+    // The current encoder's multisampled attachments whose store action waits
+    // for end_pass (MTLStoreActionUnknown): colour bits, depth, stencil.
+    std::uint32_t enc_defer_color = 0;
+    bool enc_defer_depth = false, enc_defer_stencil = false;
     std::string shader_dir;
     // The GPU samples BC1-BC7 itself (all Macs, recent iPads and iPhones);
     // otherwise BC textures are decoded on upload. DCUSA_BC_DECODE=1 forces that.
@@ -156,6 +170,8 @@ struct Device {
     std::deque<std::pair<id<MTLCommandBuffer>, std::vector<id<MTLBuffer>>>> in_flight;
     std::unordered_map<std::uint32_t, id<MTLSamplerState>> samplers;
     std::unordered_map<std::uint64_t, Program> programs;
+    std::map<std::pair<std::uint64_t, std::vector<std::uint32_t>>, Program> trimmed;  // vertex_for
+    std::map<std::pair<std::uint64_t, std::uint64_t>, Program*> vertex_of;           // (vs, ps) -> vertex_for
     std::unordered_map<std::string, Pipeline> pipelines;
     id<MTLBuffer> zero_buffer = nil;
     id<MTLTexture> zero_texture = nil, zero_depth = nil, zero_cube = nil, zero_ms = nil;
@@ -411,6 +427,140 @@ std::string declare_compared_as_depth(std::string src) {
     return src;
 }
 
+// The members of `struct <name>` in translated source: [begin, end) of each
+// member's line, its name and its user(locnN) number (-1: another attribute).
+struct Member {
+    std::size_t begin, end;
+    std::string name;
+    int location;
+};
+
+std::vector<Member> struct_members(const std::string& src, const std::string& name, std::size_t* close = nullptr) {
+    std::vector<Member> out;
+    const std::size_t at = src.find("struct " + name + "\n{\n");
+    if (at == std::string::npos) return out;
+    std::size_t line = src.find('\n', src.find('{', at)) + 1;
+    while (line < src.size()) {
+        const std::size_t eol = src.find('\n', line);
+        if (eol == std::string::npos) break;
+        const std::string text = src.substr(line, eol - line);
+        if (text.rfind("};", 0) == 0) {
+            if (close) *close = line;
+            break;
+        }
+        // "    float4 _name [[user(locn3)]];" (or [[position]], [[clip_distance]]...)
+        const std::size_t attr = text.find(" [[");
+        std::size_t name_end = attr != std::string::npos ? attr : text.find(';');
+        std::size_t name_begin = text.rfind(' ', name_end - 1) + 1;
+        Member m{line, eol + 1, text.substr(name_begin, name_end - name_begin), -1};
+        if (const std::size_t u = text.find("[[user(locn"); u != std::string::npos) m.location = std::atoi(text.c_str() + u + 11);
+        out.push_back(m);
+        line = eol + 1;
+    }
+    return out;
+}
+
+// How often `prefix + name` appears as a whole member access.
+std::size_t count_access(const std::string& src, const std::string& prefix, const std::string& name, bool* only_writes) {
+    const std::string pat = prefix + name;
+    std::size_t n = 0;
+    for (std::size_t at = src.find(pat); at != std::string::npos; at = src.find(pat, at + 1)) {
+        if (at > 0 && word_char(src[at - 1])) continue;
+        if (at + pat.size() < src.size() && word_char(src[at + pat.size()])) continue;
+        ++n;
+        if (only_writes) {
+            // A statement of its own that assigns it: "    out.x = ...;" or "    out.x.y = ...;"
+            const std::size_t bol = src.rfind('\n', at) + 1;
+            bool lead = true;
+            for (std::size_t i = bol; i < at; ++i)
+                if (src[i] != ' ') lead = false;
+            std::size_t i = at + pat.size();
+            while (i < src.size() && (src[i] == '.' || word_char(src[i]))) ++i;
+            if (!lead || src.compare(i, 3, " = ") != 0) *only_writes = false;
+        }
+    }
+    return n;
+}
+
+// A fragment function's stage_in members it never reads are dropped, so the
+// vertex function feeding it needs only those it does (vertex_for).
+std::string trim_fragment_inputs(std::string src, std::vector<std::uint32_t>* locations) {
+    std::vector<Member> ms = struct_members(src, "main0_in");
+    std::vector<const Member*> drop;
+    std::size_t kept = 0;
+    for (const Member& m : ms) {
+        if (m.location >= 0 && count_access(src, "in.", m.name, nullptr) == 0) drop.push_back(&m);
+        else ++kept;
+    }
+    if (kept == 0 && !drop.empty()) drop.pop_back();  // no empty stage_in struct
+    for (auto it = drop.rbegin(); it != drop.rend(); ++it) src.erase((*it)->begin, (*it)->end - (*it)->begin);
+    for (const Member& m : struct_members(src, "main0_in"))
+        if (m.location >= 0) locations->push_back(static_cast<std::uint32_t>(m.location));
+    std::sort(locations->begin(), locations->end());
+    return src;
+}
+
+// A vertex function's outputs cut to `keep` (user locations): the members and
+// the statements writing them go, and the compiler drops the work behind them.
+// Empty when it cannot be done safely (an output read back, say).
+std::string trim_vertex_outputs(const std::string& src, const std::vector<std::uint32_t>& keep) {
+    std::string out = src;
+    std::vector<Member> ms = struct_members(out, "main0_out");
+    std::vector<const Member*> drop;
+    for (const Member& m : ms)
+        if (m.location >= 0 && !std::binary_search(keep.begin(), keep.end(), static_cast<std::uint32_t>(m.location)))
+            drop.push_back(&m);
+    if (drop.empty()) return {};
+    std::vector<std::string> names;
+    for (const Member* m : drop) {
+        bool writes = true;
+        count_access(out, "out.", m->name, &writes);
+        if (!writes) return {};
+        names.push_back(m->name);
+    }
+    for (auto it = drop.rbegin(); it != drop.rend(); ++it) out.erase((*it)->begin, (*it)->end - (*it)->begin);
+    for (const std::string& name : names) {
+        const std::string pat = "out." + name;
+        for (std::size_t at = out.find(pat); at != std::string::npos; at = out.find(pat, at)) {
+            if ((at > 0 && word_char(out[at - 1])) || (at + pat.size() < out.size() && word_char(out[at + pat.size()]))) {
+                at += pat.size();
+                continue;
+            }
+            const std::size_t bol = out.rfind('\n', at) + 1;
+            const std::size_t semi = out.find(";\n", at);
+            if (semi == std::string::npos) return {};
+            out.erase(bol, semi + 2 - bol);
+            at = bol;
+        }
+    }
+    return out;
+}
+
+id<MTLFunction> compile_main0(const std::string& source, std::string* error_text) {
+    MTLCompileOptions* options = [MTLCompileOptions new];
+    options.languageVersion = MTLLanguageVersion2_1;
+    // Relaxed: fast arithmetic that still honours NaN and infinity, which the
+    // D3D11 min / max rules in the translated shaders rely on (translate_shaders.py).
+    options.mathMode = MTLMathModeRelaxed;
+    NSError* error = nil;
+    hitch::Timer compile_timer(hitch::Pipeline);
+    id<MTLLibrary> lib = [g_dev->dev newLibraryWithSource:@(source.c_str()) options:options error:&error];
+    id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"main0"] : nil;
+    if (fn == nil && error_text)
+        *error_text = error ? std::string(error.localizedDescription.UTF8String).substr(0, 200) : "no main0";
+    return fn;
+}
+
+bool trim_enabled() {
+    // DCUSA_TRIM_VS=1: vertex functions cut to what their fragment functions
+    // read. Off by default: no gain on an iPhone (vertex time is not in the outputs).
+    static const bool on = [] {
+        const char* v = std::getenv("DCUSA_TRIM_VS");
+        return v != nullptr && std::strcmp(v, "0") != 0;
+    }();
+    return on;
+}
+
 Program& program(std::uint64_t key, bool vertex) {
     Device& d = *g_dev;
     Program& p = d.programs[key];
@@ -423,20 +573,13 @@ Program& program(std::uint64_t key, bool vertex) {
         problem("no translated shader " + key_text(key));
         return p;
     }
-    source = @(declare_compared_as_depth(source.UTF8String).c_str());
-    MTLCompileOptions* options = [MTLCompileOptions new];
-    options.languageVersion = MTLLanguageVersion2_1;
-    // Relaxed: fast arithmetic that still honours NaN and infinity, which the
-    // D3D11 min / max rules in the translated shaders rely on (translate_shaders.py).
-    options.mathMode = MTLMathModeRelaxed;
-    NSError* error = nil;
-    hitch::Timer compile_timer(hitch::Pipeline);
-    id<MTLLibrary> lib = [d.dev newLibraryWithSource:source options:options error:&error];
-    p.fn = lib ? [lib newFunctionWithName:@"main0"] : nil;
+    p.source = declare_compared_as_depth(source.UTF8String);
+    if (!vertex && trim_enabled()) p.source = trim_fragment_inputs(p.source, &p.locations);
+    std::string error;
+    p.fn = compile_main0(p.source, &error);
     if (p.fn == nil) {
         p.failed = true;
-        problem("shader " + key_text(key) + " does not compile: " +
-                (error ? std::string(error.localizedDescription.UTF8String).substr(0, 200) : "no main0"));
+        problem("shader " + key_text(key) + " does not compile: " + error);
         return p;
     }
     if (vertex) {
@@ -455,14 +598,62 @@ Program& program(std::uint64_t key, bool vertex) {
     return p;
 }
 
+// The vertex function for a pipeline with `ps` (nullptr: no fragment function):
+// cut to the outputs ps reads, else the one translated.
+Program& vertex_for(std::uint64_t key, const Program* ps) {
+    Program& base = program(key, true);
+    if (base.fn == nil || !trim_enabled()) return base;
+    static const std::vector<std::uint32_t> none;
+    const std::vector<std::uint32_t>& keep = ps ? ps->locations : none;
+    Device& d = *g_dev;
+    auto [it, fresh] = d.trimmed.try_emplace({key, keep});
+    Program& p = it->second;
+    if (!fresh) return p.fn != nil ? p : base;
+    const std::string src = trim_vertex_outputs(base.source, keep);
+    if (src.empty()) return base;
+    std::string error;
+    p.fn = compile_main0(src, &error);
+    if (p.fn == nil) {
+        problem("vertex shader " + key_text(key) + " cut to its fragment's inputs does not compile: " + error);
+        return base;
+    }
+    p.inputs = base.inputs;
+    p.trimmed_from = true;
+    return p;
+}
+
 std::string upper(std::string s) {
     for (char& ch : s) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
     return s;
 }
 
 // Ends the render pass, if one is open.
-void end_pass() {
+void* g_end_bt[8];  // DCUSA_MS_LOG=3: who ended the last pass
+int g_end_bt_n = 0;
+
+Texture* texture(std::uint32_t key);
+
+// Ends the current pass. `resumes`: it may go on after this (a blit, a clear
+// or mip generation in the middle of it), so multisampled samples are kept;
+// otherwise (other targets next, or the frame's end) they are only resolved.
+void end_pass(bool resumes = true) {
     Device& d = *g_dev;
+    static const bool bt = std::getenv("DCUSA_MS_LOG") && std::atoi(std::getenv("DCUSA_MS_LOG")) >= 3;
+    if (d.enc != nil && bt) g_end_bt_n = backtrace(g_end_bt, 8);
+    if (d.enc != nil && (d.enc_defer_color || d.enc_defer_depth || d.enc_defer_stencil)) {
+        const MTLStoreAction a = resumes ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionMultisampleResolve;
+        for (unsigned i = 0; i < kTargets; ++i)
+            if (d.enc_defer_color & (1u << i)) {
+                [d.enc setColorStoreAction:a atIndex:i];
+                if (Texture* t = texture(d.enc_rtv[i])) t->ms_dropped = !resumes;
+            }
+        if (d.enc_defer_depth) [d.enc setDepthStoreAction:a];
+        if (d.enc_defer_stencil) [d.enc setStencilStoreAction:a];
+        if (d.enc_defer_depth || d.enc_defer_stencil)
+            if (Texture* t = texture(d.enc_dsv)) t->ms_dropped = !resumes;
+    }
+    d.enc_defer_color = 0;
+    d.enc_defer_depth = d.enc_defer_stencil = false;
     if (d.enc != nil) {
         [d.enc endEncoding];
         d.enc = nil;
@@ -811,6 +1002,7 @@ void flush_clears(Texture& t) {
     }
     t.clear_mips = 0;
     t.clear_ds = 0;
+    t.ms_dropped = false;
 }
 
 // The texture behind `key`, with any clear it is owed encoded.
@@ -899,6 +1091,36 @@ std::uint32_t pass_samples(const std::uint32_t rtv[kTargets], std::uint32_t dsv)
     return n == 0 ? 1 : n;
 }
 
+std::uint64_t g_ms_frame = 0;  // frames submitted, for DCUSA_MS_LOG=2
+
+// Multisampled surfaces: a pass resolves into the texture everything else
+// reads, and keeps the samples only when the pass may resume (end_pass). A
+// pass that loads samples a finished pass dropped, or a shader reading
+// texture2d_ms, makes that surface keep them from then on (the first such use
+// saw none: one frame). DCUSA_MS_STORE=1: always kept, as before;
+// DCUSA_MS_LOG=1 (2: every load, 3: with who ended the pass before) logs it.
+void ms_store(Texture& t, const char* why) {
+    static const int log = std::getenv("DCUSA_MS_LOG") ? std::atoi(std::getenv("DCUSA_MS_LOG")) : 0;
+    if (log >= 2) std::fprintf(stderr, "metal: frame %llu %s samples %s\n", static_cast<unsigned long long>(g_ms_frame), target_label("multisampled", &t, 0).c_str(), why);
+    if (log >= 3) backtrace_symbols_fd(g_end_bt, g_end_bt_n, 2);
+    if (t.ms_needed) return;
+    t.ms_needed = true;
+    t.ms_dropped = false;
+    if (std::getenv("DCUSA_MS_LOG"))
+        std::fprintf(stderr, "metal: %s samples %s, kept from now on\n", target_label("multisampled", &t, 0).c_str(), why);
+}
+
+MTLStoreAction ms_store_action(const Texture& t) {
+    // DCUSA_MS_STORE=never: never kept (a test: passes that load them see nothing).
+    static const int mode = [] {
+        const char* v = std::getenv("DCUSA_MS_STORE");
+        if (v == nullptr) return 0;
+        return std::strcmp(v, "never") == 0 ? 2 : std::strcmp(v, "0") != 0 ? 1 : 0;
+    }();
+    if (mode == 2) return MTLStoreActionMultisampleResolve;
+    return mode == 1 || t.ms_needed ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionUnknown;
+}
+
 bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTargets], const std::uint8_t slice[kTargets],
                 std::uint32_t dsv) {
     Device& d = *g_dev;
@@ -906,7 +1128,7 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         std::memcmp(d.enc_mip, mip, sizeof d.enc_mip) == 0 && std::memcmp(d.enc_slice, slice, sizeof d.enc_slice) == 0 &&
         d.enc_dsv == dsv)
         return true;
-    end_pass();
+    end_pass(false);
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     bool any = false;
     // MSAA: draw into the multisampled surfaces, keep them (a later pass may
@@ -920,7 +1142,7 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         pass.colorAttachments[i].level = msaa ? 0 : level;
         pass.colorAttachments[i].slice = t->cube ? std::min<NSUInteger>(slice[i], 6 * t->tex.arrayLength - 1) : 0;
         pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
-        pass.colorAttachments[i].storeAction = msaa ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
+        pass.colorAttachments[i].storeAction = MTLStoreActionStore;
         if (msaa) {
             pass.colorAttachments[i].resolveTexture = t->tex;
             pass.colorAttachments[i].resolveLevel = level;
@@ -930,6 +1152,12 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
             pass.colorAttachments[i].loadAction = MTLLoadActionClear;
             pass.colorAttachments[i].clearColor = MTLClearColorMake(c[0], c[1], c[2], c[3]);
             t->clear_mips &= ~(1u << level);
+        } else if (msaa && t->ms_dropped) {
+            ms_store(*t, "loaded");
+        }
+        if (msaa) {
+            pass.colorAttachments[i].storeAction = ms_store_action(*t);
+            if (pass.colorAttachments[i].storeAction == MTLStoreActionUnknown) d.enc_defer_color |= 1u << i;
         }
         if (t->clear_mips) flush_clears(*t);  // other mips: not this pass's
         any = true;
@@ -938,7 +1166,10 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         ++t->written;
         pass.depthAttachment.texture = msaa ? t->ms : t->tex;
         pass.depthAttachment.loadAction = (t->clear_ds & 1u) ? MTLLoadActionClear : MTLLoadActionLoad;
-        pass.depthAttachment.storeAction = msaa ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
+        if (msaa && t->ms_dropped && (!(t->clear_ds & 1u) || (has_stencil(t->format) && !(t->clear_ds & 2u))))
+            ms_store(*t, "loaded");
+        pass.depthAttachment.storeAction = msaa ? ms_store_action(*t) : MTLStoreActionStore;
+        d.enc_defer_depth = pass.depthAttachment.storeAction == MTLStoreActionUnknown;
         pass.depthAttachment.clearDepth = t->clear_depth;
         if (msaa) {
             pass.depthAttachment.resolveTexture = t->tex;
@@ -947,7 +1178,8 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         if (has_stencil(t->format)) {
             pass.stencilAttachment.texture = msaa ? t->ms : t->tex;
             pass.stencilAttachment.loadAction = (t->clear_ds & 2u) ? MTLLoadActionClear : MTLLoadActionLoad;
-            pass.stencilAttachment.storeAction = msaa ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
+            pass.stencilAttachment.storeAction = msaa ? ms_store_action(*t) : MTLStoreActionStore;
+            d.enc_defer_stencil = pass.stencilAttachment.storeAction == MTLStoreActionUnknown;
             pass.stencilAttachment.clearStencil = t->clear_stencil;
             if (msaa) pass.stencilAttachment.resolveTexture = t->tex;
         }
@@ -955,7 +1187,10 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         any = true;
     }
     if (!any) return false;
-    if (g_pp.active) {
+    // DCUSA_ENCODER_LABELS=1: each render encoder named after its targets, so
+    // Instruments' Metal System Trace shows which pass is which.
+    static const bool labels = std::getenv("DCUSA_ENCODER_LABELS") != nullptr;
+    if (g_pp.active || labels) {
         Texture* t0 = nullptr;
         unsigned n = 0;
         for (unsigned i = 0; i < kTargets; ++i)
@@ -966,11 +1201,16 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         std::string label = t0 ? target_label("pass", t0, mip[0]) : std::string("pass depth-only");
         if (n > 1) label += " +" + std::to_string(n - 1);
         if (dsv) label += " ds";
-        profile_pass(pass, label);
+        if (g_pp.active) profile_pass(pass, label);
+        else g_pp.open = -1;
+        if (labels) {
+            d.enc = [command_buffer() renderCommandEncoderWithDescriptor:pass];
+            d.enc.label = [NSString stringWithUTF8String:label.c_str()];
+        }
     } else {
         g_pp.open = -1;
     }
-    d.enc = [command_buffer() renderCommandEncoderWithDescriptor:pass];
+    if (!labels) d.enc = [command_buffer() renderCommandEncoderWithDescriptor:pass];
     d.bound = Device::Bound{};
     std::memcpy(d.enc_rtv, rtv, sizeof d.enc_rtv);
     std::memcpy(d.enc_mip, mip, sizeof d.enc_mip);
@@ -1235,9 +1475,18 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
     // No pixel shader is a depth-only pass (shadow maps): D3D rasterizes and
     // writes depth, and so does a Metal pipeline without a fragment function.
     static Program none;
-    Program& vs = program(s.vs, true);
     Program& ps = s.ps != 0 ? program(s.ps, false) : none;
-    if (vs.fn == nil || (s.ps != 0 && ps.fn == nil)) return nil;
+    if (s.ps != 0 && ps.fn == nil) return nil;
+    // The pair's vertex function, looked up once (most draws repeat the last pair).
+    static std::uint64_t last_vs = 0, last_ps = ~0ull;
+    static Program* last = nullptr;
+    if (s.vs != last_vs || s.ps != last_ps || last == nullptr) {
+        Program*& slot = g_dev->vertex_of[{s.vs, s.ps}];
+        if (slot == nullptr) slot = &vertex_for(s.vs, s.ps != 0 ? &ps : nullptr);
+        last_vs = s.vs, last_ps = s.ps, last = slot;
+    }
+    Program& vs = *last;
+    if (vs.fn == nil) return nil;
     const Pipeline* pl = pipeline(s, vs, ps);
     if (pl == nullptr) return nil;
     id<MTLRenderPipelineState> state = pl->state;
@@ -1357,7 +1606,10 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
         const bool want_cube = (use.cube & bit) != 0;
         Texture* t = id_ ? texture(id_) : nullptr;
         if (use.ms & bit) {  // texture2d_ms: the multisampled surface itself
-            if (t != nullptr && t->ms != nil && !t->depth) return t->ms;
+            if (t != nullptr && t->ms != nil && !t->depth) {
+                ms_store(*t, "sampled");
+                return t->ms;
+            }
             problem("texture2d_ms read without a multisampled colour texture");
             return d.zero_ms;
         }
@@ -2533,11 +2785,12 @@ void time_gpu(id<MTLCommandBuffer> cmd) {
 void submit() {
     if (!enabled()) return;
     Device& d = *g_dev;
-    end_pass();
+    end_pass(false);
     // Every present commits one command buffer, empty or not: the game's
     // timestamp queries count frames by them (time_gpu).
     if (d.cmd == nil) command_buffer();
     time_gpu(d.cmd);
+    ++g_ms_frame;
     [d.cmd commit];
     profile_submitted(d.cmd);
     d.in_flight.emplace_back(d.cmd, std::move(d.retired));

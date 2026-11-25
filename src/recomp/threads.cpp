@@ -168,6 +168,7 @@ struct Slot {
     std::uint32_t id = 0;
     std::uint32_t handle = 0;
     std::uint32_t start = 0;
+    std::uint32_t procedure = 0;
     std::uint32_t param = 0;
     std::uint32_t terminate_code = 0;
     Cpu* cpu = nullptr;
@@ -283,8 +284,13 @@ void fire_timers() {
 }
 
 // Runs on the thread that just got the CPU back.
+// Time each thread held the turn, by slot (sched_thread_time).
+std::atomic<std::uint64_t> g_turn_ns[kSlots];
+Clock::time_point g_turn_start[kSlots];
+
 void resumed(unsigned me) {
     Sched& s = S();
+    g_turn_start[me] = Clock::now();
     if (s.failure) {
         if (me == 0) {
             std::exception_ptr f = s.failure;
@@ -304,6 +310,8 @@ void resumed(unsigned me) {
 void switch_to(unsigned me, unsigned next) {
     Sched& s = S();
     if (next != me) {
+        g_turn_ns[me].fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - g_turn_start[me]).count(),
+                                std::memory_order_relaxed);
         RtRelease released;  // the next thread may enter the runtime
         std::unique_lock<std::mutex> lk(s.mu);
         s.current = next;
@@ -582,6 +590,9 @@ std::uint32_t sched_create_thread(Cpu& c, std::uint32_t start, std::uint32_t par
     t.id = s.next_id++;
     t.start = start;
     t.param = param;
+    // The CRT's thread entry (0xC215BB) takes a thread block whose +0x54 holds
+    // the procedure: that one names the thread (sched_thread_time).
+    t.procedure = start == 0xC215BBu && param != 0 && param + 0x58u > param ? ld32(M, param + 0x54u) : start;
     t.own = std::make_unique<Cpu>();
     t.cpu = t.own.get();
     st32(M, teb + 0x00, 0xFFFFFFFFu);
@@ -713,6 +724,14 @@ std::uint32_t sched_thread_count() {
 }
 
 bool sched_on_free_thread() { return t_free_slot >= 0; }
+
+void sched_thread_time(std::uint64_t ns[32], std::uint32_t start[32]) {
+    static_assert(kSlots == 32);
+    for (unsigned i = 0; i < kSlots; ++i) {
+        ns[i] = g_turn_ns[i].load(std::memory_order_relaxed);
+        start[i] = S().slots[i].procedure;
+    }
+}
 
 void sched_yield(Cpu& c) {
     ensure(c);

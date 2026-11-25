@@ -3,6 +3,7 @@
 #include <TargetConditionals.h>
 #include "runtime/hitch.hpp"
 
+#include <mach/mach.h>
 #include <sys/mman.h>
 
 #include <algorithm>
@@ -1936,8 +1937,21 @@ std::uint32_t g_tick_n[2]{};
 double g_slow_pipe = 0, g_slow_tex = 0; unsigned g_slow_pipes = 0;
 double g_slow_ms = 0, g_slow_cpu = 0, g_slow_handover = 0, g_slow_preempt = 0, g_slow_yield = 0, g_slow_wait = 0;
 std::uint64_t g_tick_preempt0 = 0, g_tick_yield0 = 0;
+std::uint64_t g_tick_turn0[32];  // sched_thread_time at the tick's start
+std::uint32_t g_slow_thread = 0;  // the slowest frame's busiest other thread (start address)
+double g_slow_thread_ms = 0;
 int g_slow_present = 0;
 std::uint32_t g_slow_draws = 0;
+std::uint32_t g_slow_race = 0;  // the race timer then
+
+// The race timer the HUD shows top left (total race time, lap times added),
+// in 1/64 s: 0x19C98EC, found by its values against the HUD in Mac races.
+// The slowest-frame log gives it, so a moment from a phone run can be found
+// again in a Mac run (DCUSA_SKIP_LOG; 0 outside the image).
+std::uint32_t race_timer(const std::uint8_t* mem) {
+    constexpr std::uint32_t kRaceTimer = 0x19C98ECu;
+    return g_image_lo <= kRaceTimer && kRaceTimer + 4u <= g_image_hi ? ld32(mem, kRaceTimer) : 0u;
+}
 double g_tick_cpu_start = 0;
 double thread_cpu_ms() {
     timespec t{};
@@ -2109,11 +2123,70 @@ void report_hitch(int present_no) {
     }
 }
 
+// DCUSA_MEMDUMP=<file prefix>:<n>,<n>,...: at those presents after attract
+// starts, the guest's committed memory (as DCUSA_WATCH reads it) to
+// <prefix>.<n>: runs of [u32 address][u32 length][bytes]. For finding a value
+// by how it changes between dumps (the race timer, say).
+void memdump(const std::uint8_t* mem, int present_no) {
+    static const char* spec = std::getenv("DCUSA_MEMDUMP");
+    if (spec == nullptr) return;
+    static int attract_at = 0;
+    if (attract_at == 0 && g_boot_state >= 8) attract_at = present_no;
+    if (attract_at == 0) return;
+    const char* colon = std::strrchr(spec, ':');
+    if (colon == nullptr) return;
+    const int n = present_no - attract_at;
+    bool want = false;
+    for (const char* p = colon + 1; *p;) {
+        char* end = nullptr;
+        if (std::strtol(p, &end, 10) == n) want = true;
+        p = *end == ',' ? end + 1 : end;
+        if (end == p && *p) break;
+    }
+    if (!want) return;
+    const std::string path = std::string(spec, colon) + "." + std::to_string(n);
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (f == nullptr) return;
+    constexpr std::uint32_t kPage = 0x1000;
+    std::uint32_t run = 0, len = 0;
+    auto flush = [&] {
+        if (len == 0) return;
+        std::fwrite(&run, 4, 1, f);
+        std::fwrite(&len, 4, 1, f);
+        // Through a copy: the file write cannot read the guest's pages directly.
+        static std::vector<std::uint8_t> buf;
+        buf.assign(mem + run, mem + run + len);
+        if (std::fwrite(buf.data(), 1, len, f) != len) std::fprintf(stderr, "memdump: short write at %x\n", run);
+        len = 0;
+    };
+    // Pages the host cannot read (reserved, no access) are left out: each is
+    // copied with vm_read_overwrite, which fails instead of faulting.
+    static std::vector<std::uint8_t> page(kPage);
+    auto mapped = [&](std::uint64_t a) {
+        vm_size_t got = 0;
+        return vm_read_overwrite(mach_task_self(), reinterpret_cast<vm_address_t>(mem + a), kPage,
+                                 reinterpret_cast<vm_address_t>(page.data()), &got) == KERN_SUCCESS &&
+               got == kPage;
+    };
+    for (std::uint64_t a = 0x10000; a < 0x80000000ull; a += kPage) {
+        if (watch_readable(static_cast<std::uint32_t>(a)) && mapped(a)) {
+            if (len == 0) run = static_cast<std::uint32_t>(a);
+            len += kPage;
+        } else {
+            flush();
+        }
+    }
+    flush();
+    std::fclose(f);
+    std::fprintf(stderr, "memdump %d: %s\n", n, path.c_str());
+}
+
 void present(Cpu& c) {
     selftest_math(c);
     {
         static int all_presents = 0;
         print_watch(c.mem, ++all_presents);
+        memdump(c.mem, all_presents);
         // DCUSA_EXIT_AT=<n>: a clean exit after n presents (atexit handlers run,
         // so an instrumented build writes its profile).
         static const int exit_at = [] {
@@ -2172,6 +2245,17 @@ void present(Cpu& c) {
                 g_slow_cpu = cpu_now;
                 g_slow_present = all_presents;
                 g_slow_draws = g_frame_draws;
+                g_slow_race = race_timer(c.mem);
+                {
+                    std::uint64_t ns[32];
+                    std::uint32_t starts[32];
+                    sched_thread_time(ns, starts);
+                    g_slow_thread = 0;
+                    g_slow_thread_ms = 0;
+                    for (unsigned i = 1; i < 32; ++i)
+                        if (const double ms = (ns[i] - g_tick_turn0[i]) / 1e6; ms > g_slow_thread_ms)
+                            g_slow_thread_ms = ms, g_slow_thread = starts[i];
+                }
                 g_slow_handover = tick_handover;
                 g_slow_pipe = tick_pipe;
                 g_slow_pipes = tick_pipes;
@@ -2216,9 +2300,9 @@ void present(Cpu& c) {
                              handover_ms / skip_every, wait_ms / skip_every);
             {
                 static const auto first = std::chrono::steady_clock::now();
-                std::fprintf(stderr, "slowest %d: present %d at %.1f s, %.1f ms (cpu %.1f ms), %u draws, handover %.1f wait %.1f preempt %.1f yield %.1f ms, pipelines %u %.1f ms, resources %.1f ms\n", all_presents,
+                std::fprintf(stderr, "slowest %d: present %d at %.1f s, race %u'%05.2f, %.1f ms (cpu %.1f ms), %u draws, handover %.1f wait %.1f preempt %.1f yield %.1f ms, pipelines %u %.1f ms, resources %.1f ms, busiest thread %08X %.1f ms\n", all_presents,
                              g_slow_present, std::chrono::duration<double>(std::chrono::steady_clock::now() - first).count(),
-                             g_slow_ms, g_slow_cpu, g_slow_draws, g_slow_handover, g_slow_wait, g_slow_preempt, g_slow_yield, g_slow_pipes, g_slow_pipe, g_slow_tex);
+                             g_slow_race / 3840, (g_slow_race % 3840) / 64.0, g_slow_ms, g_slow_cpu, g_slow_draws, g_slow_handover, g_slow_wait, g_slow_preempt, g_slow_yield, g_slow_pipes, g_slow_pipe, g_slow_tex, g_slow_thread, g_slow_thread_ms);
                 g_slow_ms = 0;
             }
             handover_ms = wait_ms = 0;
@@ -2247,6 +2331,10 @@ void present(Cpu& c) {
     }
     g_tick_preempt0 = g_preempt_ns.load();
     g_tick_yield0 = g_yield_ns.load();
+    {
+        std::uint32_t starts[32];
+        sched_thread_time(g_tick_turn0, starts);
+    }
     g_tick_cpu_start = thread_cpu_ms();
     // DCUSA_PAD_SCRIPT_FROM=attract: a pad script's frame 1 is the first present
     // of attract (boot state 8), so one script fits a paced or unpaced boot.
@@ -2294,7 +2382,17 @@ void present(Cpu& c) {
             if (v != nullptr && std::sscanf(v, "%d-%d", &a, &b) != 2) b = -1;
             return std::make_pair(a, b);
         }();
-        const bool in_range = presents >= range.first && presents <= range.second;
+        // DCUSA_RACE_RANGE=<a>-<b>: also every present while the race timer
+        // (race_timer, seconds as the HUD shows them) is from a to b.
+        static const std::pair<double, double> race_range = [] {
+            const char* v = std::getenv("DCUSA_RACE_RANGE");
+            double a = 0, b = -1;
+            if (v != nullptr && std::sscanf(v, "%lf-%lf", &a, &b) != 2) b = -1;
+            return std::make_pair(a, b);
+        }();
+        const double race_s = race_range.second >= 0 ? race_timer(c.mem) / 64.0 : -1;
+        const bool in_range = (presents >= range.first && presents <= range.second) ||
+                              (race_s >= race_range.first && race_s <= race_range.second);
         if (in_range) g_frames_after_hitch = std::max(g_frames_after_hitch, 1);
         const bool wanted = every_frame || g_frames_after_hitch > 0 || (dumping && (presents == 1 || presents == 30 || (every > 0 && presents % every == 0)));
         static std::chrono::steady_clock::time_point last_shown{};
