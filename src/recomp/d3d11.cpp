@@ -32,6 +32,7 @@
 #include "recomp/loader.hpp"
 #include "recomp/host_files.hpp"
 #include "recomp/threads.hpp"
+#include "recomp/overlay.hpp"
 #include "gpu/boot_screen.hpp"
 #include "build_info.hpp"
 #include "recomp/win32.hpp"
@@ -1807,16 +1808,27 @@ constexpr std::uint32_t kBootScreenTexture = 0xFFFFB007u;
 constexpr std::uint32_t kOverlayTexture = 0xFFFFB008u;
 
 // DCUSA_SHOW_FPS=1: the pictures shown per second and the build, lower left
-// (gpu::set_overlay), refreshed twice a second. Called for every picture shown.
+// (gpu::set_overlay), refreshed twice a second; R3 turns it on and off
+// (toggle_fps_overlay). Called for every picture shown.
+std::atomic<int> g_fps_overlay{-1};  // -1 not read yet, 0 off, 1 on
+
 void count_shown_picture() {
-    static const bool on = [] {
+    if (g_fps_overlay.load(std::memory_order_relaxed) < 0) {
         const char* e = std::getenv("DCUSA_SHOW_FPS");
-        return e != nullptr && std::atoi(e) != 0;
-    }();
-    if (!on) return;
+        int expected = -1;
+        g_fps_overlay.compare_exchange_strong(expected, e != nullptr && std::atoi(e) != 0 ? 1 : 0);
+    }
     static auto since = std::chrono::steady_clock::now();
     static int shown = 0;
-    static bool created = false;
+    static bool created = false, showing = false;
+    const bool on = g_fps_overlay.load(std::memory_order_relaxed) == 1;
+    if (!on) {
+        if (showing) gpu::set_overlay(0);
+        showing = false;
+        return;
+    }
+    if (created && !showing) gpu::set_overlay(kOverlayTexture);
+    showing = true;
     ++shown;
     const auto now = std::chrono::steady_clock::now();
     const double s = std::chrono::duration<double>(now - since).count();
@@ -4404,3 +4416,14 @@ bool skip_velocity_pass() {
 }
 
 }
+
+namespace dcusa {
+void toggle_fps_overlay() {
+    int v = g_fps_overlay.load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char* e = std::getenv("DCUSA_SHOW_FPS");
+        v = e != nullptr && std::atoi(e) != 0 ? 1 : 0;
+    }
+    g_fps_overlay.store(v == 1 ? 0 : 1, std::memory_order_relaxed);
+}
+}  // namespace dcusa

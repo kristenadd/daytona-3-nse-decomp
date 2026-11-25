@@ -5,6 +5,7 @@
 
 #include <cstdio>
 
+#include "recomp/overlay.hpp"
 #include "runtime/pad_mapping.hpp"
 
 namespace dcusa {
@@ -50,6 +51,10 @@ public:
                 state.right_shoulder = g.rightShoulder.pressed;
                 state.start = g.buttonMenu.pressed;
                 state.back = g.buttonOptions != nil && g.buttonOptions.pressed;
+                // R3 (right stick press): the frame-rate overlay on or off.
+                const bool r3 = g.rightThumbstickButton != nil && g.rightThumbstickButton.pressed;
+                if (r3 && !r3_) toggle_fps_overlay();
+                r3_ = r3;
             }
             return map_gamepad(state);
         }
@@ -57,6 +62,7 @@ public:
 
 private:
     GCController* __strong last_ = nil;
+    bool r3_ = false;
 };
 
 }  // namespace

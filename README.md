@@ -42,7 +42,8 @@ shift up/down, Y/X/B/A views 1-4. Menus are confirmed with the gas.
 commit, `+` when built with uncommitted changes, and the build time) in the
 lower-left corner; the boot screen always shows the build under its bar. On
 iOS it is the Settings app's "Show frame rate"; for the Mac app,
-`defaults write local.dcusa.mac ShowFPS -bool true`.
+`defaults write local.dcusa.mac ShowFPS -bool true`. Those set how it starts;
+in game, pressing the right stick (R3) turns it on or off.
 
 **Boot screen (optional).** In place of the black "Data Loading" and network
 check screens, the boot can show the attract title with a progress bar in its
