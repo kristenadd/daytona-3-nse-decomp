@@ -119,27 +119,25 @@ agreed to this).
       the registers a callee may change and skipping dead flags after calls
       (`TRANSLATE_PRESERVE=1`, translate.py preserved_regs) passed every
       test but gained nothing on the phone, so register traffic around calls
-      is not the cost. Since then (cube faces one a frame, no motion
-      pre-pass on iOS, multisampled samples no longer stored): 56 to 58
-      pictures, 3 to 7% of ticks skipped. The skips now sit in one place,
-      the grandstand straight at each lap's start (race timer about 0:54 to
-      0:56 in `race_attract.txt`; the skip log gives the HUD's race timer
-      for its slowest frames, and `DCUSA_RACE_RANGE` writes that moment's
-      frames on the Mac). There the GPU takes 24 to 30 ms a frame and the
-      main thread waits 14 to 28 ms on the render thread (`DCUSA_HITCH`
-      shows it as handover). By Metal System Trace (`DCUSA_ENCODER_LABELS`)
-      a heavy frame is the main pass (about 2.8 ms vertex, 5.7 ms
-      fragment), two shadow cascades (2 ms vertex), the backbuffer pass and
-      blits (1 ms each). Tried without gain on the phone: a 640 resolution
-      floor (+1 picture, not at the grandstand, whose cost does not follow
-      resolution), MSAA 2 (+0.5), vertex shaders cut to the outputs their
-      pixel shaders read (`DCUSA_TRIM_VS`), and one cascade with MSAA 2 and
-      the 640 floor together (worse: 40.5 and 53.7, the main thread's CPU
-      per tick rose with the GPU lighter, as seen before). The draws are
-      plain indexed draws (no instancing to thin). Next: what in the
-      grandstand frame costs the GPU (the stands and crowd geometry in the
-      main pass and shadow maps), and why a lighter GPU slows the main
-      thread (clock or core placement: a System Trace with CPU frequency).
+      is not the cost. Since then: cube faces one a frame, no motion
+      pre-pass, multisampled samples not stored, the nearest shadow
+      cascade's filter at 4 taps (`DCUSA_PCF`), the stadium simplified with
+      meshoptimizer (`DCUSA_LOD`), a lighter catch fence (`DCUSA_LITE_PS`,
+      level 3: albedo x (lightmap + sun)), Game Mode, and the CRI sound
+      server in parallel on an efficiency core. With the phone at thermal
+      "nominal": 58 to 59 pictures a second, 2 to 3% of ticks skipped, the
+      race's mean GPU time 13 to 14 ms a frame (18 to 19 before). How it was
+      found: the skip log gives the HUD's race timer for the slowest frames
+      (`DCUSA_RACE_RANGE` writes that moment's frames on the Mac); flat
+      shading (`DCUSA_FLAT_PS`) and half the triangles (`DCUSA_HALF_PS`) per
+      shader group showed what each costs; the fence's shader alone took the
+      grandstand straight (race 0:55 to 1:00) from 17 to 28 ms of GPU.
+      Without gain: alpha discard, anisotropy caps, the fence without its
+      dynamic shadows only, vertex outputs trimmed. Left: the grandstand
+      stretch is still about 18 ms of GPU (stadium shading 4.8 ms of it), and
+      some frames take 20 to 26 ms of main-thread CPU; after hours of runs
+      the phone reaches thermal "serious" and slows (56 pictures). A lighter
+      stadium shader (as the fence) is the next GPU step.
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
