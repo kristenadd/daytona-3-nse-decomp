@@ -1881,7 +1881,29 @@ bool small_source(const DrawState& s) {
     return w < limit || std::find(sizes.begin(), sizes.end(), std::make_pair(w, h)) != sizes.end();
 }
 
+// The glow chain (the bloom / glare passes' small downsample and blur draws).
+// DCUSA_GLOW_EVERY=<n>: drawn on every n-th frame that has them (iOS 2,
+// elsewhere 1); in between its targets keep the last frame's glow, which the
+// composite reads one frame late. The game does not clear these targets.
+bool glow_skipped(std::uint64_t ps) {
+    if (ps != 0x4ae3dda931a688a0ull && ps != 0xbe32070ae50eb03bull && ps != 0x49ba19fcf203dc15ull) return false;
+    static const unsigned every = [] {
+        const char* e = std::getenv("DCUSA_GLOW_EVERY");
+        const int n = e != nullptr ? std::atoi(e) : (TARGET_OS_IPHONE ? 2 : 1);
+        return static_cast<unsigned>(n < 1 ? 1 : n);
+    }();
+    if (every == 1) return false;
+    static std::uint64_t frame = ~0ull;
+    static unsigned phase = 0;
+    if (g_dev->stats.frames != frame) {  // the first glow draw of a frame
+        frame = g_dev->stats.frames;
+        phase = (phase + 1) % every;
+    }
+    return phase != 0;
+}
+
 bool skipped_draw(const DrawState& s) {
+    if (glow_skipped(s.ps)) return true;
     static const std::vector<std::uint64_t> ps = hex_list("DCUSA_SKIP_PS"), srv = hex_list("DCUSA_SKIP_SRV");
     static const std::pair<std::uint64_t, std::uint32_t> ps_rt = [] {
         std::pair<std::uint64_t, std::uint32_t> out{0, 0};

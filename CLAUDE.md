@@ -79,8 +79,15 @@ agreed to this).
       No gain from: more frames in flight, a third render-queue batch (the
       main thread slowed: two P cores), MSAA 2 or off, 1280x720 output,
       smaller shadow maps, the 120 Hz layer, GPU times scaled 1.4,
-      prefetching the dirty flags. Next ideas: fewer, merged post passes on
-      iOS (a visual change), cheaper render-thread encoding.
+      prefetching the dirty flags. The user accepts small visual changes
+      for 60 fps. Glow every other frame on iOS (`DCUSA_GLOW_EVERY`, the
+      bloom / glare chain's shaders 4ae3dda9, be32070a, 49ba19fc): about 50
+      pictures (46 same build without). Removing the glow chain entirely: 54,
+      with dips to 17 in heavy stretches. Freeing the GPU raises the main
+      thread's CPU per rendered tick (10 to 12-15 ms; it stays on P cores),
+      so the CPU becomes the limit. Next: the main thread's spread of 1-5%
+      costs (scene walk loop memory misses, draw path 0x6CFDB0, 0x458BC0,
+      the Model 2 interpreter loop).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.

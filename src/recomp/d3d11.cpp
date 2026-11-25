@@ -185,6 +185,11 @@ struct ShaderObjects {
 std::unordered_map<std::uint32_t, gpu::BlendTarget[gpu::kTargets]> blend_states;
 std::unordered_set<std::uint32_t> alpha_to_coverage_states;  // blend states with AlphaToCoverageEnable
 std::unordered_map<std::uint32_t, gpu::DepthDesc> depth_states;
+// The state objects are immutable once created, so setting the one already
+// set changes nothing; the last one set skips the lookups (every draw sets
+// them). A destroyed object's id resets the memo (destroy).
+std::uint32_t g_last_blend = ~0u, g_last_depth = ~0u, g_last_raster = ~0u;
+
 std::unordered_map<std::uint32_t, gpu::RasterDesc> raster_states;
 std::unordered_map<std::uint32_t, std::vector<gpu::VertexElement>> gpu_layouts;
 float g_proj[16]{};
@@ -2514,6 +2519,7 @@ void query_get_data(Cpu& c) {
 // 0x6B1FB1. ClearState (vtable index 110). The caller ignores EAX.
 void clear_state(Cpu& c) {
     gs = gpu::DrawState{};
+    g_last_blend = g_last_depth = g_last_raster = ~0u;
     bound_shaders = ShaderObjects{};
     ret_stdcall(c, kSOk, 4);
 }
@@ -2848,21 +2854,30 @@ void vs_set_samplers(Cpu& c) {                                     // +0x68  0x6
     ret_stdcall(c, kSOk, 16);
 }
 void om_set_blend(Cpu& c) {                                        // +0x8C  0x6D06E6, state, factor, mask
-    const auto it = blend_states.find(arg(c, 1));
-    for (unsigned i = 0; i < gpu::kTargets; ++i) gs.blend[i] = it != blend_states.end() ? it->second[i] : gpu::BlendTarget{};
-    gs.alpha_to_coverage = alpha_to_coverage_states.count(arg(c, 1)) != 0;
+    if (arg(c, 1) != g_last_blend) {
+        g_last_blend = arg(c, 1);
+        const auto it = blend_states.find(arg(c, 1));
+        for (unsigned i = 0; i < gpu::kTargets; ++i) gs.blend[i] = it != blend_states.end() ? it->second[i] : gpu::BlendTarget{};
+        gs.alpha_to_coverage = alpha_to_coverage_states.count(arg(c, 1)) != 0;
+    }
     if (arg(c, 2) != 0) std::memcpy(gs.blend_factor, c.mem + arg(c, 2), 16);
     else for (float& f : gs.blend_factor) f = 1;
     ret_stdcall(c, kSOk, 16);
 }
 void om_set_depth(Cpu& c) {                                        // +0x90  0x6D0012, state, stencil ref
-    const auto it = depth_states.find(arg(c, 1));
-    gs.depth = it != depth_states.end() ? it->second : gpu::DepthDesc{};
+    if (arg(c, 1) != g_last_depth) {
+        g_last_depth = arg(c, 1);
+        const auto it = depth_states.find(arg(c, 1));
+        gs.depth = it != depth_states.end() ? it->second : gpu::DepthDesc{};
+    }
     ret_stdcall(c, kSOk, 12);
 }
 void rs_set_state(Cpu& c) {                                        // +0xAC  0x6CFFA5
-    const auto it = raster_states.find(arg(c, 1));
-    gs.raster = it != raster_states.end() ? it->second : gpu::RasterDesc{};
+    if (arg(c, 1) != g_last_raster) {
+        g_last_raster = arg(c, 1);
+        const auto it = raster_states.find(arg(c, 1));
+        gs.raster = it != raster_states.end() ? it->second : gpu::RasterDesc{};
+    }
     ret_stdcall(c, kSOk, 8);
 }
 void query_end(Cpu& c) {
@@ -3672,6 +3687,7 @@ void destroy(std::uint8_t* mem, std::uint32_t obj) {
     layouts.erase(obj);
     gpu_layouts.erase(obj);
     blend_states.erase(obj);
+    if (obj == g_last_blend || obj == g_last_depth || obj == g_last_raster) g_last_blend = g_last_depth = g_last_raster = ~0u;
     alpha_to_coverage_states.erase(obj);
     depth_states.erase(obj);
     raster_states.erase(obj);
