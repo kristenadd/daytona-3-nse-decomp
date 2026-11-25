@@ -1875,8 +1875,14 @@ bool g_render_skipped = false;
 // next present (the game's own work and any wait on the render thread), kept
 // apart for ticks that rendered and ticks that skipped (DCUSA_SKIP_LOG).
 std::chrono::steady_clock::time_point g_tick_start{};
-double g_tick_ms[2]{};
+double g_tick_ms[2]{}, g_tick_cpu_ms[2]{}, g_tick_draws[2]{};
 std::uint32_t g_tick_n[2]{};
+double g_tick_cpu_start = 0;
+double thread_cpu_ms() {
+    timespec t{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
 int g_skip_run = 0;
 constexpr int kMaxSkips = 2;
 std::uint64_t g_skipped_total = 0;
@@ -2086,6 +2092,8 @@ void present(Cpu& c) {
         if (g_tick_start.time_since_epoch().count() != 0) {
             const int kind = g_render_skipped ? 1 : 0;
             g_tick_ms[kind] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_tick_start).count();
+            g_tick_cpu_ms[kind] += thread_cpu_ms() - g_tick_cpu_start;
+            g_tick_draws[kind] += g_frame_draws;
             ++g_tick_n[kind];
         }
         if (static const int skip_every = std::getenv("DCUSA_SKIP_LOG") ? std::atoi(std::getenv("DCUSA_SKIP_LOG")) : 0;
@@ -2094,10 +2102,14 @@ void present(Cpu& c) {
             static std::uint64_t last_skipped = 0;
             const auto t = std::chrono::steady_clock::now();
             const double s = std::chrono::duration<double>(t - last).count();
-            std::fprintf(stderr, "ticks %d: %.1f per second, %llu of %d skipped the render, tick %.2f ms rendered %.2f ms skipped\n",
+            std::fprintf(stderr, "ticks %d: %.1f per second, %llu of %d skipped the render, tick %.2f ms rendered %.2f ms skipped, cpu %.2f ms rendered %.2f ms skipped, draws %.0f rendered %.0f skipped\n",
                          all_presents, skip_every / s, static_cast<unsigned long long>(g_skipped_total - last_skipped),
-                         skip_every, g_tick_n[0] ? g_tick_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_ms[1] / g_tick_n[1] : 0.0);
+                         skip_every, g_tick_n[0] ? g_tick_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_ms[1] / g_tick_n[1] : 0.0,
+                         g_tick_n[0] ? g_tick_cpu_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_cpu_ms[1] / g_tick_n[1] : 0.0,
+                         g_tick_n[0] ? g_tick_draws[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_draws[1] / g_tick_n[1] : 0.0);
             g_tick_ms[0] = g_tick_ms[1] = 0;
+            g_tick_cpu_ms[0] = g_tick_cpu_ms[1] = 0;
+            g_tick_draws[0] = g_tick_draws[1] = 0;
             g_tick_n[0] = g_tick_n[1] = 0;
             last = t;
             last_skipped = g_skipped_total;
@@ -2109,6 +2121,7 @@ void present(Cpu& c) {
     }
     pace_present(c, arg(c, 1));
     g_tick_start = std::chrono::steady_clock::now();
+    g_tick_cpu_start = thread_cpu_ms();
     // DCUSA_PAD_SCRIPT_FROM=attract: a pad script's frame 1 is the first present
     // of attract (boot state 8), so one script fits a paced or unpaced boot.
     static const bool from_attract = [] {

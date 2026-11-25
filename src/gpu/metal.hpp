@@ -113,6 +113,9 @@ void draw(const DrawState& s, std::uint32_t count, std::uint32_t start);
 
 // Commits the frame without waiting for it (at most two frames stay queued).
 void submit();
+// The render thread's waits so far (DCUSA_RT_LOG): on the GPU to free a frame,
+// and for a drawable.
+void rt_waits(double* gpu_ms, double* drawable_ms);
 
 // A CAMetalLayer (as void*, so C++ callers need no Objective-C) that show()
 // draws into; nullptr detaches it.

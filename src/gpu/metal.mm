@@ -167,6 +167,8 @@ struct Device {
 Device* g_dev = nullptr;
 bool g_checked = false;
 bool g_trace = false;  // set_trace(): one line per draw
+// DCUSA_RT_LOG: the render thread's waits, summed (gpu_queue.mm prints them).
+double g_rt_gpu_wait_ms = 0, g_rt_drawable_ms = 0;
 
 void trace_draw(const DrawState& s, const char* kind, std::uint32_t count, const char* result) {
     if (!g_trace) return;
@@ -2165,7 +2167,9 @@ void show(std::uint32_t key) {
     const CGFloat scale = g_layer.contentsScale;
     const CGSize pixels = CGSizeMake(std::max<CGFloat>(1, points.width * scale), std::max<CGFloat>(1, points.height * scale));
     if (!CGSizeEqualToSize(g_layer.drawableSize, pixels)) g_layer.drawableSize = pixels;
+    const auto d0 = std::chrono::steady_clock::now();
     id<CAMetalDrawable> drawable = [g_layer nextDrawable];
+    g_rt_drawable_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - d0).count();
     if (drawable == nil) return;
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = drawable.texture;
@@ -2236,7 +2240,11 @@ void submit() {
     }();
     while (!d.in_flight.empty()) {
         auto& [cmd, arenas] = d.in_flight.front();
-        if (d.in_flight.size() > in_flight) [cmd waitUntilCompleted];
+        if (d.in_flight.size() > in_flight) {
+            const auto w0 = std::chrono::steady_clock::now();
+            [cmd waitUntilCompleted];
+            g_rt_gpu_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
+        }
         else if (cmd.status < MTLCommandBufferStatusCompleted) break;
         check_completed(cmd);
         release_arenas(arenas);
@@ -2451,6 +2459,11 @@ std::string memory_report() {
     std::snprintf(size_line, sizeof size_line, " {sampled >=2048 %.0f, >=1024 %.0f, smaller %.0f; private %.0f; pipelines %zu}",
                   big2k, big1k, small, priv, d.pipelines.size());
     return std::string(line) + arena_line + size_line;
+}
+
+void rt_waits(double* gpu_ms, double* drawable_ms) {
+    *gpu_ms = g_rt_gpu_wait_ms;
+    *drawable_ms = g_rt_drawable_ms;
 }
 
 }  // namespace dcusa::gpu
