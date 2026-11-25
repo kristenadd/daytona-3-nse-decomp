@@ -689,13 +689,17 @@ std::string replace_calls(std::string src, const std::string& name, const std::s
 
 // Lighter versions of costly pixel shaders (DCUSA_LITE_PS, hex keys; on iOS
 // the catch fence 41cb0c4d61f2dfe5, which alone took the grandstand frames
-// from about 17 to 28 ms of an iPhone's GPU), rewritten when they load
+// from about 17 to 28 ms of an iPhone's GPU, and the stadium's three, whose
+// shading was about 4.8 ms of a race frame), rewritten when they load
 // (DCUSA_LITE_LEVEL, lite_shader). DCUSA_LITE_PS=0: none.
 const std::vector<std::uint64_t>& lite_keys() {
     static const std::vector<std::uint64_t> keys = [] {
         const char* v = std::getenv("DCUSA_LITE_PS");
         if (v != nullptr) return std::strcmp(v, "0") == 0 ? std::vector<std::uint64_t>{} : env_keys("DCUSA_LITE_PS");
-        return TARGET_OS_IPHONE ? std::vector<std::uint64_t>{0x41cb0c4d61f2dfe5ull} : std::vector<std::uint64_t>{};
+        // The catch fence and the stadium's three (the user approved the look).
+        return TARGET_OS_IPHONE ? std::vector<std::uint64_t>{0x41cb0c4d61f2dfe5ull, 0xec84dad4c1c9bee8ull, 0xe3853f2da9440e08ull,
+                                                              0xe4869609cfda9c01ull}
+                                : std::vector<std::uint64_t>{};
     }();
     return keys;
 }
