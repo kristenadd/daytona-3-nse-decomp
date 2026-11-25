@@ -295,6 +295,8 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_PAD_TRACE=1` | The pad snapshot and what the game made of it. |
 | `DCUSA_WATCH=<addr>[,...]` | Print guest memory at presents 1 and every `DCUSA_EVERY` (default 100). |
 | `DCUSA_MEMDUMP=<prefix>:<n>,...` | At those presents after attract starts, write the guest's readable memory to `<prefix>.<n>` (runs of address, length, bytes), to find a value by how it changes. |
+| `DCUSA_MEMDUMP_IMAGE=1` | `DCUSA_MEMDUMP` writes only the program image (its globals, 32 MB a dump). |
+| `DCUSA_WRITE_WATCH=<hex address>` | (dcrun) Logs each host pc that writes that guest dword ("write watch: ... host pc ... slide ...", for atos), from `DCUSA_WRITE_WATCH_AFTER` seconds (default 30): its host page is kept read-only and every write to the page faults. Slow; for finding who writes a value. |
 | `DCUSA_IO=1` | Log guest file access; `DCUSA_IO_STACK=<text>` adds the call stack for paths containing it. |
 | `DCUSA_DEBUG_OUTPUT=1` | All of the game's OutputDebugString lines (with `DCUSA_STATS`; otherwise only the first 8). |
 | `DCUSA_DSOUND_TRACE=1` | DirectSound calls per buffer. |

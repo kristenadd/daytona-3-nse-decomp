@@ -1,10 +1,13 @@
 // Runs a prepared Daytona.exe until the first thing that is not ported.
 #include <mach-o/dyld.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +17,7 @@
 #include <sstream>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "audio/null_output.hpp"
@@ -36,12 +40,46 @@ namespace {
 
 std::uintptr_t g_guest_base = 0;
 
+// DCUSA_WRITE_WATCH=<hex guest address>: who writes that dword. After
+// DCUSA_WRITE_WATCH_AFTER seconds (default 30) the host page holding it is
+// kept read-only (re-protected every 2 ms); a write to the page faults, and a
+// write to the dword itself is logged once per host pc ("write watch: pc ...",
+// for atos), then the page is opened and the write goes on. A debugging aid.
+std::uint32_t g_watch_addr = 0;
+std::uintptr_t g_watch_page = 0;
+std::atomic<bool> g_watch_on{false};
+std::uint64_t g_watch_seen[64];
+std::atomic<int> g_watch_n{0};
+
 // A guest load or store outside committed memory. Reports the guest address and
 // exits like a fail-closed stop; only async-signal-safe calls.
 void on_fault(int sig, siginfo_t* info, void* context) {
     const auto at = reinterpret_cast<std::uintptr_t>(info->si_addr);
     char buf[192];
     int n;
+    if (g_watch_on.load(std::memory_order_relaxed) && (at & ~static_cast<std::uintptr_t>(16383)) == g_watch_page) {
+#if defined(__aarch64__)
+        const auto* uc = static_cast<const ucontext_t*>(context);
+        const std::uint64_t pc = uc->uc_mcontext->__ss.__pc;
+        const std::uint32_t guest = static_cast<std::uint32_t>(at - g_guest_base);
+        if (guest >= g_watch_addr && guest < g_watch_addr + 4) {
+            bool seen = false;
+            const int count = g_watch_n.load(std::memory_order_relaxed);
+            for (int i = 0; i < count && i < 64; ++i)
+                if (g_watch_seen[i] == pc) seen = true;
+            if (!seen && count < 64) {
+                g_watch_seen[count] = pc;
+                g_watch_n.store(count + 1, std::memory_order_relaxed);
+                n = std::snprintf(buf, sizeof buf, "write watch: %08X written at host pc %llx lr %llx slide %llx\n", guest,
+                                  static_cast<unsigned long long>(pc), static_cast<unsigned long long>(uc->uc_mcontext->__ss.__lr),
+                                  static_cast<unsigned long long>(_dyld_get_image_vmaddr_slide(0)));
+                if (n > 0) (void)!write(2, buf, static_cast<std::size_t>(n));
+            }
+        }
+#endif
+        mprotect(reinterpret_cast<void*>(g_watch_page), 16384, PROT_READ | PROT_WRITE);
+        return;
+    }
     if (g_guest_base != 0 && at >= g_guest_base && at - g_guest_base < (1ull << 32) + (1ull << 16)) {
         n = std::snprintf(buf, sizeof buf, "guest fault (signal %d): access to unmapped guest address %08llX\n", sig,
                           static_cast<unsigned long long>(at - g_guest_base));
@@ -72,6 +110,20 @@ void install_fault_report(const std::uint8_t* base) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGBUS, &sa, nullptr);
     sigaction(SIGSEGV, &sa, nullptr);
+    if (const char* w = std::getenv("DCUSA_WRITE_WATCH")) {
+        g_watch_addr = static_cast<std::uint32_t>(std::strtoul(w, nullptr, 16));
+        g_watch_page = (g_guest_base + g_watch_addr) & ~static_cast<std::uintptr_t>(16383);
+        const int after = std::getenv("DCUSA_WRITE_WATCH_AFTER") ? std::atoi(std::getenv("DCUSA_WRITE_WATCH_AFTER")) : 30;
+        std::thread([after] {
+            std::this_thread::sleep_for(std::chrono::seconds(after));
+            g_watch_on = true;
+            std::fprintf(stderr, "write watch: on for %08X\n", g_watch_addr);
+            for (;;) {
+                mprotect(reinterpret_cast<void*>(g_watch_page), 16384, PROT_READ);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }).detach();
+    }
 }
 
 // The cabinet's operator menu belongs to the shell (Shell.exe), which does not
