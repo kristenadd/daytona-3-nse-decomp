@@ -85,7 +85,14 @@ agreed to this).
       pictures (46 same build without). Removing the glow chain entirely: 54,
       with dips to 17 in heavy stretches. Freeing the GPU raises the main
       thread's CPU per rendered tick (10 to 12-15 ms; it stays on P cores),
-      so the CPU becomes the limit. Next: the main thread's spread of 1-5%
+      so the CPU becomes the limit. A race alternates GPU-bound stretches
+      (the main thread waits 4-7 ms a tick on the render thread) and
+      CPU-bound ones (a rendered tick's own work 15-16 ms); the game's bake
+      frequency and dynamic resolution are not the cause (no change with
+      them off or the GPU reported slow). The CRI sound server in parallel on
+      an efficiency core (`DCUSA_PARALLEL_THREADS=59E660
+      DCUSA_PARALLEL_QOS=utility`) shortens a rendered tick by 1.2 ms but
+      not the average. Next: the main thread's spread of 1-5%
       costs (scene walk loop memory misses, draw path 0x6CFDB0, 0x458BC0,
       the Model 2 interpreter loop).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit

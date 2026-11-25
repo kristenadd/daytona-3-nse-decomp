@@ -620,7 +620,16 @@ std::uint32_t sched_create_thread(Cpu& c, std::uint32_t start, std::uint32_t par
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     // Guest threads take turns with the main one: all of them are the game's
     // frame (on iOS, default QoS may mean an efficiency core).
-    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+    // A parallel thread does not hold up the frame while it runs:
+    // DCUSA_PARALLEL_QOS=utility lets it use an efficiency core, leaving the
+    // performance cores (an iPhone has two) to the main and render threads.
+    static const qos_class_t free_qos = [] {
+        const char* e = std::getenv("DCUSA_PARALLEL_QOS");
+        if (e != nullptr && std::strcmp(e, "utility") == 0) return QOS_CLASS_UTILITY;
+        if (e != nullptr && std::strcmp(e, "default") == 0) return QOS_CLASS_DEFAULT;
+        return QOS_CLASS_USER_INTERACTIVE;
+    }();
+    pthread_attr_set_qos_class_np(&attr, t.free ? free_qos : QOS_CLASS_USER_INTERACTIVE, 0);
     pthread_t host;
     const int rc = pthread_create(&host, &attr, host_main, reinterpret_cast<void*>(static_cast<std::uintptr_t>(slot)));
     pthread_attr_destroy(&attr);

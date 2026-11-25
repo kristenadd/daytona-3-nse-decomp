@@ -2130,6 +2130,11 @@ void present(Cpu& c) {
             std::fprintf(stderr, "mem %d: stored textures %.0f (%u) buffers %.0f (%u) other %.0f | metal %s\n",
                          all_presents, tex, n_tex, buf, n_buf, other, gpu::memory_report().c_str());
         }
+        // With DCUSA_HITCH on, the skip log also sums the waits (ms per tick):
+        // on the render thread (handover) and on guest threads (wait).
+        static double handover_ms = 0, wait_ms = 0;
+        handover_ms += hitch::g_ns[hitch::Handover].load() / 1e6;
+        wait_ms += hitch::g_ns[hitch::Wait].load() / 1e6;
         report_hitch(all_presents);
         // DCUSA_SKIP_LOG=<n>: every n presents, the game's tick rate (60 is full
         // speed) and how many of those ticks left out the scene render.
@@ -2151,6 +2156,10 @@ void present(Cpu& c) {
                          skip_every, g_tick_n[0] ? g_tick_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_ms[1] / g_tick_n[1] : 0.0,
                          g_tick_n[0] ? g_tick_cpu_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_cpu_ms[1] / g_tick_n[1] : 0.0,
                          g_tick_n[0] ? g_tick_draws[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_draws[1] / g_tick_n[1] : 0.0);
+            if (hitch::enabled())
+                std::fprintf(stderr, "waits %d: handover %.2f ms, guest threads %.2f ms per tick\n", all_presents,
+                             handover_ms / skip_every, wait_ms / skip_every);
+            handover_ms = wait_ms = 0;
             g_tick_ms[0] = g_tick_ms[1] = 0;
             g_tick_cpu_ms[0] = g_tick_cpu_ms[1] = 0;
             g_tick_draws[0] = g_tick_draws[1] = 0;
