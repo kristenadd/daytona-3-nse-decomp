@@ -298,7 +298,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_DEBUG_OUTPUT=1` | All of the game's OutputDebugString lines (with `DCUSA_STATS`; otherwise only the first 8). |
 | `DCUSA_DSOUND_TRACE=1` | DirectSound calls per buffer. |
 | `DCUSA_AUDIO_STATS=1`, `DCUSA_AUDIO_DUMP=<dir>` | Mixer statistics; dump each voice's buffer. |
-| `DCUSA_PARALLEL_THREADS=<hex entry>[,...]` | Run these guest threads in parallel. |
+| `DCUSA_PARALLEL_THREADS=<hex entry>[,...]\|0` | Run these guest threads in parallel (procedure or thread entry addresses). Default on iOS: the CRI sound server `59E660`, on an efficiency core (`DCUSA_PARALLEL_QOS=utility` is the iOS default; `default` or unset elsewhere keeps user-interactive); none elsewhere. `0`: none. |
 | `DCUSA_SLICE=<ms>` | Time slice at a frame yield (default 0). |
 | `DCUSA_RELEASE_PAGES=0\|zero` | Keep freed heap pages, or clear them at once (a use-after-free test). |
 | `DCUSA_SELFTEST_MATH=1`, `DCUSA_SELFTEST_BC=1` | Compare the translated CRT maths, and the BC decoder, with the host. |

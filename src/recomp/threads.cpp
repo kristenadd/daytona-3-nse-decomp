@@ -34,11 +34,22 @@ std::mutex g_rt;
 thread_local int t_rt_depth = 0;
 }  // namespace
 
-bool rt_parallel() {
-    static const bool on = [] {
+// DCUSA_PARALLEL_THREADS: the guest threads that run in parallel. On iOS the
+// CRI sound server (0x59E660) by default, on an efficiency core
+// (DCUSA_PARALLEL_QOS): it took 5 to 11 ms of the main thread's slowest
+// frames, and in parallel an iPhone race drew about 1 picture a second more.
+// "0": none.
+const char* parallel_threads() {
+    static const char* list = [] {
         const char* v = std::getenv("DCUSA_PARALLEL_THREADS");
-        return v != nullptr && *v != 0;
+        if (v != nullptr) return std::strcmp(v, "0") == 0 ? "" : v;
+        return TARGET_OS_IPHONE ? "59E660" : "";
     }();
+    return list;
+}
+
+bool rt_parallel() {
+    static const bool on = *parallel_threads() != 0;
     return on;
 }
 
@@ -608,7 +619,7 @@ std::uint32_t sched_create_thread(Cpu& c, std::uint32_t start, std::uint32_t par
     // procedure (the CRI sound server is 0x59E660).
     if (rt_parallel()) {
         const std::uint32_t real = param != 0 && param + 0x58u > param ? ld32(M, param + 0x54u) : 0u;
-        const char* list = std::getenv("DCUSA_PARALLEL_THREADS");
+        const char* list = parallel_threads();
         for (const char* q = list; q != nullptr && *q;) {
             char* end = nullptr;
             const unsigned long v = std::strtoul(q, &end, 16);
@@ -644,6 +655,7 @@ std::uint32_t sched_create_thread(Cpu& c, std::uint32_t start, std::uint32_t par
     // performance cores (an iPhone has two) to the main and render threads.
     static const qos_class_t free_qos = [] {
         const char* e = std::getenv("DCUSA_PARALLEL_QOS");
+        if (e == nullptr && TARGET_OS_IPHONE) return QOS_CLASS_UTILITY;
         if (e != nullptr && std::strcmp(e, "utility") == 0) return QOS_CLASS_UTILITY;
         if (e != nullptr && std::strcmp(e, "default") == 0) return QOS_CLASS_DEFAULT;
         return QOS_CLASS_USER_INTERACTIVE;
