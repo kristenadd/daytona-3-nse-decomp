@@ -222,6 +222,10 @@ only the keys given, and whether that edition reads one is not checked.
 
 "Title boot screen" (on by default) shows the boot screen (`DCUSA_BOOT_SCREEN`).
 
+The app declares itself a racing game with Game Mode support
+(`LSApplicationCategoryType`, `LSSupportsGameMode` in Info.plist), so iOS
+gives it Game Mode's CPU and GPU priority while it is in front.
+
 ### Environment variables: playing
 
 | Variable | Effect |
@@ -237,6 +241,10 @@ only the keys given, and whether that edition reads one is not checked.
 | `DCUSA_MSAA=4\|2\|0` | Multisampling (default 4). With 0, FXAA is on instead. |
 | `DCUSA_MS_STORE=1\|never` | Multisampled samples: by default a pass only resolves them, and keeps them when the pass is ended by a blit, clear or mip generation in its middle (it resumes) or once a later pass has loaded them. `1`: always kept (as before); `never`: never kept (a test). `DCUSA_MS_LOG=1` logs surfaces that start keeping them (2: every load, 3: with who ended the pass). |
 | `DCUSA_TRIM_VS=1` | Each vertex shader compiled per pixel shader with only the outputs it reads (position only for depth-only passes). Off by default: no gain on an iPhone. |
+| `DCUSA_PCF=4\|16` | Taps of the nearest shadow cascade's filter in the lit world shaders (rewritten when a shader loads). 4 (iOS default): the even offsets of the game's 4x4, which cover the same texels with bilinear compares; 16 (elsewhere): as translated. `DCUSA_PCF_LOG=1` logs each rewrite and each alpha-discard variant. |
+| `DCUSA_ALPHA_DISCARD=0` | Turns off the alpha-discard variants: a pixel shader whose output alpha is an opacity map read, drawn with source-alpha blending, reads the opacity first and discards fully transparent pixels (the catch fence's holes). On by default. |
+| `DCUSA_LOD=0\|1` | Lower-detail meshes: draws with the pixel shaders in `DCUSA_LOD_PS` (hex keys; default the stadium's three) use index buffers simplified with meshoptimizer, made in the background the first time each mesh is drawn. On by default on iOS, off elsewhere. `DCUSA_LOD_RATIO` (target share of indices, default 0.5), `DCUSA_LOD_ERROR` (meshoptimizer's relative error bound, default 0.01), `DCUSA_LOD_LOG=1` (each mesh's result). |
+| `DCUSA_SKIP_PS=<keys>`, `DCUSA_FLAT_PS=<keys>`, `DCUSA_HALF_PS=<keys>` | Tests of what draws cost: leave out the draws with those pixel shaders, draw them in one flat colour, or draw half their triangles. `DCUSA_SKIP_ODD=1`: the skips apply to odd frames only. |
 | `DCUSA_ENCODER_LABELS=1` | Names each Metal render encoder after its targets, for Instruments' Metal System Trace. |
 | `DCUSA_AA=1\|0\|split` | FXAA on, off, or on the right half only (default: on only without MSAA). |
 | `DCUSA_FRAME_SKIP=0\|1\|2` | Leave the scene render out of late ticks: 0 off (Mac default), 1 when late (iOS default), 2 every other tick (a test). |

@@ -37,6 +37,9 @@
         </dict>
     </dict>
     <key>UIRequiresFullScreen</key><true/>
+    <!-- A game: iOS Game Mode (CPU and GPU priority, less background work). -->
+    <key>LSApplicationCategoryType</key><string>public.app-category.racing-games</string>
+    <key>LSSupportsGameMode</key><true/>
     <key>UIStatusBarHidden</key><true/>
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>

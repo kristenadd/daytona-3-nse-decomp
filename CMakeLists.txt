@@ -81,7 +81,10 @@ add_library(dcusa_recomp STATIC
     src/gpu/metal.mm
     src/gpu/bc_decode.cpp
     src/gpu/boot_screen.mm
-    src/gpu/gpu_queue.mm)
+    src/gpu/gpu_queue.mm
+    # meshoptimizer (MIT, third_party/meshoptimizer): the simplifier for DCUSA_LOD.
+    third_party/meshoptimizer/src/simplifier.cpp
+    third_party/meshoptimizer/src/allocator.cpp)
 target_include_directories(dcusa_recomp PUBLIC src)
 target_include_directories(dcusa_recomp PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 add_dependencies(dcusa_recomp dcusa_build_info)

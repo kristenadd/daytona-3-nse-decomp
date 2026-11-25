@@ -6,6 +6,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <execinfo.h>
+#include "../../third_party/meshoptimizer/src/meshoptimizer.h"
 #include <map>
 #import <QuartzCore/CAMetalLayer.h>
 #include <TargetConditionals.h>
@@ -190,10 +191,11 @@ double g_rt_gpu_wait_ms = 0, g_rt_drawable_ms = 0;
 void trace_draw(const DrawState& s, const char* kind, std::uint32_t count, const char* result) {
     if (!g_trace) return;
     std::fprintf(stderr, "draw %s n %u vs %016llx ps %016llx rt %06x/%06x ds %06x vp %.0f,%.0f %.0fx%.0f z %.2f-%.2f topo %u "
-                 "blend %d mask %x cull %u ccw %d scissor %d depth %d/%d/%u vb %06x stride %u off %u ib %06x fmt %u srv",
+                 "blend %d %u/%u/%u %u/%u/%u mask %x cull %u ccw %d scissor %d depth %d/%d/%u vb %06x stride %u off %u ib %06x fmt %u srv",
                  kind, count, static_cast<unsigned long long>(s.vs), static_cast<unsigned long long>(s.ps), s.rtv[0],
                  s.rtv[1], s.dsv, s.viewport[0], s.viewport[1], s.viewport[2], s.viewport[3], s.viewport[4], s.viewport[5],
-                 s.topology, s.blend[0].enable, s.blend[0].write_mask, s.raster.cull, s.raster.front_ccw, s.raster.scissor,
+                 s.topology, s.blend[0].enable, s.blend[0].src, s.blend[0].dst, s.blend[0].op, s.blend[0].src_alpha,
+                 s.blend[0].dst_alpha, s.blend[0].op_alpha, s.blend[0].write_mask, s.raster.cull, s.raster.front_ccw, s.raster.scissor,
                  s.depth.enable, s.depth.write, s.depth.func, s.vb[0], s.stride[0], s.voff[0], s.ib, s.ib_format);
     for (unsigned i = 0; i < 6; ++i) std::fprintf(stderr, " %06x", s.ps_srv[i]);
     std::fprintf(stderr, " cb %06x %06x: %s", s.ps_cb[0], s.vs_cb[0], result);
@@ -561,6 +563,97 @@ bool trim_enabled() {
     return on;
 }
 
+// The game's nearest shadow cascade is read with a 4x4 filter: two loops of
+// sample_compare over offsets -2..1, averaged by 0.0625 (107 pixel shaders,
+// all the lit world). The lookup is already shifted half a texel, so each
+// compare tap blends a 2x2 block: the even offsets alone (-2 and 0) cover the
+// same 4x4 texels in 4 taps instead of 16. DCUSA_PCF=4 (the iOS default) or
+// 16 (as translated, elsewhere).
+std::string lighter_shadow_filter(std::string src) {
+    static const int taps = [] {
+        const char* v = std::getenv("DCUSA_PCF");
+        return v != nullptr ? std::atoi(v) : (TARGET_OS_IPHONE ? 4 : 16);
+    }();
+    if (taps != 4) return src;
+    std::size_t at = 0;
+    while ((at = src.find("for (int ", at)) != std::string::npos) {
+        // "for (int _A = -2; _A <= 1; _B = _C, _A++)" (outer), the inner one next.
+        const std::size_t eol = src.find('\n', at);
+        const std::string line = src.substr(at, eol - at);
+        const std::size_t name_end = line.find(' ', 9);
+        const std::string var = line.substr(9, name_end - 9);
+        if (line.find(" = -2; " + var + " <= 1; ") == std::string::npos || line.find(", " + var + "++)") == std::string::npos) {
+            at = eol;
+            continue;
+        }
+        const std::size_t inner = src.find("for (int ", eol);
+        const std::size_t avg = src.find(" * 0.0625)", eol);
+        if (inner == std::string::npos || avg == std::string::npos || inner > at + 400 || avg > at + 900 || avg < inner) {
+            at = eol;
+            continue;
+        }
+        const std::size_t inner_eol = src.find('\n', inner);
+        const std::string iline = src.substr(inner, inner_eol - inner);
+        const std::size_t iname_end = iline.find(' ', 9);
+        const std::string ivar = iline.substr(9, iname_end - 9);
+        if (iline.find(" = -2; " + ivar + " <= 1; ") == std::string::npos || iline.find(", " + ivar + "++)") == std::string::npos) {
+            at = eol;
+            continue;
+        }
+        static int rewritten = 0;
+        if (std::getenv("DCUSA_PCF_LOG")) std::fprintf(stderr, "pcf: 4-tap filter %d\n", ++rewritten);
+        src.replace(avg, 10, " * 0.25)");
+        src.replace(inner + iline.find(", " + ivar + "++)"), ivar.size() + 5, ", " + ivar + " += 2)");
+        src.replace(at + line.find(", " + var + "++)"), var.size() + 5, ", " + var + " += 2)");
+        at = inner_eol;
+    }
+    return src;
+}
+
+// A pixel shader whose output alpha is an opacity map read ("X.w = (g_OpacityMap
+// .sample(...)...;"), drawn with source-alpha blending, gains nothing from a
+// pixel whose alpha is 0: the catch fence's holes ran the whole lit material
+// (12 textures) to blend in nothing. This variant reads the opacity first, as
+// soon as what it needs is defined, and discards those pixels. Empty when the
+// shader has no such line. DCUSA_ALPHA_DISCARD=0 turns it off.
+std::string alpha_discard_variant(const std::string& src) {
+    const std::size_t hit = src.find(".w = (g_OpacityMap.sample(");
+    if (hit == std::string::npos) return {};
+    const std::size_t bol = src.rfind('\n', hit) + 1;
+    const std::size_t eq = src.find(" = ", bol);
+    const std::size_t semi = src.find(";\n", eq);
+    if (eq == std::string::npos || semi == std::string::npos) return {};
+    const std::string rhs = src.substr(eq + 3, semi - eq - 3);
+    const std::size_t body = src.find("main0_out out = {};\n");
+    if (body == std::string::npos || body > bol) return {};
+    // After the last definition of a local the expression uses.
+    std::size_t after = body + std::strlen("main0_out out = {};\n");
+    for (std::size_t i = 0; i < rhs.size(); ++i) {
+        if (rhs[i] != '_' || (i > 0 && word_char(rhs[i - 1])) || i + 1 >= rhs.size() || !std::isdigit(static_cast<unsigned char>(rhs[i + 1])))
+            continue;
+        std::size_t j = i + 1;
+        while (j < rhs.size() && word_char(rhs[j])) ++j;
+        const std::string name = rhs.substr(i, j - i);
+        i = j;
+        // A parameter (declared in the signature, before the body) needs nothing.
+        const std::string decl_tail = " " + name + " = ";
+        std::size_t def = std::string::npos;
+        for (std::size_t at = src.find(decl_tail, body); at != std::string::npos && at < bol; at = src.find(decl_tail, at + 1)) {
+            const std::size_t line = src.rfind('\n', at) + 1;
+            // "    <type> _N = ...": a type before the name, not "    _N = " (an update).
+            if (src.compare(line, 4, "    ") == 0 && line + 4 < at && src[line + 4] != '_') def = src.find('\n', at) + 1;
+        }
+        if (def == std::string::npos) {
+            if (src.find(decl_tail, body) != std::string::npos && src.find(decl_tail, body) < bol) return {};
+            continue;
+        }
+        after = std::max(after, def);
+    }
+    std::string out = src;
+    out.insert(after, "    if ((" + rhs + ") < 0.002) discard_fragment();\n");
+    return out;
+}
+
 Program& program(std::uint64_t key, bool vertex) {
     Device& d = *g_dev;
     Program& p = d.programs[key];
@@ -574,6 +667,7 @@ Program& program(std::uint64_t key, bool vertex) {
         return p;
     }
     p.source = declare_compared_as_depth(source.UTF8String);
+    if (!vertex) p.source = lighter_shadow_filter(p.source);
     if (!vertex && trim_enabled()) p.source = trim_fragment_inputs(p.source, &p.locations);
     std::string error;
     p.fn = compile_main0(p.source, &error);
@@ -1460,6 +1554,19 @@ id<MTLTexture> depth_as_color(Texture& t) {
 }
 
 // Binds everything and returns the open encoder, or nil when the draw cannot run.
+// Comma-separated hex keys from an environment variable.
+std::vector<std::uint64_t> env_keys(const char* name) {
+    std::vector<std::uint64_t> out;
+    if (const char* v = std::getenv(name))
+        for (const char* p = v; *p;) {
+            char* end = nullptr;
+            out.push_back(std::strtoull(p, &end, 16));
+            if (end == p) break;
+            p = *end == ',' ? end + 1 : end;
+        }
+    return out;
+}
+
 id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) {
     Device& d = *g_dev;
     bool ok = false;
@@ -1475,8 +1582,39 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
     // No pixel shader is a depth-only pass (shadow maps): D3D rasterizes and
     // writes depth, and so does a Metal pipeline without a fragment function.
     static Program none;
-    Program& ps = s.ps != 0 ? program(s.ps, false) : none;
-    if (s.ps != 0 && ps.fn == nil) return nil;
+    // DCUSA_FLAT_PS=<keys>: those pixel shaders replaced by one colour (a test:
+    // how much of a draw's GPU time is its shading).
+    static const std::vector<std::uint64_t> flat_keys = env_keys("DCUSA_FLAT_PS");
+    static Program flat;
+    const bool is_flat = !flat_keys.empty() && std::find(flat_keys.begin(), flat_keys.end(), s.ps) != flat_keys.end();
+    if (is_flat && flat.fn == nil)
+        flat.fn = compile_main0("#include <metal_stdlib>\nusing namespace metal;\n"
+                                "fragment float4 main0() { return float4(0.45, 0.45, 0.45, 1.0); }\n", nullptr);
+    Program* ps_ptr = is_flat ? &flat : s.ps != 0 ? &program(s.ps, false) : &none;
+    if (s.ps != 0 && ps_ptr->fn == nil) return nil;
+    // Source-alpha blending into target 0: the alpha-discard variant, if any.
+    static const bool alpha_discard = [] {
+        const char* v = std::getenv("DCUSA_ALPHA_DISCARD");
+        return v == nullptr || std::strcmp(v, "0") != 0;
+    }();
+    if (alpha_discard && !is_flat && s.ps != 0 && s.blend[0].enable && s.blend[0].src == 5 && s.blend[0].dst == 6 &&
+        s.blend[0].op == 1) {
+        static std::unordered_map<std::uint64_t, Program> discards;
+        auto [it, fresh] = discards.try_emplace(s.ps);
+        if (fresh) {
+            const std::string src = alpha_discard_variant(ps_ptr->source);
+            if (!src.empty()) {
+                std::string error;
+                it->second.fn = compile_main0(src, &error);
+                it->second.source = src;
+                it->second.locations = ps_ptr->locations;
+                if (it->second.fn == nil) problem("alpha-discard variant of " + key_text(s.ps) + " does not compile: " + error);
+                else if (std::getenv("DCUSA_PCF_LOG")) std::fprintf(stderr, "alpha discard: %s\n", key_text(s.ps).c_str());
+            }
+        }
+        if (it->second.fn != nil) ps_ptr = &it->second;
+    }
+    Program& ps = *ps_ptr;
     // The pair's vertex function, looked up once (most draws repeat the last pair).
     static std::uint64_t last_vs = 0, last_ps = ~0ull;
     static Program* last = nullptr;
@@ -2265,6 +2403,10 @@ bool skipped_draw(const DrawState& s) {
         }
         return out;
     }();
+    // DCUSA_SKIP_ODD=1: the DCUSA_SKIP_PS draws are left out of odd frames only,
+    // so consecutive frames show what they draw.
+    static const bool odd_only = std::getenv("DCUSA_SKIP_ODD") != nullptr;
+    if (odd_only && (g_ms_frame & 1) == 0) return false;
     return (!ps.empty() && std::find(ps.begin(), ps.end(), s.ps) != ps.end()) ||
            (!srv.empty() && std::find(srv.begin(), srv.end(), s.ps_srv[0]) != srv.end()) ||
            (ps_rt.first != 0 && s.ps == ps_rt.first && s.rtv[0] == ps_rt.second && small_source(s));
@@ -2437,6 +2579,115 @@ bool native_glow_draw(const DrawState& s) {
     return true;
 }
 
+// Lower-detail meshes (DCUSA_LOD): draws with the listed pixel shaders (on
+// iOS the stadium's: its 870,000 indices a frame were about 3 ms of an
+// iPhone's GPU) are drawn from index buffers simplified with meshoptimizer.
+// Each draw's mesh (its index range and the positions it reaches) is copied
+// once and simplified on a background queue; until that is done the draw
+// uses the game's indices. Chunk borders are locked so neighbours meet.
+struct Lod {
+    std::atomic<int> state{0};  // 0 being made, 1 ready, 2 not worth it
+    id<MTLBuffer> buf = nil;
+    std::uint32_t count = 0;
+};
+
+const std::vector<std::uint64_t>& lod_keys() {
+    static const std::vector<std::uint64_t> keys = [] {
+        const char* on = std::getenv("DCUSA_LOD");
+        if (on != nullptr && std::strcmp(on, "0") == 0) return std::vector<std::uint64_t>{};
+        if (std::getenv("DCUSA_LOD_PS") != nullptr) return env_keys("DCUSA_LOD_PS");
+        if (TARGET_OS_IPHONE == 0 && on == nullptr) return std::vector<std::uint64_t>{};
+        return std::vector<std::uint64_t>{0xec84dad4c1c9bee8ull, 0xe3853f2da9440e08ull, 0xe4869609cfda9c01ull};
+    }();
+    return keys;
+}
+
+// The simplified indices for this draw, or nullptr (not ready, not a lod draw).
+const Lod* lod_for(const DrawState& s, const BufferRef& ib, NSUInteger ib_at, std::uint32_t count, std::int32_t base) {
+    const auto& keys = lod_keys();
+    if (keys.empty() || s.topology != 4 || count < 600 || std::find(keys.begin(), keys.end(), s.ps) == keys.end())
+        return nullptr;
+    if (s.layout == nullptr) return nullptr;
+    const VertexElement* pos = nullptr;
+    for (const VertexElement& e : *s.layout)
+        if (e.index == 0 && upper(e.semantic) == "POSITION") pos = &e;
+    if (pos == nullptr || pos->format != 6 || pos->slot >= kStreams) return nullptr;  // R32G32B32_FLOAT
+    auto vb = g_dev->buffers.find(s.vb[pos->slot]);
+    if (vb == g_dev->buffers.end()) return nullptr;
+    const std::uint32_t stride = s.stride[pos->slot];
+    const NSUInteger vb_at = vb->second.off + s.voff[pos->slot] + pos->offset;
+    const bool wide = s.ib_format == 42;
+    struct Key {
+        const void* ib;
+        NSUInteger ib_at;
+        const void* vb;
+        NSUInteger vb_at;
+        std::uint32_t count, stride;
+        std::int32_t base;
+        bool operator==(const Key& o) const { return std::memcmp(this, &o, sizeof *this) == 0; }
+    };
+    struct Hash {
+        std::size_t operator()(const Key& k) const {
+            std::size_t h = 1469598103934665603ull;
+            const auto* b = reinterpret_cast<const unsigned char*>(&k);
+            for (std::size_t i = 0; i < sizeof k; ++i) h = (h ^ b[i]) * 1099511628211ull;
+            return h;
+        }
+    };
+    static std::unordered_map<Key, std::shared_ptr<Lod>, Hash> lods;
+    Key k{};
+    k.ib = (__bridge const void*)ib.buf;
+    k.ib_at = ib.off + ib_at;
+    k.vb = (__bridge const void*)vb->second.buf;
+    k.vb_at = vb_at;
+    k.count = count;
+    k.stride = stride;
+    k.base = base;
+    auto [it, fresh] = lods.try_emplace(k);
+    if (!fresh) return it->second->state.load(std::memory_order_acquire) == 1 ? it->second.get() : nullptr;
+    auto lod = std::make_shared<Lod>();
+    it->second = lod;
+    // Copy the mesh now (the arenas move on), simplify it elsewhere.
+    std::vector<std::uint32_t> idx(count);
+    const std::uint8_t* ib_bytes = static_cast<const std::uint8_t*>(ib.buf.contents) + ib.off + ib_at;
+    std::uint32_t top = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        idx[i] = wide ? reinterpret_cast<const std::uint32_t*>(ib_bytes)[i] : reinterpret_cast<const std::uint16_t*>(ib_bytes)[i];
+        top = std::max(top, idx[i]);
+    }
+    const std::int64_t first = static_cast<std::int64_t>(base);
+    const std::uint8_t* vb_bytes = static_cast<const std::uint8_t*>(vb->second.buf.contents);
+    const NSUInteger vb_len = vb->second.buf.length;
+    if (first < 0 || vb_at + (static_cast<NSUInteger>(first) + top) * stride + 12 > vb_len) {
+        lod->state = 2;
+        return nullptr;
+    }
+    std::vector<float> xyz(3 * (static_cast<std::size_t>(top) + 1));
+    for (std::uint32_t v = 0; v <= top; ++v)
+        std::memcpy(&xyz[3 * v], vb_bytes + vb_at + (static_cast<NSUInteger>(first) + v) * stride, 12);
+    static const float ratio = std::getenv("DCUSA_LOD_RATIO") ? std::atof(std::getenv("DCUSA_LOD_RATIO")) : 0.5f;
+    static const float error = std::getenv("DCUSA_LOD_ERROR") ? std::atof(std::getenv("DCUSA_LOD_ERROR")) : 0.01f;
+    static const bool log = std::getenv("DCUSA_LOD_LOG") != nullptr;
+    id<MTLDevice> dev = g_dev->dev;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        std::vector<std::uint32_t> out(idx.size());
+        float got = 0;
+        const std::size_t target = static_cast<std::size_t>(idx.size() * ratio) / 3 * 3;
+        const std::size_t n = meshopt_simplify(out.data(), idx.data(), idx.size(), xyz.data(), xyz.size() / 3, 12, target,
+                                               error, meshopt_SimplifyLockBorder, &got);
+        if (log)
+            std::fprintf(stderr, "lod: %zu -> %zu indices, %zu vertices, error %.4f\n", idx.size(), n, xyz.size() / 3, got);
+        if (n == 0 || n > idx.size() * 9 / 10) {
+            lod->state.store(2, std::memory_order_release);
+            return;
+        }
+        lod->buf = [dev newBufferWithBytes:out.data() length:n * 4 options:MTLResourceStorageModeShared];
+        lod->count = static_cast<std::uint32_t>(n);
+        lod->state.store(1, std::memory_order_release);
+    });
+    return nullptr;
+}
+
 void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, std::int32_t base) {
     if (native_glow_on() && enabled()) {
         if (is_glow_blur(s.ps)) return;  // the native glow did the blur
@@ -2458,6 +2709,19 @@ void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, 
     if (offset + count * size > ib->second.len) {
         ++g_dev->stats.skipped;
         problem("index range outside the index buffer");
+        return;
+    }
+    // DCUSA_HALF_PS=<keys>: those draws keep the first half of their triangles
+    // (a test: how much of their GPU time is geometry).
+    static const std::vector<std::uint64_t> half_keys = env_keys("DCUSA_HALF_PS");
+    if (!half_keys.empty() && std::find(half_keys.begin(), half_keys.end(), s.ps) != half_keys.end())
+        count = std::max<std::uint32_t>(3, count / 6 * 3);
+    if (const Lod* lod = lod_for(s, ib->second, offset, count, base)) {
+        trace_draw(s, "indexed lod", lod->count, "drawn");
+        [e drawIndexedPrimitives:prim indexCount:lod->count indexType:MTLIndexTypeUInt32 indexBuffer:lod->buf
+                 indexBufferOffset:0 instanceCount:1 baseVertex:base baseInstance:0];
+        ++g_dev->stats.draws;
+        profile_draw(s.ps);
         return;
     }
     trace_draw(s, "indexed", count, "drawn");
