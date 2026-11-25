@@ -185,7 +185,9 @@ void trace_draw(const DrawState& s, const char* kind, std::uint32_t count, const
     if (s.ps_cb[0] && b != g_dev->buffers.end()) {
         const float* f = static_cast<const float*>(b->second.contents());
         std::fprintf(stderr, " ps_cb[%lu]", static_cast<unsigned long>(b->second.len));
-        for (NSUInteger i = 0; i < std::min<NSUInteger>(24, b->second.len / 4); ++i) std::fprintf(stderr, " %.3g", f[i]);
+        // DCUSA_METAL_TRACE_CB=<n>: print n floats of it (default 24).
+        static const NSUInteger shown = std::getenv("DCUSA_METAL_TRACE_CB") ? std::atoi(std::getenv("DCUSA_METAL_TRACE_CB")) : 24;
+        for (NSUInteger i = 0; i < std::min<NSUInteger>(shown, b->second.len / 4); ++i) std::fprintf(stderr, " %.3g", f[i]);
     } else if (s.ps_cb[0]) {
         std::fprintf(stderr, " ps_cb never uploaded");
     }
@@ -1978,7 +1980,178 @@ bool skipped_draw(const DrawState& s) {
            (ps_rt.first != 0 && s.ps == ps_rt.first && s.rtv[0] == ps_rt.second && small_source(s));
 }
 
+// The native glow (DCUSA_GLOW=native, the iOS default): the game's glow
+// chain downsamples the bright-pass image (960x540) into 64, 128 and 512 px
+// targets (shader 4ae3dda9) and blurs each with two Gaussian passes
+// (be32070a, 49ba19fc): nine passes, costly on a phone's GPU. Natively, the
+// bright-pass image is copied once a frame into a mipmapped texture, and each
+// downsample draw becomes one pass of a 5x5 Gaussian at that target's blur
+// width (the game's tables, two-sided sigma in target texels), read from the
+// mip level that fits; the blur draws are left out. Same targets, so the
+// game's composite is unchanged.
+constexpr const char* kGlowSource = R"(
+#include <metal_stdlib>
+using namespace metal;
+struct Out { float4 pos [[position]]; float2 uv; };
+vertex Out glow_vs(uint id [[vertex_id]]) {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    Out o;
+    o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    o.uv = uv;
+    return o;
+}
+struct GlowParams { float2 sigma; float2 adjust; float scatter; float lod; };
+fragment float4 glow_fs(Out in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]],
+                        constant GlowParams& p [[buffer(0)]]) {
+    const float2 uv = in.uv * p.adjust;
+    float3 acc = float3(0.0);
+    float ws = 0.0;
+    for (int j = -2; j <= 2; ++j)
+        for (int i = -2; i <= 2; ++i) {
+            const float2 q = uv + float2(i, j) * p.sigma;
+            if (any(q < 0.0) || any(q > 1.0)) continue;  // as the game's blur: outside counts nothing
+            const float w = exp(-0.5 * float(i * i + j * j));
+            acc += t.sample(s, q, level(p.lod)).rgb * w;
+            ws += w;
+        }
+    return float4(max(acc / max(ws, 1e-6) * p.scatter, 0.0), 1.0);
+}
+)";
+
+struct GlowState {
+    id<MTLRenderPipelineState> pipeline[4] = {};  // by colour format slot
+    MTLPixelFormat formats[4] = {};
+    id<MTLSamplerState> sampler = nil;
+    id<MTLTexture> mips = nil;
+    std::uint64_t mips_frame = ~0ull;
+    bool failed = false;
+} g_glow;
+
+bool native_glow_on() {
+    static const bool on = [] {
+        const char* e = std::getenv("DCUSA_GLOW");
+        if (e != nullptr) return std::strcmp(e, "native") == 0;
+        return TARGET_OS_IPHONE != 0;
+    }();
+    return on;
+}
+
+bool is_glow_blur(std::uint64_t ps) { return ps == 0xbe32070ae50eb03bull || ps == 0x49ba19fcf203dc15ull; }
+
+id<MTLRenderPipelineState> glow_pipeline(MTLPixelFormat format) {
+    for (int i = 0; i < 4; ++i)
+        if (g_glow.pipeline[i] != nil && g_glow.formats[i] == format) return g_glow.pipeline[i];
+    Device& d = *g_dev;
+    NSError* error = nil;
+    id<MTLLibrary> lib = [d.dev newLibraryWithSource:@(kGlowSource) options:nil error:&error];
+    if (lib == nil) {
+        problem(std::string("glow shader: ") + (error ? error.localizedDescription.UTF8String : "?"));
+        g_glow.failed = true;
+        return nil;
+    }
+    MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [lib newFunctionWithName:@"glow_vs"];
+    pd.fragmentFunction = [lib newFunctionWithName:@"glow_fs"];
+    pd.colorAttachments[0].pixelFormat = format;
+    id<MTLRenderPipelineState> state = [d.dev newRenderPipelineStateWithDescriptor:pd error:&error];
+    if (state == nil) {
+        problem(std::string("glow pipeline: ") + (error ? error.localizedDescription.UTF8String : "?"));
+        g_glow.failed = true;
+        return nil;
+    }
+    for (int i = 0; i < 4; ++i)
+        if (g_glow.pipeline[i] == nil) {
+            g_glow.pipeline[i] = state;
+            g_glow.formats[i] = format;
+            break;
+        }
+    if (g_glow.sampler == nil) {
+        MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
+        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+        sd.mipFilter = MTLSamplerMipFilterLinear;
+        sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        g_glow.sampler = [d.dev newSamplerStateWithDescriptor:sd];
+    }
+    return state;
+}
+
+// One of the game's glow downsample draws, done natively. False: leave it to the game.
+bool native_glow_draw(const DrawState& s) {
+    Device& d = *g_dev;
+    Texture* src = texture(s.ps_srv[0]);
+    Texture* dst = texture(s.rtv[0]);
+    if (src == nullptr || dst == nullptr || src->tex == nil || dst->tex == nil || dst->ms != nil || g_glow.failed) return false;
+    id<MTLRenderPipelineState> state = glow_pipeline(dst->tex.pixelFormat);
+    if (state == nil) return false;
+    // The game's ScatterRate and AdjustUV (its constant buffer: float, pad, float2).
+    float scatter = 0.05f, adjust[2] = {1, 1};
+    if (auto b = d.buffers.find(s.ps_cb[0]); b != d.buffers.end() && b->second.buf.storageMode == MTLStorageModeShared &&
+                                                   b->second.len >= 16) {
+        const float* f = reinterpret_cast<const float*>(static_cast<const std::uint8_t*>(b->second.buf.contents) + b->second.off);
+        scatter = f[0];
+        adjust[0] = f[2];
+        adjust[1] = f[3];
+    }
+    // The bright-pass image with mips, once a frame.
+    const NSUInteger sw = src->tex.width, sh = src->tex.height;
+    if (g_glow.mips == nil || g_glow.mips.width != sw || g_glow.mips.height != sh || g_glow.mips.pixelFormat != src->tex.pixelFormat) {
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src->tex.pixelFormat width:sw
+                                                                                     height:sh mipmapped:YES];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        g_glow.mips = [d.dev newTextureWithDescriptor:td];
+        g_glow.mips_frame = ~0ull;
+    }
+    if (g_glow.mips_frame != d.stats.frames) {
+        g_glow.mips_frame = d.stats.frames;
+        flush_clears(*src);
+        end_pass();
+        id<MTLBlitCommandEncoder> blit = blit_encoder("glow mips");
+        [blit copyFromTexture:src->tex sourceSlice:0 sourceLevel:0 toTexture:g_glow.mips destinationSlice:0 destinationLevel:0
+                   sliceCount:1 levelCount:1];
+        [blit generateMipmapsForTexture:g_glow.mips];
+        [blit endEncoding];
+    }
+    // This target's blur width (the game's tables), in uv.
+    const float size = static_cast<float>(dst->desc.width);
+    float sx = 1.69f, sy = 2.87f;  // 512
+    if (dst->desc.width <= 64) sx = 9.0f, sy = 16.0f;
+    else if (dst->desc.width <= 128) sx = 2.81f, sy = 5.0f;
+    struct { float sigma[2]; float adjust[2]; float scatter; float lod; } p;
+    p.sigma[0] = sx / size;
+    p.sigma[1] = sy / size;
+    p.adjust[0] = adjust[0];
+    p.adjust[1] = adjust[1];
+    p.scatter = scatter;
+    // Taps one sigma apart: read the level whose texels are about that wide.
+    const float tap_texels = std::max(p.sigma[0] * sw, p.sigma[1] * sh);
+    p.lod = std::max(0.0f, std::log2(std::max(1.0f, tap_texels)));
+    const std::uint8_t zero[kTargets] = {};
+    std::uint32_t rtv[kTargets] = {};
+    rtv[0] = s.rtv[0];
+    std::uint8_t mip[kTargets] = {};
+    mip[0] = s.rtv_mip[0];
+    if (!begin_pass(rtv, mip, zero, 0)) return false;
+    id<MTLRenderCommandEncoder> e = d.enc;
+    [e setRenderPipelineState:state];
+    [e setViewport:MTLViewport{0, 0, double(std::max(1u, dst->desc.width >> mip[0])), double(std::max(1u, dst->desc.height >> mip[0])), 0, 1}];
+    [e setScissorRect:MTLScissorRect{0, 0, std::max(1u, dst->desc.width >> mip[0]), std::max(1u, dst->desc.height >> mip[0])}];
+    [e setCullMode:MTLCullModeNone];
+    [e setFragmentTexture:g_glow.mips atIndex:0];
+    [e setFragmentSamplerState:g_glow.sampler atIndex:0];
+    [e setFragmentBytes:&p length:sizeof p atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    d.bound = Device::Bound{};  // the next draw binds everything again
+    ++dst->written;
+    ++d.stats.draws;
+    return true;
+}
+
 void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, std::int32_t base) {
+    if (native_glow_on() && enabled()) {
+        if (is_glow_blur(s.ps)) return;  // the native glow did the blur
+        if (s.ps == 0x4ae3dda931a688a0ull && native_glow_draw(s)) return;
+    }
     if (!enabled() || count == 0 || skipped_draw(s)) return;
     MTLPrimitiveType prim;
     id<MTLRenderCommandEncoder> e = prepare(s, &prim);

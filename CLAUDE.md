@@ -96,7 +96,14 @@ agreed to this).
       (`DCUSA_SHADOW_EVERY`): 53.1 and 53.2 pictures (51.1 same build).
       Glow and dynamic shadows both off: 57.4, with slowest frames of 26 to
       42 ms (some 17-18 ms of main-thread CPU at 1,850-2,080 draws, some
-      waits); the skip log's "slowest" line shows them. Next: the main thread's spread of 1-5%
+      waits); the skip log's "slowest" line shows them. Glow and shadows
+      every other frame flickered on the phone (stale images in between) and
+      are off again. The native glow (`DCUSA_GLOW=native`, iOS default: the
+      game's three downsamples as one 5x5 Gaussian pass each from a mipmapped
+      copy of the bright-pass image, its six blur passes left out): 52.3
+      pictures against 45.5 with the game's glow; the user saw no
+      difference. Next: sparks / smoke / debris against the wall (the user
+      saw slowdown), native shadows. Then: the main thread's spread of 1-5%
       costs (scene walk loop memory misses, draw path 0x6CFDB0, 0x458BC0,
       the Model 2 interpreter loop).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
