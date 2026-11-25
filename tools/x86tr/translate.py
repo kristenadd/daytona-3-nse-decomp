@@ -1344,6 +1344,8 @@ class FunctionTranslator(X87Mixin, SseMixin):
         resolved once every function is translated (resolve_sync_to), to the
         registers `target` may change; an indirect call reloads them all, the
         flags only when something reads them before writing them."""
+        if not PRESERVE_ANALYSIS:
+            return 'RELOAD()'
         flags = 1 if self.flags_live_after(insn) else 0
         if target is None:
             return 'RELOAD()' if flags else 'RELOAD_M(15)'
