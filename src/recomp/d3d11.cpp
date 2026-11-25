@@ -2203,8 +2203,18 @@ void present(Cpu& c) {
     }();
     if (!from_attract || g_boot_state >= 8) sample_pad();  // the controls for the frame the game builds next
     if (gpu::enabled()) {
-        static int presents = 0;
-        ++presents;
+        static int presents_count = 0;
+        ++presents_count;
+        // DCUSA_FRAMES_FROM=attract: the numbers for DCUSA_METAL_SCAN / _TRACE,
+        // DCUSA_FRAME_RANGE and frame file names count from the start of attract
+        // (boot state 8), which moves from run to run; before it they are negative.
+        static const bool from_attract = [] {
+            const char* v = std::getenv("DCUSA_FRAMES_FROM");
+            return v != nullptr && std::strcmp(v, "attract") == 0;
+        }();
+        static int attract_at = 0;
+        if (from_attract && attract_at == 0 && g_boot_state >= 8) attract_at = presents_count;
+        const int presents = !from_attract ? presents_count : attract_at != 0 ? presents_count - attract_at : -presents_count;
         if (const char* scan = std::getenv("DCUSA_METAL_SCAN"); scan != nullptr && std::atoi(scan) == presents)
             gpu::scan_targets();
         // DCUSA_METAL_TRACE=<n>: one line per draw of the frame that present n ends.

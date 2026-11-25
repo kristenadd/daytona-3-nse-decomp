@@ -102,8 +102,13 @@ agreed to this).
       game's three downsamples as one 5x5 Gaussian pass each from a mipmapped
       copy of the bright-pass image, its six blur passes left out): 52.3
       pictures against 45.5 with the game's glow; the user saw no
-      difference. Next: sparks / smoke / debris against the wall (the user
-      saw slowdown), native shadows. Then: the main thread's spread of 1-5%
+      difference. Wall hits: the user recorded 8-24 FPS at a race start
+      against the wall (late at night, after hours of runs); clean runs of
+      the same script hold 47-60 pictures, with or without the hits, and the
+      user later found it running much better. A hit adds debris drawn as
+      small models through every pass (about 280 more draws a frame, 20%).
+      Not explained: a coarse black checkerboard over the car in one of the
+      user's pictures (smoke drawn dithered?). Next: native shadows. Then: the main thread's spread of 1-5%
       costs (scene walk loop memory misses, draw path 0x6CFDB0, 0x458BC0,
       the Model 2 interpreter loop).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
