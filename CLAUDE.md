@@ -119,9 +119,27 @@ agreed to this).
       the registers a callee may change and skipping dead flags after calls
       (`TRANSLATE_PRESERVE=1`, translate.py preserved_regs) passed every
       test but gained nothing on the phone, so register traffic around calls
-      is not the cost. Then: the main thread's spread of 1-5%
-      costs (scene walk loop memory misses, draw path 0x6CFDB0, 0x458BC0,
-      the Model 2 interpreter loop).
+      is not the cost. Since then (cube faces one a frame, no motion
+      pre-pass on iOS, multisampled samples no longer stored): 56 to 58
+      pictures, 3 to 7% of ticks skipped. The skips now sit in one place,
+      the grandstand straight at each lap's start (race timer about 0:54 to
+      0:56 in `race_attract.txt`; the skip log gives the HUD's race timer
+      for its slowest frames, and `DCUSA_RACE_RANGE` writes that moment's
+      frames on the Mac). There the GPU takes 24 to 30 ms a frame and the
+      main thread waits 14 to 28 ms on the render thread (`DCUSA_HITCH`
+      shows it as handover). By Metal System Trace (`DCUSA_ENCODER_LABELS`)
+      a heavy frame is the main pass (about 2.8 ms vertex, 5.7 ms
+      fragment), two shadow cascades (2 ms vertex), the backbuffer pass and
+      blits (1 ms each). Tried without gain on the phone: a 640 resolution
+      floor (+1 picture, not at the grandstand, whose cost does not follow
+      resolution), MSAA 2 (+0.5), vertex shaders cut to the outputs their
+      pixel shaders read (`DCUSA_TRIM_VS`), and one cascade with MSAA 2 and
+      the 640 floor together (worse: 40.5 and 53.7, the main thread's CPU
+      per tick rose with the GPU lighter, as seen before). The draws are
+      plain indexed draws (no instancing to thin). Next: what in the
+      grandstand frame costs the GPU (the stands and crowd geometry in the
+      main pass and shadow maps), and why a lighter GPU slows the main
+      thread (clock or core placement: a System Trace with CPU frequency).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
@@ -169,6 +187,10 @@ agreed to this).
   width pin and again without it (`kPhoneIni` empty, dynamic resolution
   free). Fixed.
 - **iPhone races are below 60 fps** (about 20.6 ms a frame; item 8, "Speed").
+- Unpaced Mac runs (`DCUSA_NOPACE=1`, the scripted race) sometimes end in a
+  guest fault after the race, minutes past the measured window (unmapped
+  guest addresses 0x69DA4F, 0x42C9CB and others). Not investigated; normal
+  paced play has not shown it.
 - With `DCUSA_METAL=0` (the 2D software reference instead of Metal), a run
   stops at about present 120 on an `int3` at `0x6D14B8`, the end of
   `0x6D1460`. The Metal path, the default, is unaffected. Not investigated.
