@@ -615,7 +615,8 @@ std::string lighter_shadow_filter(std::string src) {
 // pixel whose alpha is 0: the catch fence's holes ran the whole lit material
 // (12 textures) to blend in nothing. This variant reads the opacity first, as
 // soon as what it needs is defined, and discards those pixels. Empty when the
-// shader has no such line. DCUSA_ALPHA_DISCARD=0 turns it off.
+// shader has no such line. DCUSA_ALPHA_DISCARD=1 turns it on (off by default:
+// no gain on an iPhone, the fence's holes and wires are too finely mixed).
 std::string alpha_discard_variant(const std::string& src) {
     const std::size_t hit = src.find(".w = (g_OpacityMap.sample(");
     if (hit == std::string::npos) return {};
@@ -654,6 +655,99 @@ std::string alpha_discard_variant(const std::string& src) {
     return out;
 }
 
+// Comma-separated hex keys from an environment variable.
+std::vector<std::uint64_t> env_keys(const char* name) {
+    std::vector<std::uint64_t> out;
+    if (const char* v = std::getenv(name))
+        for (const char* p = v; *p;) {
+            char* end = nullptr;
+            out.push_back(std::strtoull(p, &end, 16));
+            if (end == p) break;
+            p = *end == ',' ? end + 1 : end;
+        }
+    return out;
+}
+
+// Each call `name(...)` in src (balanced parentheses) replaced by `with`.
+std::string replace_calls(std::string src, const std::string& name, const std::string& with) {
+    for (std::size_t at = src.find(name); at != std::string::npos; at = src.find(name, at + with.size())) {
+        std::size_t i = at + name.size();
+        if (i >= src.size() || src[i] != '(') {
+            at += name.size() - with.size();
+            continue;
+        }
+        int depth = 0;
+        for (; i < src.size(); ++i) {
+            if (src[i] == '(') ++depth;
+            else if (src[i] == ')' && --depth == 0) break;
+        }
+        if (i >= src.size()) break;
+        src.replace(at, i + 1 - at, with);
+    }
+    return src;
+}
+
+// Lighter versions of costly pixel shaders (DCUSA_LITE_PS, hex keys; on iOS
+// the catch fence 41cb0c4d61f2dfe5, which alone took the grandstand frames
+// from about 17 to 28 ms of an iPhone's GPU), rewritten when they load
+// (DCUSA_LITE_LEVEL, lite_shader). DCUSA_LITE_PS=0: none.
+const std::vector<std::uint64_t>& lite_keys() {
+    static const std::vector<std::uint64_t> keys = [] {
+        const char* v = std::getenv("DCUSA_LITE_PS");
+        if (v != nullptr) return std::strcmp(v, "0") == 0 ? std::vector<std::uint64_t>{} : env_keys("DCUSA_LITE_PS");
+        return TARGET_OS_IPHONE ? std::vector<std::uint64_t>{0x41cb0c4d61f2dfe5ull} : std::vector<std::uint64_t>{};
+    }();
+    return keys;
+}
+
+std::string lite_shader(std::string src) {
+    for (const char* cascade : {"spvDepthCast(g_TextureShadow0).sample_compare", "spvDepthCast(g_TextureShadow1).sample_compare",
+                                "spvDepthCast(g_TextureShadow2).sample_compare"})
+        src = replace_calls(src, cascade, "1.0");
+    // DCUSA_LITE_LEVEL=2: also no environment reflection (a neutral grey) and
+    // a flat normal map (the surface's own normal).
+    // DCUSA_LITE_LEVEL: 1 no dynamic shadows; 2 also no reflection and a flat
+    // normal map; 3 (default) albedo x (lightmap + sun), below. Measured for
+    // the fence on an iPhone (grandstand stretch): 1 and 2 about 28 ms of GPU
+    // a frame as before, 3 about 19 ms.
+    static const int level = std::getenv("DCUSA_LITE_LEVEL") ? std::atoi(std::getenv("DCUSA_LITE_LEVEL")) : 3;
+    if (level == 2) {
+        src = replace_calls(src, "g_EnvMapUser.sample", "float4(0.25)");
+        src = replace_calls(src, "g_NormalMap.sample", "float4(0.5, 0.5, 1.0, 1.0)");
+    }
+    if (level >= 3) {
+        // The colour becomes albedo x (lightmap + the sun on the surface's own
+        // normal): emissive, fog and the output scale as before, the opacity as
+        // alpha; normal map, specular, shadows and reflections go (dead code).
+        auto param = [&](const char* type) -> std::string {
+            const std::size_t at = src.find(std::string("constant ") + type + "& ");
+            if (at == std::string::npos) return {};
+            const std::size_t b = at + std::strlen("constant ") + std::strlen(type) + 2;
+            return src.substr(b, src.find(' ', b) - b);
+        };
+        const std::string scene = param("CB_PER_SCENE"), mat = param("CB_PER_SHAPE_MATERIAL"), pass = param("CB_PER_RENDERPASS");
+        const std::size_t lm_at = src.find(" = g_TextureLightMap.sample(");
+        const std::size_t out_at = src.find("    out._entryPointOutput = float4(");
+        if (scene.empty() || mat.empty() || pass.empty() || lm_at == std::string::npos || out_at == std::string::npos ||
+            src.find("in._In_Fog") == std::string::npos || src.find("in._In_Nrm") == std::string::npos)
+            return src;
+        const std::size_t lm_b = src.rfind(' ', lm_at - 1) + 1;
+        const std::string lm = src.substr(lm_b, lm_at - lm_b);
+        const std::size_t out_end = src.find(";\n", out_at);
+        const std::string line = src.substr(out_at, out_end - out_at);
+        const std::size_t alpha = line.rfind(", ");
+        if (alpha == std::string::npos || line.compare(line.size() - 3, 3, ".w)") != 0) return src;
+        const std::string albedo = line.substr(alpha + 2, line.size() - 3 - alpha - 2);
+        const std::string lite = "    out._entryPointOutput = float4(d3d_min(((((" + albedo + ".xyz * (" + lm + ".xyz + (" + scene +
+                                 ".DLightColor * (0.3183099 * d3d_max(dot(fast::normalize(in._In_Nrm.xyz), float3(" + scene +
+                                 ".DLightDirection)), 0.0))))) + " + mat + ".Emissive.xyz) * in._In_Fog.w) + in._In_Fog.xyz) * " +
+                                 pass + ".OutputScale, float3(65500.0)), " + albedo + ".w)";
+        src.replace(out_at, out_end - out_at, lite);
+        if (std::getenv("DCUSA_PCF_LOG")) std::fprintf(stderr, "lite shader: albedo x (lightmap + sun)\n");
+    }
+    return src;
+}
+
 Program& program(std::uint64_t key, bool vertex) {
     Device& d = *g_dev;
     Program& p = d.programs[key];
@@ -668,6 +762,7 @@ Program& program(std::uint64_t key, bool vertex) {
     }
     p.source = declare_compared_as_depth(source.UTF8String);
     if (!vertex) p.source = lighter_shadow_filter(p.source);
+    if (!vertex && std::find(lite_keys().begin(), lite_keys().end(), key) != lite_keys().end()) p.source = lite_shader(p.source);
     if (!vertex && trim_enabled()) p.source = trim_fragment_inputs(p.source, &p.locations);
     std::string error;
     p.fn = compile_main0(p.source, &error);
@@ -1554,18 +1649,6 @@ id<MTLTexture> depth_as_color(Texture& t) {
 }
 
 // Binds everything and returns the open encoder, or nil when the draw cannot run.
-// Comma-separated hex keys from an environment variable.
-std::vector<std::uint64_t> env_keys(const char* name) {
-    std::vector<std::uint64_t> out;
-    if (const char* v = std::getenv(name))
-        for (const char* p = v; *p;) {
-            char* end = nullptr;
-            out.push_back(std::strtoull(p, &end, 16));
-            if (end == p) break;
-            p = *end == ',' ? end + 1 : end;
-        }
-    return out;
-}
 
 id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) {
     Device& d = *g_dev;
@@ -1595,7 +1678,7 @@ id<MTLRenderCommandEncoder> prepare(const DrawState& s, MTLPrimitiveType* prim) 
     // Source-alpha blending into target 0: the alpha-discard variant, if any.
     static const bool alpha_discard = [] {
         const char* v = std::getenv("DCUSA_ALPHA_DISCARD");
-        return v == nullptr || std::strcmp(v, "0") != 0;
+        return v != nullptr && std::strcmp(v, "0") != 0;
     }();
     if (alpha_discard && !is_flat && s.ps != 0 && s.blend[0].enable && s.blend[0].src == 5 && s.blend[0].dst == 6 &&
         s.blend[0].op == 1) {
@@ -2165,7 +2248,13 @@ void create_sampler(std::uint32_t key, const SamplerDesc& desc) {
     sd.mipFilter = (f & 0x1u) ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNearest;
     sd.magFilter = (f & 0x4u) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
     sd.minFilter = (f & 0x10u) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
-    if ((f & 0x40u) != 0) sd.maxAnisotropy = std::max<std::uint32_t>(1, std::min<std::uint32_t>(16, desc.max_aniso));
+    // DCUSA_MAX_ANISO=<n>: anisotropic filtering capped at n taps (a test: 2 or 4
+    // made no difference on an iPhone, even for the catch fence seen edge-on).
+    static const std::uint32_t aniso_cap = [] {
+        const char* v = std::getenv("DCUSA_MAX_ANISO");
+        return static_cast<std::uint32_t>(v != nullptr ? std::max(1, std::atoi(v)) : 16);
+    }();
+    if ((f & 0x40u) != 0) sd.maxAnisotropy = std::max<std::uint32_t>(1, std::min<std::uint32_t>(aniso_cap, desc.max_aniso));
     sd.sAddressMode = address(desc.address[0]);
     sd.tAddressMode = address(desc.address[1]);
     sd.rAddressMode = address(desc.address[2]);
