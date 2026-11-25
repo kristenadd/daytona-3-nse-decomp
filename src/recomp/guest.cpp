@@ -82,8 +82,11 @@ void guest_preempt(Cpu& c) {
     if (sched_on_free_thread()) return;
     g_preempt.store(false, std::memory_order_relaxed);
     RtGuard locked;
+    const auto t0 = std::chrono::steady_clock::now();
     sched_yield(c);
+    g_preempt_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 }
+std::atomic<std::uint64_t> g_preempt_ns{0};
 
 std::uint64_t guest_rdtsc() {
     return std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(

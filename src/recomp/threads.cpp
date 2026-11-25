@@ -80,7 +80,15 @@ thread_local int t_free_slot = -1;
 // guest thread exists; translated loops yield when they see it. Without it, a
 // loop that waits for another thread without a blocking call (the boot's
 // resource walk under f_004FDF60) runs forever and the other threads starve.
-constexpr auto kQuantum = std::chrono::milliseconds(2);
+// DCUSA_QUANTUM_MS=<n> sets it (default 2).
+std::chrono::milliseconds quantum() {
+    static const int ms = [] {
+        const char* e = std::getenv("DCUSA_QUANTUM_MS");
+        const int n = e != nullptr ? std::atoi(e) : 2;
+        return n < 1 ? 1 : n;
+    }();
+    return std::chrono::milliseconds(ms);
+}
 std::atomic<unsigned> g_live_threads{1};
 
 void start_preempt_timer() {
@@ -90,7 +98,7 @@ void start_preempt_timer() {
             // A low-QoS timer has its sleeps coalesced (iOS): preemption would come late.
             pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
             for (;;) {
-                std::this_thread::sleep_for(kQuantum);
+                std::this_thread::sleep_for(quantum());
                 if (g_live_threads.load(std::memory_order_relaxed) > 1)
                     g_preempt.store(true, std::memory_order_relaxed);
             }
@@ -721,7 +729,14 @@ void sched_yield(Cpu& c) {
     switch_to(me, pick_after(me));
 }
 
+std::atomic<std::uint64_t> g_yield_ns{0};  // time the frame loop's poll gave to other threads
+
 void sched_frame_yield(Cpu& c) {
+    const auto y0 = Clock::now();
+    struct Add {
+        Clock::time_point t;
+        ~Add() { g_yield_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t).count(); }
+    } add{y0};
     ensure(c);
     Sched& s = S();
     static const int slice_ms = [] {

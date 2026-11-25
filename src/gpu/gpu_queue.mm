@@ -11,6 +11,7 @@
 // Calls that return something (read_rgba8, scan_targets, stats) hand over what
 // is recorded, wait until the render thread is idle, and then run directly.
 // DCUSA_GPU_THREAD=0 runs every call directly on the caller's thread.
+#include <chrono>
 #include <pthread.h>
 #include <TargetConditionals.h>
 #include <cstdlib>
@@ -142,7 +143,25 @@ void render_thread() {
             q.cv.wait(lk, [&] { return q.pending != nullptr; });
             b = q.pending;
         }
+        const auto r0 = std::chrono::steady_clock::now();
         replay(*b);
+        // DCUSA_RT_LOG=<n>: every n batches, the render thread's average replay
+        // time and its waits on the GPU and for drawables.
+        if (static const int every = std::getenv("DCUSA_RT_LOG") ? std::atoi(std::getenv("DCUSA_RT_LOG")) : 0; every > 0) {
+            static double busy = 0, last_gpu = 0, last_draw = 0;
+            static int n = 0;
+            busy += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
+            if (++n == every) {
+                double g = 0, dr = 0;
+                rt_waits(&g, &dr);
+                std::fprintf(stderr, "render thread: replay %.2f ms, gpu wait %.2f ms, drawable wait %.2f ms per batch\n",
+                             busy / n, (g - last_gpu) / n, (dr - last_draw) / n);
+                busy = 0;
+                n = 0;
+                last_gpu = g;
+                last_draw = dr;
+            }
+        }
         b->clear();
         {
             std::lock_guard<std::mutex> lk(q.mu);

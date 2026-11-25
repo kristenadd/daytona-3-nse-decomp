@@ -2180,6 +2180,16 @@ void present(Cpu& c) {
                          skip_every, g_tick_n[0] ? g_tick_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_ms[1] / g_tick_n[1] : 0.0,
                          g_tick_n[0] ? g_tick_cpu_ms[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_cpu_ms[1] / g_tick_n[1] : 0.0,
                          g_tick_n[0] ? g_tick_draws[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_draws[1] / g_tick_n[1] : 0.0);
+            {
+                static std::uint64_t last_yield = 0;
+                const std::uint64_t y = g_yield_ns.load();
+                static std::uint64_t last_pre = 0;
+                const std::uint64_t pre = g_preempt_ns.load();
+                std::fprintf(stderr, "yield %d: %.2f ms per tick to other guest threads, %.2f ms preempted\n", all_presents,
+                             (y - last_yield) / 1e6 / skip_every, (pre - last_pre) / 1e6 / skip_every);
+                last_yield = y;
+                last_pre = pre;
+            }
             if (hitch::enabled())
                 std::fprintf(stderr, "waits %d: handover %.2f ms, guest threads %.2f ms per tick\n", all_presents,
                              handover_ms / skip_every, wait_ms / skip_every);
@@ -2849,8 +2859,21 @@ void draw_stack_probe(Cpu& c) {
     if (want == nullptr) return;
     // DCUSA_DRAW_STACK=all: every draw of present DCUSA_DRAW_STACK_AT, one line each.
     if (std::strcmp(want, "all") == 0) {
+        // DCUSA_DRAW_STACK_MIN=<n>: instead, the first frame after one with at least n draws.
         static const std::uint64_t at = std::getenv("DCUSA_DRAW_STACK_AT") ? std::atoll(std::getenv("DCUSA_DRAW_STACK_AT")) : 0;
-        if (g_frames_presented != at) return;
+        static const std::uint32_t min_draws = std::getenv("DCUSA_DRAW_STACK_MIN") ? std::atoi(std::getenv("DCUSA_DRAW_STACK_MIN")) : 0;
+        static std::uint64_t chosen = ~0ull, seen_frame = ~0ull;
+        static std::uint32_t last_count = 0;
+        if (min_draws != 0) {
+            if (g_frames_presented != seen_frame) {
+                if (chosen == ~0ull && last_count >= min_draws && g_frames_presented > 3000) chosen = g_frames_presented;
+                seen_frame = g_frames_presented;
+            }
+            last_count = g_frame_draws + 1;
+            if (g_frames_presented != chosen) return;
+        } else if (g_frames_presented != at) {
+            return;
+        }
         std::fprintf(stderr, "draw stack %gx%g:", gs.viewport[2], gs.viewport[3]);
         const std::uint32_t esp = c.r[Cpu::ESP];
         int n = 0;
@@ -2962,6 +2985,12 @@ void om_set_depth(Cpu& c) {                                        // +0x90  0x6
         g_last_depth = arg(c, 1);
         const auto it = depth_states.find(arg(c, 1));
         gs.depth = it != depth_states.end() ? it->second : gpu::DepthDesc{};
+        // Without the depth pre-pass, a depth-equal test with no write (the main
+        // pass over the pre-pass depth) tests less-equal and writes instead.
+        if (skip_velocity_pass() && gs.depth.enable && !gs.depth.write && gs.depth.func == 3u) {
+            gs.depth.func = 4u;  // D3D11_COMPARISON_LESS_EQUAL
+            gs.depth.write = true;
+        }
     }
     ret_stdcall(c, kSOk, 12);
 }
@@ -4224,6 +4253,24 @@ std::uint32_t cube_faces_cap() {
         return static_cast<std::uint32_t>(n < 0 ? 0 : n);
     }();
     return cap;
+}
+
+bool shadow_cascade_skipped(std::uint32_t index) {
+    static const std::uint32_t drawn = [] {
+        const char* e = std::getenv("DCUSA_SHADOW_CASCADES");
+        const int n = e != nullptr ? std::atoi(e) : (TARGET_OS_IPHONE ? 2 : 3);
+        return static_cast<std::uint32_t>(n < 0 ? 0 : n);
+    }();
+    return index >= drawn;
+}
+
+bool skip_velocity_pass() {
+    static const bool skip = [] {
+        const char* e = std::getenv("DCUSA_VELOCITY");
+        if (e != nullptr) return std::atoi(e) == 0;
+        return TARGET_OS_IPHONE != 0;
+    }();
+    return skip;
 }
 
 }

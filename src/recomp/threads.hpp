@@ -9,6 +9,7 @@
 //
 // Handles for threads, events, semaphores and mutexes share one table starting
 // at kSyncHandleBase. Waiting on any other handle fails closed.
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 
@@ -55,6 +56,10 @@ bool sched_on_free_thread();
 // other cores; a slice was measured slower here, since the boot drains its
 // resource queue on the main thread once per frame.
 void sched_frame_yield(Cpu& c);
+// Nanoseconds the frame loop's poll has given to other guest threads so far.
+extern std::atomic<std::uint64_t> g_yield_ns;
+// Nanoseconds spent in preemption switches so far (guest.cpp).
+extern std::atomic<std::uint64_t> g_preempt_ns;
 // Gives the other threads turns until each is blocked or the deadline passes.
 void sched_run_others_until(Cpu& c, std::chrono::steady_clock::time_point deadline);
 void sched_sleep(Cpu& c, std::uint32_t ms);

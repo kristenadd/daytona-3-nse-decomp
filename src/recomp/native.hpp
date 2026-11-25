@@ -22,6 +22,12 @@ bool frame_skip_render();
 // The most car reflection cube faces the game re-renders a frame
 // (SITE_OVERRIDES 0x442BDF; DCUSA_CUBE_FACES, iOS 1, elsewhere 6: no cap).
 std::uint32_t cube_faces_cap();
+// Whether dynamic shadow cascade `index` (0 near .. 2 far) draws no objects
+// (SITE_OVERRIDES 0x43BAB9; DCUSA_SHADOW_CASCADES, iOS 2, elsewhere 3).
+bool shadow_cascade_skipped(std::uint32_t index);
+// Whether the depth / motion pre-pass is left out (SITE_OVERRIDES 0x4434BD;
+// DCUSA_VELOCITY=0, iOS default).
+bool skip_velocity_pass();
 // The boot's "Data Loading" percentage (0x5BFD15 pushes it for "%d%%"), for the
 // boot screen (d3d11.cpp).
 void boot_progress(std::uint32_t percent);

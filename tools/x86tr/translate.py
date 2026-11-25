@@ -278,6 +278,9 @@ class FunctionTranslator(X87Mixin, SseMixin):
             try:
                 if site:
                     self.out = [site[1]]
+                    # Translated functions the override calls are declared like any call's.
+                    for t in re.findall(r'\bf_([0-9A-F]{8})\(c\)', site[1]):
+                        self.refs.add(int(t, 16))
                 else:
                     self.emit(insn)
             except Unsupported as e:
@@ -1503,6 +1506,23 @@ SITE_OVERRIDES = {
         # is a mov, and test esi, esi follows, so no flags are read here.
         0x442BDF: ('', '{ uint32_t v_ = ld32(M, esp + 0x10u); const uint32_t cap_ = cube_faces_cap(); '
                        'if ((int32_t)v_ > (int32_t)cap_) { v_ = cap_; st32(M, esp + 0x10u, v_); } esi = v_; }'),
+        # The dynamic shadow cascades: the loop at 0x43BA00 sets each of three
+        # cascades' target (with its clear) and draws its objects through
+        # 0x454DA0 (stdcall, 16 bytes of arguments). shadow_cascade_skipped
+        # (native.hpp) leaves out a cascade's objects (DCUSA_SHADOW_CASCADES:
+        # how many are drawn; iOS 2, the far one is left out): the map is still
+        # cleared, so it holds no shadows. The loop index is [esp+0x18] before
+        # the four pushes. The next instruction is a mov; no flags are read.
+        0x43BAB9: ('', 'if (shadow_cascade_skipped(ld32(M, esp + 0x28u))) { esp += 16u; } '
+                       'else { esp -= 4; st32(M, esp, 0x43BABEu); SYNC_R(); f_00454DA0(c); RELOAD(); }'),
+        # The scene's depth / motion pre-pass (0x43ED80: depth, screen motion and
+        # opacity of every opaque object into a full-size target, about a third
+        # of a race frame's draws). skip_velocity_pass (native.hpp) leaves it
+        # out (DCUSA_VELOCITY=0, the iOS default): the main pass, which only
+        # drew where the pre-pass depth was equal, then tests and writes depth
+        # itself (om_set_depth), and the motion blur sees no motion. The next
+        # instruction is a lea.
+        0x4434BD: ('', 'if (!skip_velocity_pass()) { esp -= 4; st32(M, esp, 0x4434C2u); SYNC_R(); f_0043ED80(c); RELOAD(); }'),
         # The frame routine's scene render (0x4DD160: subsystem updates, the
         # Model 2 step, then this call). Left out when the frame is late
         # (frame_skip_render, d3d11.cpp); the call takes no arguments, and
