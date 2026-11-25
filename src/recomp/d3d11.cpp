@@ -1955,11 +1955,13 @@ void pace_present(Cpu& c, std::uint32_t sync_interval) {
     // Each boot state change goes to the log with the time since the first present.
     static const clock::time_point first = clock::now();
     static std::uint32_t last_state = 0;
+    static std::uint32_t presents = 0;
+    ++presents;
     const std::uint32_t state = ld32(c.mem, 0x1735608u);
     g_boot_state = state;
     if (state != last_state) {
-        std::fprintf(stderr, "boot state %u at %.1f s\n", state,
-                     std::chrono::duration<double>(clock::now() - first).count());
+        std::fprintf(stderr, "boot state %u at %.1f s, present %u\n", state,
+                     std::chrono::duration<double>(clock::now() - first).count(), presents);
         last_state = state;
     }
     g_boot_loading = !boot_paced && state == 0;
