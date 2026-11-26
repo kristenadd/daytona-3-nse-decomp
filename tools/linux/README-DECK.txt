@@ -4,14 +4,28 @@ Daytona Championship USA for the Steam Deck (Linux, x86_64, Vulkan)
 1. Copy this folder (daytona-usa) anywhere in your home folder, for example
    /home/deck/Games/daytona-usa.
 
-2. Put the game folders in daytona-usa/games, or link them there, for
-   example (in Konsole, Desktop Mode):
+2. Let it find the game folders (the same ones TeknoParrot uses; nothing in
+   them is changed). Any one of these:
 
-     ln -s "/home/deck/Games/Daytona Championship USA New Season Edition (2019)[Sega PC][TP]" games/
-     ln -s "/home/deck/Games/Daytona Championship USA (2017-12-21)[Sega PC][TP]" games/
+   a. Links, in Dolphin (the file manager): open the folder that holds the
+      game folders, drag a game folder onto daytona-usa/games in the side
+      panel or another window, and choose "Link Here". Do it for each
+      edition.
 
-   or set DCUSA_GAMES to the folder that holds them. These are the same
-   folders TeknoParrot uses; nothing in them is changed.
+   b. Links, in Konsole:
+
+        cd ~/Games/daytona-usa
+        ln -s "/path/to/Daytona Championship USA New Season Edition (2019)[Sega PC][TP]" games/
+        ln -s "/path/to/Daytona Championship USA (2017-12-21)[Sega PC][TP]" games/
+
+      (Tip: type ln -s , drag the folder from Dolphin into Konsole to paste
+      its path, then type games/ and press Enter.)
+
+   c. No links: run it as  DCUSA_GAMES="/path/to/folder" ./run.sh , where
+      that folder holds the game folders (it is searched a few levels down).
+
+   A game on the microSD card works too: its folders are under
+   /run/media/deck/<card name>/.
 
 3. Try it in Desktop Mode first: double-click run.sh (or run ./run.sh in
    Konsole). With both editions present the edition picker opens: left /

@@ -40,7 +40,10 @@ void scan(const fs::path& dir, int depth, InstallScan& out) {
     if (depth >= MaxDepth) return;
     std::vector<fs::path> children;
     for (const fs::directory_entry& entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied, ec))
-        if (entry.is_directory(ec) && !entry.is_symlink(ec)) children.push_back(entry.path());
+        // Links are followed only in the folder given (a games folder of
+        // links to the installs, as the Steam Deck package suggests), so a
+        // link back up the tree cannot loop.
+        if (entry.is_directory(ec) && (depth == 0 || !entry.is_symlink(ec))) children.push_back(entry.path());
     std::sort(children.begin(), children.end());
     for (const fs::path& child : children) scan(child, depth + 1, out);
 }
