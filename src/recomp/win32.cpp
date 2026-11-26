@@ -1344,8 +1344,8 @@ std::uint32_t swap32(std::uint32_t v) {
 // Ordinals 9, 15, and 8. 0x529EA6 swaps port 0x6978 into a sockaddr_in.
 // Ordinals 2 and 13. 0x529EDC binds 192.168.1.x:27000 and treats non-zero as failure.
 // No host socket is opened; accept is still unanswered until a caller reaches it.
-// Ordinal 4. 0x52A608 retries while the result is non-zero, so 0 skips that loop.
-// No host connection is opened.
+// Ordinal 4. 0x52A608 retries while the result is non-zero, so 0 skips that loop
+// (the shell link on loopback). No host connection is opened.
 // Ordinal 10. 0x52BDFD passes FIONBIO and a zero, and ignores the result.
 // Ordinal 21. 0x52A3A1 sets SO_RCVTIMEO to 30000 ms and returns this result to its caller.
 // Ordinal 19. Callers treat -1 as failure and compare a full send against the length
@@ -1532,7 +1532,29 @@ void ws_setsockopt(Cpu& c) { ret_stdcall(c, 0, 20); }
 
 void ws_ioctlsocket(Cpu& c) { ret_stdcall(c, 0, 12); }
 
-void ws_connect(Cpu& c) { ret_stdcall(c, 0, 12); }
+// connect(s, sockaddr_in*, len). Loopback (the shell link, "127.0.0.1")
+// connects; any other address is refused, as on a cabinet with no others on
+// its network. The 2017 build's cabinet discovery (ping.cpp, master thread
+// 0x576AD0) connects to 192.168.1.2 .. .8 and retries while that fails; had
+// it connected, it waited for a reply that never came, flagged a network
+// error and restarted discovery every frame. 2019 skips discovery
+// ([Network] Enabled=0).
+void ws_connect(Cpu& c) {
+    const std::uint32_t addr = arg(c, 1);
+    const bool loopback = addr != 0 && c.mem[addr + 4] == 127;
+    if (!loopback) {
+        wsa_error = 10061;  // WSAECONNREFUSED
+        if (std::getenv("DCUSA_STATS") != nullptr) {
+            static int shown = 0;
+            if (shown++ < 8 && addr != 0)
+                std::fprintf(stderr, "connect refused %u.%u.%u.%u:%u\n", c.mem[addr + 4], c.mem[addr + 5],
+                             c.mem[addr + 6], c.mem[addr + 7], c.mem[addr + 2] << 8 | c.mem[addr + 3]);
+        }
+        ret_stdcall(c, 0xFFFFFFFFu, 12);
+        return;
+    }
+    ret_stdcall(c, 0, 12);
+}
 
 void ws_bind(Cpu& c) { ret_stdcall(c, 0, 12); }
 

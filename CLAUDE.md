@@ -187,21 +187,26 @@ agreed to this).
    Two imports only 2017 reaches: `SystemTimeToFileTime` and `accept`.
    Build: `cmake -S . -B build/mac-2017-host -G Ninja
    -DDCUSA_PREPARED_CACHE=$PWD/build/mac-host/prepared/DCUSA2017.cache
-   -DDCUSA_PYTHONPATH=$PWD/build/pylib`; `build/mac-2017-host/run2017.sh
-   <log> [exit_at]` boots it headless (its own container folder). Now: it
-   boots to "NETWORK DISCOVERY / PLEASE WAIT" and stays there (14 minutes
-   checked). 2019 skips discovery on `[Network] Enabled=0`; 2017 reads that
-   key only in a settings loader (0x51935E) its boot does not reach first.
-   The frame routine runs the discovery object's update (0x575AA0) and state
-   machine (0x5762D0: states 0-6 in `[obj+0x2C]`; peers' found flags
-   `[obj+0x70..0x77]` against `[obj+0x98..0x9F]`, `[obj+0xB0]` NumCabinets,
-   a 600,000 ms timer at `[obj+0xA0]`). Next: read the state at run time,
-   then answer the discovery as a lone cabinet (the ping threads 0x576EB0)
-   or skip it at the call site. TeknoParrot's patch does not touch this
-   (its four code edits are input mapping, the frame gate 0x4DD697 and
-   0x52958F). After attract: one app holding both translations (each in its
-   own namespace with its own entry table, picked at start; a container
-   folder per edition, since today it sits beside the cache).
+   -DDCUSA_PYTHONPATH=$PWD/build/pylib`; run its `dcrun` as for 2019
+   (`--headless --content "<folder>" <cache>`) with a copy of
+   `DCUSA2017.cache` in `build/mac-2017-host/prepared/`, so its container
+   folder is not 2019's.
+   **Boots to attract on the Mac** (headless, unpaced: discovery, Data
+   Loading, then the Lakeside Castle and Dinosaur Canyon demos with PRESS
+   START BUTTON / FREE PLAY, drawn right; no fail-closed stop in 40,000
+   presents). Discovery: 2017 has no `[Network] Enabled` switch at boot; as
+   CabinetID 1 it is the master (ping.cpp, object `[[0x1664FE0]+4]`, states
+   in `+0x2C`), whose threads (0x576AD0) connect to 192.168.1.2 .. .8:26000.
+   `connect` used to succeed for every address, so each thread waited for a
+   reply, flagged a network error, and discovery restarted every other
+   frame. It now succeeds only for loopback (the shell link) and refuses the
+   rest (WSAECONNREFUSED), as on a lone cabinet; 2019 makes no other
+   connect. TeknoParrot's patch does not touch this (its four code edits are
+   input mapping, the frame gate 0x4DD697 and its shell window message
+   0x52958F). Not yet checked: a race, sound, movies, the window and pad.
+   Next: one app holding both translations (each in its own namespace with
+   its own entry table, picked at start; a container folder per edition,
+   since today it sits beside the cache).
 
 ## Future work
 
