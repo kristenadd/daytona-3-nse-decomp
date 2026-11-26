@@ -1538,6 +1538,19 @@ SITE_OVERRIDES = {
     },
 }
 
+# The 2017 build has the same instructions at every site (checked by
+# disassembly against 2019); the render code even sits at the same addresses.
+# Only the frame routine's call target and the CRT and boot sites moved.
+SITE_OVERRIDES[2017] = {
+    0xC3F825: SITE_OVERRIDES[2019][0xC45035],
+    **{va: SITE_OVERRIDES[2019][va] for va in (0x4423B5, 0x4423BA, 0x442BDF, 0x43BAB9, 0x4434BD)},
+    # The frame routine 0x4DD510, its scene render 0x4DC4D0.
+    0x4DD707: ('',
+               'if (!frame_skip_render()) { esp -= 4; st32(M, esp, 0x4DD70Cu); SYNC_R(); '
+               'f_004DC4D0(c); RELOAD(); }'),
+    0x5BAD75: SITE_OVERRIDES[2019][0x5BFD15],
+}
+
 # TRANSLATE_PRESERVE=1: callers reload only the registers a callee may change
 # (preserved_regs, RELOAD_AFTER). Correct on the Mac tests and Phase 5, but it
 # gained nothing on an iPhone (52.6 / 53.3 pictures a second against 53.4 /

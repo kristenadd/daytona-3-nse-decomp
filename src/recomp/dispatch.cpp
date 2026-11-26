@@ -1,4 +1,5 @@
 #include "recomp/dispatch.hpp"
+#include "recomp/game_addresses.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -92,7 +93,7 @@ inline GuestFn find_entry_cached(std::uint32_t target) {
     fail_closed(Unported::Import, target, "import slot without a handler");
 }
 
-// 0xC5030C is the fpatan tail of atan2. The binary dispatcher jumps there,
+// The fpatan tail of atan2 (2019 0xC5030C, GameAddresses::crt_fpatan_tail). The binary dispatcher jumps there,
 // and that address is not a translated function entry. st(0) is x, st(1) is y.
 [[gnu::noinline]] void fpatan_tail(Cpu& c) {
     const double x = c.fpu.at(0);
@@ -123,7 +124,7 @@ void call_indirect(Cpu& c, std::uint32_t target) {
         }
         return call_com(c, target);
     }
-    if (target == 0x00C5030Cu) return fpatan_tail(c);
+    if (target == game_addresses().crt_fpatan_tail) return fpatan_tail(c);
     if (GuestFn fn = find_entry_cached(target)) return fn(c);
     fail_closed(Unported::Function, target, "indirect call to an address with no translated function");
 }

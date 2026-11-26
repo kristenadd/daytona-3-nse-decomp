@@ -32,10 +32,14 @@ EH_MAGICS = (0x19930520, 0x19930521, 0x19930522)
 # handlers the dispatchers 0xC44D50 / 0xC44DCB jump through by operand class
 # (found as `mov edx, <descriptor>; jmp <dispatcher>`). Nothing else points at
 # the handlers. (handler list, entries) per edition; 2019: fmod (0x13DE170) and
-# atan2 (0x13F3DD0). A game started from attract reaches them.
-CRT_DISPATCH_TABLES = {2019: [(0x13DE180, 16), (0x13F3DE0, 16)]}
-# Handled natively by call_indirect (dispatch.cpp), so not made a function entry.
-CRT_NATIVE = {0xC5030C}
+# atan2 (0x13F3DD0); 2017: fmod (0x13CC5E0) and atan2 (0x13E2240). A game
+# started from attract reaches them.
+CRT_DISPATCH_TABLES = {2019: [(0x13DE180, 16), (0x13F3DE0, 16)],
+                       2017: [(0x13CC5F0, 16), (0x13E2250, 16)]}
+# The fpatan tail of atan2 (the first atan2 handler), handled natively by
+# call_indirect (dispatch.cpp, GameAddresses::crt_fpatan_tail), so not made a
+# function entry.
+CRT_NATIVE = {2019: {0xC5030C}, 2017: {0xC4AAFC}}
 
 NORETURN_IMPORTS = {'ExitProcess', 'RaiseException', 'FatalAppExitA', 'FatalAppExitW', 'ExitThread'}
 
@@ -540,7 +544,7 @@ def main():
     # inside what the walker reads as one body, so no weak round accepts them.
     for table, count in CRT_DISPATCH_TABLES.get(img.edition, ()):
         for k in range(count):
-            if img.u32(table + 4 * k) not in CRT_NATIVE:
+            if img.u32(table + 4 * k) not in CRT_NATIVE.get(img.edition, ()):
                 d.add(img.u32(table + 4 * k), 'crt-table')
     d.fixpoint()
     print('strong roots: %d functions after fixpoint, m2e tables %s, init tables %s (%.0f s)' % (

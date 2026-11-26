@@ -1,4 +1,5 @@
 #include "recomp/win32.hpp"
+#include "recomp/game_addresses.hpp"
 
 #include "recomp/avi_video.hpp"
 
@@ -1537,6 +1538,15 @@ void ws_bind(Cpu& c) { ret_stdcall(c, 0, 12); }
 
 void ws_listen(Cpu& c) { ret_stdcall(c, 0, 8); }
 
+// Ordinal 1, accept. Nothing ever connects. The 2017 build's NRT network
+// thread (nrt_network_new_socket.cpp, 0x852A10) polls its listener: on an
+// error it reports no connection, sleeps and asks again (0x84C9F2). 2019
+// does not reach it.
+void ws_accept(Cpu& c) {
+    wsa_error = 0x2733;  // WSAEWOULDBLOCK
+    ret_stdcall(c, 0xFFFFFFFFu, 12);
+}
+
 void ws_htons(Cpu& c) { ret_stdcall(c, swap16(arg(c, 0)), 4); }
 
 void ws_ntohs(Cpu& c) { ret_stdcall(c, swap16(arg(c, 0)), 4); }
@@ -2443,6 +2453,45 @@ void FileTimeToSystemTime(Cpu& c) {
     ret_stdcall(c, 1, 8);
 }
 
+// SYSTEMTIME (year, month, weekday, day, hour, minute, second, ms; the weekday
+// is ignored) to FILETIME, 100 ns since 1601. The 2017 build calls it at
+// 0x529DA5 on GetLocalTime's result; 2019 never does. FALSE for a field out of
+// range, as Windows (ERROR_INVALID_PARAMETER).
+void SystemTimeToFileTime(Cpu& c) {
+    const std::uint32_t src = arg(c, 0);
+    const std::uint32_t dst = arg(c, 1);
+    if (src == 0 || dst == 0) {
+        set_error(c, 87);
+        ret_stdcall(c, 0, 8);
+        return;
+    }
+    const unsigned year = ld16(c.mem, src), month = ld16(c.mem, src + 2), day = ld16(c.mem, src + 6);
+    const unsigned hour = ld16(c.mem, src + 8), minute = ld16(c.mem, src + 10), second = ld16(c.mem, src + 12);
+    const unsigned ms = ld16(c.mem, src + 14);
+    static constexpr unsigned kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    if (year < 1601 || year > 30827 || month < 1 || month > 12 || day < 1 ||
+        day > kDays[month - 1] + (month == 2 && leap ? 1u : 0u) || hour > 23 || minute > 59 || second > 59 || ms > 999) {
+        set_error(c, 87);
+        ret_stdcall(c, 0, 8);
+        return;
+    }
+    // Days since 1601-01-01 (proleptic Gregorian), by the civil-from-days inverse.
+    const int y = static_cast<int>(year) - (month <= 2 ? 1 : 0);
+    const int era = y / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const std::int64_t days_1970 = static_cast<std::int64_t>(era) * 146097 + doe - 719468;
+    const std::int64_t days = days_1970 + 134774;  // 1601-01-01 to 1970-01-01
+    const std::uint64_t ft = static_cast<std::uint64_t>(((days * 24 + hour) * 60 + minute) * 60 + second) * 10000000ull +
+                             ms * 10000ull;
+    st32(c.mem, dst, static_cast<std::uint32_t>(ft));
+    st32(c.mem, dst + 4, static_cast<std::uint32_t>(ft >> 32));
+    set_error(c, 0);
+    ret_stdcall(c, 1, 8);
+}
+
 void CloseHandle(Cpu& c) {
     const std::uint32_t handle = arg(c, 0);
     std::uint32_t err = 0;
@@ -2826,6 +2875,7 @@ constexpr Handler kHandlers[] = {
     {"WS2_32.dll!#111", ws_last_error},
     {"WS2_32.dll!#151", ws_fd_isset},
     {"WS2_32.dll!#13", ws_listen},
+    {"WS2_32.dll!#1", ws_accept},
     {"WS2_32.dll!#15", ws_ntohs},
     {"WS2_32.dll!#8", ws_htonl},
     {"KERNEL32.dll!GetModuleHandleA", GetModuleHandleA},
@@ -2858,6 +2908,7 @@ constexpr Handler kHandlers[] = {
     {"KERNEL32.dll!GetFileTime", GetFileTime},
     {"KERNEL32.dll!FileTimeToLocalFileTime", FileTimeToLocalFileTime},
     {"KERNEL32.dll!FileTimeToSystemTime", FileTimeToSystemTime},
+    {"KERNEL32.dll!SystemTimeToFileTime", SystemTimeToFileTime},
     {"KERNEL32.dll!CloseHandle", CloseHandle},
     {"KERNEL32.dll!AreFileApisANSI", AreFileApisANSI},
     {"KERNEL32.dll!OutputDebugStringA", OutputDebugStringA},
@@ -2905,11 +2956,11 @@ void sample_pad() {
 }
 
 // SHELL_MSG_SETCREDIT (0x2D) carries the credit count itself. The game spends
-// credits on its own, so a coin is the count it holds now (0x15278F8 + 7, 0xFF
+// credits on its own, so a coin is the count it holds now (2019 0x15278F8 + 7, 0xFF
 // before the first message) plus one.
 void shell_insert_coin(const std::uint8_t* mem) {
     if (shell_socket == 0) return;  // the link is not up yet
-    const std::uint8_t now = mem[0x15278F8u + 7u];
+    const std::uint8_t now = mem[game_addresses().shell_credits + 7u];
     const std::uint8_t credits = static_cast<std::uint8_t>(now == 0xFF ? 1 : std::min(now + 1, 99));
     shell_inbox.push_back(dyt_packet(0x2D, &credits, 1));
 }

@@ -176,6 +176,33 @@ agreed to this).
       renders; PHASE3 "Memory"). The boot's 44 s loading screen on the phone
       (Future work, "Boot time, further").
 
+9. **The 2017 edition** (one app with a game choice at start is the goal).
+   Done: the translator's 2017 tables (`CRT_DISPATCH_TABLES`, `CRT_NATIVE`,
+   `SITE_OVERRIDES[2017]`, every site checked by disassembly against 2019;
+   the render code sits at the same addresses) and the host's per-edition
+   addresses (`src/recomp/game_addresses.hpp`: CRT thread entry, atan2 tail,
+   CRI sound server, boot state, credits, race timer, pad log). 2017
+   translates fully (61,758 functions, none unsupported, trap list
+   reviewed); 2019's generated code is byte-identical after the change.
+   Two imports only 2017 reaches: `SystemTimeToFileTime` and `accept`.
+   Build: `cmake -S . -B build/mac-2017-host -G Ninja
+   -DDCUSA_PREPARED_CACHE=$PWD/build/mac-host/prepared/DCUSA2017.cache
+   -DDCUSA_PYTHONPATH=$PWD/build/pylib`; `build/mac-2017-host/run2017.sh
+   <log> [exit_at]` boots it headless (its own container folder). Now: it
+   boots to "NETWORK DISCOVERY / PLEASE WAIT" and stays there (14 minutes
+   checked). 2019 skips discovery on `[Network] Enabled=0`; 2017 reads that
+   key only in a settings loader (0x51935E) its boot does not reach first.
+   The frame routine runs the discovery object's update (0x575AA0) and state
+   machine (0x5762D0: states 0-6 in `[obj+0x2C]`; peers' found flags
+   `[obj+0x70..0x77]` against `[obj+0x98..0x9F]`, `[obj+0xB0]` NumCabinets,
+   a 600,000 ms timer at `[obj+0xA0]`). Next: read the state at run time,
+   then answer the discovery as a lone cabinet (the ping threads 0x576EB0)
+   or skip it at the call site. TeknoParrot's patch does not touch this
+   (its four code edits are input mapping, the frame gate 0x4DD697 and
+   0x52958F). After attract: one app holding both translations (each in its
+   own namespace with its own entry table, picked at start; a container
+   folder per edition, since today it sits beside the cache).
+
 ## Future work
 
 - **Attract playlist** (not wanted for now: the user is content with the fixed

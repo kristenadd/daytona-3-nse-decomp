@@ -1,4 +1,5 @@
 #include "recomp/threads.hpp"
+#include "recomp/game_addresses.hpp"
 
 #include <pthread.h>
 #include <TargetConditionals.h>
@@ -35,7 +36,7 @@ thread_local int t_rt_depth = 0;
 }  // namespace
 
 // DCUSA_PARALLEL_THREADS: the guest threads that run in parallel. On iOS the
-// CRI sound server (0x59E660) by default, on an efficiency core
+// CRI sound server (2019 0x59E660, 2017 0x599870) by default, on an efficiency core
 // (DCUSA_PARALLEL_QOS): it took 5 to 11 ms of the main thread's slowest
 // frames, and in parallel an iPhone race drew about 1 picture a second more.
 // "0": none.
@@ -43,7 +44,10 @@ const char* parallel_threads() {
     static const char* list = [] {
         const char* v = std::getenv("DCUSA_PARALLEL_THREADS");
         if (v != nullptr) return std::strcmp(v, "0") == 0 ? "" : v;
-        return TARGET_OS_IPHONE ? "59E660" : "";
+        if (!TARGET_OS_IPHONE) return "";
+        static char server[12];
+        std::snprintf(server, sizeof server, "%X", game_addresses().cri_sound_server);
+        return static_cast<const char*>(server);
     }();
     return list;
 }
@@ -601,9 +605,9 @@ std::uint32_t sched_create_thread(Cpu& c, std::uint32_t start, std::uint32_t par
     t.id = s.next_id++;
     t.start = start;
     t.param = param;
-    // The CRT's thread entry (0xC215BB) takes a thread block whose +0x54 holds
+    // The CRT's thread entry (2019 0xC215BB) takes a thread block whose +0x54 holds
     // the procedure: that one names the thread (sched_thread_time).
-    t.procedure = start == 0xC215BBu && param != 0 && param + 0x58u > param ? ld32(M, param + 0x54u) : start;
+    t.procedure = start == game_addresses().crt_thread_entry && param != 0 && param + 0x58u > param ? ld32(M, param + 0x54u) : start;
     t.own = std::make_unique<Cpu>();
     t.cpu = t.own.get();
     st32(M, teb + 0x00, 0xFFFFFFFFu);
@@ -615,7 +619,7 @@ std::uint32_t sched_create_thread(Cpu& c, std::uint32_t start, std::uint32_t par
     st32(M, teb + 0x2C, kStaticTls);
     st32(M, teb + 0x30, kPeb);
     // DCUSA_PARALLEL_THREADS=<hex start>[,...]: these run in parallel. The
-    // CRT's thread entry (0xC215BB) takes a thread block whose +0x54 holds the
+    // CRT's thread entry (2019 0xC215BB) takes a thread block whose +0x54 holds the
     // procedure (the CRI sound server is 0x59E660).
     if (rt_parallel()) {
         const std::uint32_t real = param != 0 && param + 0x58u > param ? ld32(M, param + 0x54u) : 0u;

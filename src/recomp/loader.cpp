@@ -1,4 +1,5 @@
 #include "recomp/loader.hpp"
+#include "recomp/game_addresses.hpp"
 
 #include <cstring>
 #include <span>
@@ -113,6 +114,7 @@ bool GuestProcess::load(const dcusa::ExeImage& image, std::string* error) {
     std::memcpy(memory_.host(view.image_base), image.bytes.data(), view.image_size);
     g_image_lo = view.image_base;
     g_image_hi = view.image_base + view.image_size;
+    set_game_edition(image.edition);
 
     std::uint8_t* M = memory_.base();
     std::vector<std::uint32_t> slots;

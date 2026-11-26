@@ -1,4 +1,5 @@
 #include "recomp/d3d11.hpp"
+#include "recomp/game_addresses.hpp"
 
 #include <TargetConditionals.h>
 #include "runtime/hitch.hpp"
@@ -1985,11 +1986,11 @@ std::uint32_t g_slow_draws = 0;
 std::uint32_t g_slow_race = 0;  // the race timer then
 
 // The race timer the HUD shows top left (total race time, lap times added),
-// in 1/64 s: 0x19C98EC, found by its values against the HUD in Mac races.
+// in 1/64 s: 2019 0x19C98EC, found by its values against the HUD in Mac races.
 // The slowest-frame log gives it, so a moment from a phone run can be found
 // again in a Mac run (DCUSA_SKIP_LOG; 0 outside the image).
 std::uint32_t race_timer(const std::uint8_t* mem) {
-    constexpr std::uint32_t kRaceTimer = 0x19C98ECu;
+    const std::uint32_t kRaceTimer = game_addresses().race_timer;
     return g_image_lo <= kRaceTimer && kRaceTimer + 4u <= g_image_hi ? ld32(mem, kRaceTimer) : 0u;
 }
 double g_tick_cpu_start = 0;
@@ -2036,7 +2037,8 @@ void pace_present(Cpu& c, std::uint32_t sync_interval) {
     static std::uint32_t presents = 0;
     ++presents;
     // Only a loaded game image has the boot state (a test's guest memory has no image there).
-    const std::uint32_t state = g_image_lo <= 0x1735608u && 0x1735608u + 4u <= g_image_hi ? ld32(c.mem, 0x1735608u) : 8u;
+    const std::uint32_t boot = game_addresses().boot_state;
+    const std::uint32_t state = g_image_lo <= boot && boot + 4u <= g_image_hi ? ld32(c.mem, boot) : 8u;
     g_boot_state = state;
     if (state != last_state) {
         std::fprintf(stderr, "boot state %u at %.1f s, present %u\n", state,
@@ -2080,14 +2082,15 @@ void print_pad_trace(const std::uint8_t* mem, int present_no) {
     last = pad;
     if (left == 0 && present_no % 120 != 0) return;
     if (left > 0) --left;
-    constexpr std::uint32_t slot = 0x15964A0u;
+    const GameAddresses& ga = game_addresses();
+    const std::uint32_t slot = ga.pad_slot, jvs = ga.jvs_inputs;
     std::fprintf(stderr,
                  "pad %d: snap btn %04x steer %+.2f acc %.2f brk %.2f | held %08x%08x new %08x%08x "
                  "steer %05x acc %05x brk %05x | jvs %02x %02x %02x sw %02x %02x gear %u credit %u\n",
                  present_no, pad.buttons, pad.steering, pad.accelerator, pad.brake, ld32(mem, slot + 0x34),
                  ld32(mem, slot + 0x30), ld32(mem, slot + 0x24), ld32(mem, slot + 0x20), ld32(mem, slot + 0x40),
-                 ld32(mem, slot + 0x44), ld32(mem, slot + 0x48), mem[0x19C87F8u], mem[0x19C87F9u], mem[0x19C87FAu],
-                 mem[0x19C8800u], mem[0x19C8801u], ld32(mem, 0x19C880Cu), mem[0x15278F8u + 7u]);
+                 ld32(mem, slot + 0x44), ld32(mem, slot + 0x48), mem[jvs], mem[jvs + 1u], mem[jvs + 2u],
+                 mem[jvs + 8u], mem[jvs + 9u], ld32(mem, ga.jvs_gear), mem[ga.shell_credits + 7u]);
 }
 
 // DCUSA_SELFTEST_MATH=1: at the first present (the CRT is initialised by then,
