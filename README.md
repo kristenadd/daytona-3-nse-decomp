@@ -37,7 +37,7 @@ Given the cache folder, dcrun offers every edition it was built with
 the edition picker: the title images on a carousel that turns as you move
 (the cards always face you, the chosen one at the front), chosen with the pad
 (left / right, then Start, gas or A), the arrow keys and Return, or a click
-(on the front card: choose it; on another: turn to it).
+(on the front card: choose it; on another: turn to it); 2017 stands on the left, 2019 on the right, and it starts on 2019).
 `--edition 2017|2019` or `DCUSA_EDITION` skips it; a headless run takes 2019.
 A cache file instead of the folder runs that edition. Each edition keeps what
 the game writes in its own container folder beside the caches (`container`

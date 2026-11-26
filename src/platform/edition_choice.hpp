@@ -38,6 +38,11 @@ std::vector<EditionChoice> available_editions(const std::filesystem::path& cache
                                               const std::vector<std::filesystem::path>& image_dirs,
                                               std::string* why);
 
+// The picker's order: oldest first, left to right (2017, then 2019). Sorts
+// `choices` that way and returns the index it starts on, 2019's (the
+// default), or 0 when 2019 is not among them.
+int arrange_for_picker(std::vector<EditionChoice>& choices);
+
 // DCUSA_EDITION=2017|2019 (or a --edition argument): the edition asked for.
 std::optional<Edition> edition_from_environment();
 
@@ -75,7 +80,8 @@ struct CarouselCard {
 
 class Carousel {
 public:
-    explicit Carousel(int count) : count_(count) {}
+    explicit Carousel(int count, int start = 0)
+        : count_(count), pos_(static_cast<float>(start)), target_(static_cast<float>(start)) {}
     void select(int index) { target_ = static_cast<float>(index); }
     // Advances the turn by dt seconds; true while still moving.
     bool step(double dt);

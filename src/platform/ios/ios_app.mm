@@ -317,8 +317,10 @@ void start_game_thread() {
 // perspective, the cards always facing the viewer), each with a reflection
 // on a dark floor; the front card framed, its name below.
 - (void)showPicker {
-    _input = std::make_unique<dcusa::PickerInput>(static_cast<int>(_choices.size()));
-    _carousel = std::make_unique<dcusa::Carousel>(static_cast<int>(_choices.size()));
+    // Oldest first, left to right (2017, 2019), starting on 2019.
+    const int start = dcusa::arrange_for_picker(_choices);
+    _input = std::make_unique<dcusa::PickerInput>(static_cast<int>(_choices.size()), start);
+    _carousel = std::make_unique<dcusa::Carousel>(static_cast<int>(_choices.size()), start);
     _picker = [UIView new];
     _picker.backgroundColor = UIColor.blackColor;
     [_picker addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped:)]];

@@ -241,8 +241,12 @@ public:
 
     void* layer() override { return (__bridge void*)layer_; }
 
-    int choose(const std::vector<EditionChoice>& items, PadSource* pad) override {
+    int choose(const std::vector<EditionChoice>& given, PadSource* pad) override {
         @autoreleasepool {
+            // Shown oldest first, left to right, starting on 2019; the result
+            // is an index into `given`.
+            std::vector<EditionChoice> items = given;
+            const int start = arrange_for_picker(items);
             NSMutableArray<NSImage*>* images = [NSMutableArray array];
             NSMutableArray<NSString*>* titles = [NSMutableArray array];
             for (const EditionChoice& item : items) {
@@ -256,8 +260,9 @@ public:
             // picker stands in for it until a choice is made.
             window_.contentView = picker;
             [window_ makeFirstResponder:picker];
-            PickerInput input(static_cast<int>(items.size()));
-            Carousel carousel(static_cast<int>(items.size()));
+            PickerInput input(static_cast<int>(items.size()), start);
+            Carousel carousel(static_cast<int>(items.size()), start);
+            picker.selected = start;
             picker.carousel = &carousel;
             int chosen = -1;
             auto last = std::chrono::steady_clock::now();
@@ -294,7 +299,9 @@ public:
             window_.contentView = game_view;
             [window_ makeFirstResponder:game_view];
             pump();
-            return chosen;
+            for (std::size_t i = 0; i < given.size(); ++i)
+                if (given[i].edition == items[static_cast<std::size_t>(chosen)].edition) return static_cast<int>(i);
+            return 0;
         }
     }
 

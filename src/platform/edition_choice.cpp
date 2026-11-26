@@ -56,6 +56,15 @@ std::vector<EditionChoice> available_editions(const std::filesystem::path& cache
     return out;
 }
 
+int arrange_for_picker(std::vector<EditionChoice>& choices) {
+    std::stable_sort(choices.begin(), choices.end(), [](const EditionChoice& a, const EditionChoice& b) {
+        return edition_info(a.edition).id < edition_info(b.edition).id;
+    });
+    for (std::size_t i = 0; i < choices.size(); ++i)
+        if (choices[i].edition == Edition::Nse2019) return static_cast<int>(i);
+    return 0;
+}
+
 std::optional<Edition> edition_from_environment() {
     const char* e = std::getenv("DCUSA_EDITION");
     if (e == nullptr || *e == 0) return std::nullopt;
