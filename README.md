@@ -330,6 +330,10 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_BC_DECODE=1` | Decode BC textures on upload even where the GPU samples them (as on iOS). |
 | `DCUSA_METAL=0` | The 2D software reference instead of Metal (or Vulkan, on Linux; on by default in dcrun and on iOS). |
 | `DCUSA_VK_VALIDATION=1` | Vulkan: load the Khronos validation layer (when installed). |
+| `DCUSA_VK_FULL_BARRIERS=1` | Vulkan: a full barrier before every pass, copy and clear (the renderer before hazard tracking; to compare). |
+| `DCUSA_VK_EAGER_RESOLVE=1` | Vulkan: resolve multisampled targets at the end of every pass instead of when read (to compare). |
+| `DCUSA_VK_IMMEDIATE_CLEAR=1` | Vulkan: record clears at once instead of as the next pass's load operation (to compare). |
+| `DCUSA_VK_CHECK=1` | Vulkan: report a texture read while it still owes a resolve or a clear (a renderer bug). |
 | `DCUSA_SHADERS=<dir>` | Shader folder (default `<cache folder>/shaders`; `Documents/shaders` on iOS). |
 | `DCUSA_TRANSLATE=1` | Translate shaders that have no translation yet, during the run. dcrun always sets it (any value counts as on); iOS never translates. |
 
@@ -337,7 +341,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 
 | Variable | Effect |
 | --- | --- |
-| `DCUSA_STATS=1` | Draw, texture and frame-time reports at presents 1, 30 and every `DCUSA_EVERY`; also host API logging. |
+| `DCUSA_STATS=1` | Draw, texture and frame-time reports at presents 1, 30 and every `DCUSA_EVERY`; also host API logging (Vulkan: passes, barriers and resolves per frame, every 1000 frames). |
 | `DCUSA_EVERY=<n>` | Report (and with `DCUSA_FRAME`, write) every nth present. |
 | `DCUSA_FRAME=<prefix>` | Write frames as `<prefix>.<n>.ppm` (presents 1, 30, every `DCUSA_EVERY`). |
 | `DCUSA_FRAME_RANGE=<a>-<b>` | Write every present from a to b. |

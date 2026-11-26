@@ -248,7 +248,14 @@ agreed to this).
    controller, PipeWire sound; 2017 edition; the boot screen shows, from
    Konsole and from a Steam shortcut). Steam's file browser refuses .sh:
    `add-to-menu.sh` makes a desktop entry its Add a Non-Steam Game list
-   shows. Not yet reported: race frame rate, the picker on the Deck.
+   shows. First race report: never above 30 fps, dips to 7. Since then,
+   after DXVK's design: hazard-tracked barriers, clears as load ops, lazy
+   multisample resolves (1 to 2 a frame; the game reads its MSAA targets
+   through Texture2DMS). A first try read stale targets in the attract demos
+   (a draw's reads were checked before the previous pass ended); fixed, and
+   Phase 5 passes (p95 0.470, saturation 0.343 / 0.335). Switches to compare
+   on the Deck: DCUSA_VK_FULL_BARRIERS, _EAGER_RESOLVE, _IMMEDIATE_CLEAR.
+   Not yet: the Deck's numbers with these changes, the picker on the Deck.
 
 ## Future work
 

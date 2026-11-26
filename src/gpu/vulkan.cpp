@@ -15,8 +15,15 @@
 // Unlike Metal, texture uploads are copies recorded in order with the draws,
 // so a draw recorded before an upload sees the old texels without a new image.
 //
-// Simplifications: every image lives in VK_IMAGE_LAYOUT_GENERAL, and a full
-// memory barrier separates each render pass, copy and clear from what follows.
+// Synchronisation (after DXVK's barrier tracker): every image lives in
+// VK_IMAGE_LAYOUT_GENERAL, and the images written and read since the last
+// barrier are tracked; a full memory barrier is recorded only before an
+// operation that reads something written since then, or writes something
+// read or written since then. Clears wait on the texture and become the
+// next pass's load operation (as metal.mm), and a multisampled target is
+// resolved only when something reads it as an ordinary texture (as DXVK's
+// implicit resolves): the game reads its multisampled targets itself through
+// Texture2DMS, so most passes never need theirs.
 //
 // Shaders: msl/<key>.spv and msl/<key>.refl from tools/shaderprep
 // (translate_shaders.py). Vertex resources are in descriptor set 0 and pixel
@@ -44,6 +51,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "show_frag.h"
@@ -267,6 +275,17 @@ struct Texture {
     std::unordered_map<std::uint32_t, VkImageView> views;
     // Attachment views: level << 16 | layer.
     std::unordered_map<std::uint32_t, VkImageView> attach;
+    // Clears not recorded yet: a bit per colour level (slice 0), and the
+    // depth / stencil flags (1 depth, 2 stencil) with their values.
+    std::uint32_t clear_mips = 0;
+    float clear_rgba[16][4] = {};
+    std::uint32_t clear_ds = 0;
+    float clear_depth = 0;
+    std::uint8_t clear_stencil = 0;
+    // The multisampled surface holds what the texture should: resolve it
+    // into `resolve_level` before the texture is read.
+    bool needs_resolve = false;
+    std::uint32_t resolve_level = 0;
 };
 
 // Vulkan objects whose last use may still be on the GPU: freed with the
@@ -348,7 +367,13 @@ struct Device {
 
     // Recording state.
     bool rendering = false;
-    bool need_barrier = false;
+    // Images written and read since the last barrier (DXVK-style tracking).
+    std::unordered_set<VkImage> written, read;
+    // The open pass's attachment images, added to `written` when it ends.
+    std::vector<VkImage> pass_images;
+    // Textures whose multisampled surface the open pass renders into.
+    std::vector<std::uint32_t> pass_resolves;
+    unsigned barriers = 0, resolves = 0, passes = 0;
     std::uint32_t enc_rtv[kTargets]{};
     std::uint8_t enc_mip[kTargets]{}, enc_slice[kTargets]{};
     std::uint32_t enc_dsv = 0;
@@ -452,6 +477,7 @@ std::uint32_t memory_type(std::uint32_t bits, VkMemoryPropertyFlags want, VkMemo
 // ---- frames and command buffers ----
 
 void complete(Frame& f, bool wait);
+void full_barrier(VkCommandBuffer c);
 
 // The frame being recorded, begun if it is not yet.
 Frame& frame() {
@@ -467,6 +493,10 @@ Frame& frame() {
         vkCmdResetQueryPool(f.cmd, f.queries, 0, 2);
         vkCmdWriteTimestamp(f.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, f.queries, 0);
     }
+    // What earlier submissions wrote is made visible once, here.
+    full_barrier(f.cmd);
+    d.written.clear();
+    d.read.clear();
     for (std::size_t i = 0; i < f.pools_used; ++i) vkResetDescriptorPool(d.dev, f.pools[i], 0);
     f.pools_used = 0;
     f.serial = ++d.serial;
@@ -500,20 +530,55 @@ void full_barrier(VkCommandBuffer c) {
                          nullptr);
 }
 
-// What was written since the last barrier is made visible to what follows.
-void barrier() {
+void barrier_now() {
     Device& d = *g_dev;
-    if (!d.need_barrier) return;
     full_barrier(cmd());
-    d.need_barrier = false;
+    d.written.clear();
+    d.read.clear();
+    ++d.barriers;
 }
+
+// Before an operation outside a render pass that reads (`write` false) or
+// writes `image`: a barrier if an earlier one wrote it, or (for a write)
+// read it, since the last barrier.
+bool test_switch(const char* name) {
+    const char* v = std::getenv(name);
+    return v != nullptr && std::strcmp(v, "0") != 0;
+}
+
+void hazard(VkImage image, bool write) {
+    Device& d = *g_dev;
+    if (image == VK_NULL_HANDLE) return;
+    static const bool always = test_switch("DCUSA_VK_FULL_BARRIERS");
+    if (always) return barrier_now();
+    if (d.written.count(image) != 0 || (write && d.read.count(image) != 0)) barrier_now();
+}
+
+void touched(VkImage image, bool write) {
+    if (image != VK_NULL_HANDLE) (write ? g_dev->written : g_dev->read).insert(image);
+}
+
+Texture* texture(std::uint32_t key);
+struct Texture;
+void resolve(Texture& t);
 
 void end_pass() {
     Device& d = *g_dev;
     if (!d.rendering) return;
     vkCmdEndRendering(cmd());
     d.rendering = false;
-    d.need_barrier = true;
+    for (VkImage i : d.pass_images) d.written.insert(i);
+    d.pass_images.clear();
+    for (std::uint32_t key : d.pass_resolves)
+        if (Texture* t = texture(key)) t->needs_resolve = true;
+    static const bool eager = test_switch("DCUSA_VK_EAGER_RESOLVE");
+    std::vector<std::uint32_t> done;
+    done.swap(d.pass_resolves);
+    std::memset(d.enc_rtv, 0, sizeof d.enc_rtv);
+    d.enc_dsv = 0;
+    if (eager)
+        for (std::uint32_t key : done)
+            if (Texture* t = texture(key)) resolve(*t);
     std::memset(d.enc_rtv, 0, sizeof d.enc_rtv);
     d.enc_dsv = 0;
 }
@@ -786,6 +851,12 @@ void commit(bool wait) {
     d.in_flight.push_back(d.slot);
     d.slot = (d.slot + 1) % kFrameSlots;
     ++d.stats.frames;
+    // DCUSA_STATS: passes, barriers and resolves per frame, every 1000 frames.
+    if (verbose() && d.stats.frames % 1000 == 0) {
+        std::fprintf(stderr, "vulkan: per frame %.1f passes, %.1f barriers, %.1f resolves\n", d.passes / 1000.0,
+                     d.barriers / 1000.0, d.resolves / 1000.0);
+        d.passes = d.barriers = d.resolves = 0;
+    }
     if (wait) {
         while (!d.in_flight.empty()) complete(d.frames[d.in_flight.front()], true);
     } else {
@@ -933,6 +1004,103 @@ void drop_texture(Texture& t) {
     if (t.ms) g.images.push_back(t.ms);
     if (t.ms_mem) g.mems.push_back(t.ms_mem);
     t = Texture{};
+}
+
+// Records the clears `t` is owed (outside a pass): for anything that uses
+// the texture other than a pass that can take them as its load operation.
+void flush_clears(Texture& t) {
+    if (t.clear_mips == 0 && t.clear_ds == 0) return;
+    end_pass();
+    VkCommandBuffer c = cmd();
+    for (std::uint32_t mip = 0; mip < 16; ++mip) {
+        if (!(t.clear_mips & (1u << mip))) continue;
+        VkClearColorValue v{};
+        std::memcpy(v.float32, t.clear_rgba[mip], sizeof v.float32);
+        hazard(t.image, true);
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, 0, 1};
+        vkCmdClearColorImage(c, t.image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
+        touched(t.image, true);
+        if (t.ms != VK_NULL_HANDLE && mip == t.resolve_level) {
+            hazard(t.ms, true);
+            const VkImageSubresourceRange r0{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(c, t.ms, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &r0);
+            touched(t.ms, true);
+            t.needs_resolve = false;
+        }
+    }
+    if (t.clear_ds != 0) {
+        VkImageAspectFlags asp = 0;
+        if (t.clear_ds & 1u) asp |= VK_IMAGE_ASPECT_DEPTH_BIT;
+        if ((t.clear_ds & 2u) && t.stencil) asp |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        if (asp != 0) {
+            const VkClearDepthStencilValue v{t.clear_depth, t.clear_stencil};
+            const VkImageSubresourceRange range{asp, 0, 1, 0, 1};
+            hazard(t.image, true);
+            vkCmdClearDepthStencilImage(c, t.image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
+            touched(t.image, true);
+            if (t.ms != VK_NULL_HANDLE) {
+                hazard(t.ms, true);
+                vkCmdClearDepthStencilImage(c, t.ms, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
+                touched(t.ms, true);
+                t.needs_resolve = false;
+            }
+        }
+    }
+    t.clear_mips = 0;
+    t.clear_ds = 0;
+}
+
+// The multisampled surface resolved into the texture (an empty pass whose
+// only work is its resolve), when it holds newer content.
+void resolve(Texture& t) {
+    Device& d = *g_dev;
+    if (!t.needs_resolve || t.ms == VK_NULL_HANDLE) return;
+    end_pass();
+    hazard(t.ms, false);
+    hazard(t.image, true);
+    VkRenderingAttachmentInfo a{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    a.imageView = t.ms_attach;
+    a.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    a.resolveImageView = attach_view(t, t.resolve_level, 0);
+    a.resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    info.renderArea = {{0, 0}, {std::max(1u, t.desc.width >> t.resolve_level), std::max(1u, t.desc.height >> t.resolve_level)}};
+    info.layerCount = 1;
+    if (t.depth) {
+        if (!(d.depth_resolve & VK_RESOLVE_MODE_SAMPLE_ZERO_BIT)) {
+            t.needs_resolve = false;
+            return;
+        }
+        a.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+        info.pDepthAttachment = &a;
+        if (t.stencil) info.pStencilAttachment = &a;
+    } else {
+        a.resolveMode = is_integer(t.format) ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_AVERAGE_BIT;
+        info.colorAttachmentCount = 1;
+        info.pColorAttachments = &a;
+    }
+    vkCmdBeginRendering(cmd(), &info);
+    vkCmdEndRendering(cmd());
+    touched(t.ms, false);
+    touched(t.image, true);
+    t.needs_resolve = false;
+    ++d.resolves;
+    d.bound = Device::Bound{};
+}
+
+// `t` is about to be read as an ordinary texture, a copy source or the
+// picture shown: its clears and resolve are recorded, and the barrier its
+// writes need. Ends the open pass when one is needed.
+VkImage prepare_read(Texture& t) {
+    flush_clears(t);
+    resolve(t);
+    if (g_dev->written.count(t.image) != 0) {
+        end_pass();
+        barrier_now();
+    }
+    return t.image;
 }
 
 // ---- programs and pipelines ----
@@ -1197,6 +1365,50 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         return true;
     end_pass();
     const bool msaa = pass_samples(rtv, dsv) > 1;
+    // The attachments' state first (outside the pass): their other clears,
+    // a resolve a single-sampled pass would load over, the barriers.
+    std::vector<VkImage> images;
+    for (unsigned i = 0; i < kTargets; ++i) {
+        Texture* t = rtv[i] ? texture(rtv[i]) : nullptr;
+        if (t == nullptr || t->depth) continue;
+        const std::uint32_t level = std::min<std::uint32_t>(mip[i], t->levels - 1);
+        const std::uint32_t layer = t->cube ? std::min<std::uint32_t>(slice[i], t->layers - 1) : 0;
+        if ((t->clear_mips & ~(1u << level)) != 0 || layer != 0) {
+            // Other levels' clears (and any, for a face other than the first) first.
+            const std::uint32_t keep = (layer == 0 ? t->clear_mips & (1u << level) : 0);
+            t->clear_mips &= ~keep;
+            flush_clears(*t);
+            t->clear_mips |= keep;
+        }
+        if (!msaa) resolve(*t);
+        images.push_back(msaa ? t->ms : t->image);
+    }
+    Texture* dt0 = dsv ? texture(dsv) : nullptr;
+    if (dt0 != nullptr && dt0->depth) {
+        if (!msaa) resolve(*dt0);
+        images.push_back(msaa ? dt0->ms : dt0->image);
+    }
+    {
+        // A clear as load op covers the render area only: with attachments of
+        // different sizes, the clears are recorded on their own first.
+        std::uint32_t w0 = 0, h0 = 0;
+        bool mixed = false;
+        auto size_of = [&](Texture* t, std::uint32_t level) {
+            const std::uint32_t w = std::max(1u, t->desc.width >> level), h = std::max(1u, t->desc.height >> level);
+            if (w0 == 0) w0 = w, h0 = h;
+            else if (w != w0 || h != h0) mixed = true;
+        };
+        for (unsigned i = 0; i < kTargets; ++i)
+            if (Texture* t = rtv[i] ? texture(rtv[i]) : nullptr; t != nullptr && !t->depth)
+                size_of(t, std::min<std::uint32_t>(mip[i], t->levels - 1));
+        if (dt0 != nullptr && dt0->depth) size_of(dt0, 0);
+        if (mixed) {
+            for (unsigned i = 0; i < kTargets; ++i)
+                if (Texture* t = rtv[i] ? texture(rtv[i]) : nullptr) flush_clears(*t);
+            if (dt0 != nullptr) flush_clears(*dt0);
+        }
+    }
+    for (VkImage i : images) hazard(i, true);
     VkRenderingAttachmentInfo colors[kTargets]{};
     std::uint32_t count = 0;
     std::uint32_t w = ~0u, h = ~0u;
@@ -1210,11 +1422,16 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
         colors[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         colors[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        if (level < 16 && layer == 0 && (t->clear_mips & (1u << level))) {  // the deferred clear, as the load op
+            colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            std::memcpy(colors[i].clearValue.color.float32, t->clear_rgba[level], sizeof(float) * 4);
+            t->clear_mips &= ~(1u << level);
+        }
         if (msaa) {
+            // Resolved later, only if something reads the texture (resolve()).
             colors[i].imageView = t->ms_attach;
-            colors[i].resolveMode = is_integer(t->format) ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_AVERAGE_BIT;
-            colors[i].resolveImageView = view;
-            colors[i].resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            t->resolve_level = level;
+            d.pass_resolves.push_back(rtv[i]);
         } else {
             colors[i].imageView = view;
         }
@@ -1229,19 +1446,22 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
     if (dt != nullptr) {
         depth.imageView = msaa ? dt->ms_attach : attach_view(*dt, 0, 0);
         depth.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth.loadOp = (dt->clear_ds & 1u) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        if (msaa && (d.depth_resolve & VK_RESOLVE_MODE_SAMPLE_ZERO_BIT)) {
-            depth.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
-            depth.resolveImageView = attach_view(*dt, 0, 0);
-            depth.resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        depth.clearValue.depthStencil = {dt->clear_depth, dt->clear_stencil};
+        if (msaa) {
+            dt->resolve_level = 0;
+            d.pass_resolves.push_back(dsv);
         }
-        if (dt->stencil) stencil = depth;
+        if (dt->stencil) {
+            stencil = depth;
+            stencil.loadOp = (dt->clear_ds & 2u) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        }
+        dt->clear_ds = 0;
         w = std::min(w, dt->desc.width);
         h = std::min(h, dt->desc.height);
     }
     if (count == 0 && dt == nullptr) return false;
-    barrier();
     VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
     info.renderArea = {{0, 0}, {w, h}};
     info.layerCount = 1;
@@ -1251,6 +1471,8 @@ bool begin_pass(const std::uint32_t rtv[kTargets], const std::uint8_t mip[kTarge
     if (dt != nullptr && dt->stencil) info.pStencilAttachment = &stencil;
     vkCmdBeginRendering(cmd(), &info);
     d.rendering = true;
+    ++d.passes;
+    d.pass_images = images;
     d.bound = Device::Bound{};
     std::memcpy(d.enc_rtv, rtv, sizeof d.enc_rtv);
     std::memcpy(d.enc_mip, mip, sizeof d.enc_mip);
@@ -1379,6 +1601,9 @@ VkDescriptorSet stage_set(Program& p, const std::uint32_t* cbs, const std::uint3
     for (const auto& tx : p.textures) {
         VkImageView v = VK_NULL_HANDLE;
         Texture* t = tx.slot < kSlots && srvs[tx.slot] ? texture(srvs[tx.slot]) : nullptr;
+        if (t != nullptr && (t->needs_resolve || t->clear_mips || t->clear_ds) && tx.dim != 6 && std::getenv("DCUSA_VK_CHECK"))
+            std::fprintf(stderr, "vulkan check: %06x read with resolve %d clears %x/%x (dim %u, %ux%u, ms %d)\n", srvs[tx.slot],
+                         t->needs_resolve, t->clear_mips, t->clear_ds, tx.dim, t->desc.width, t->desc.height, t->ms != VK_NULL_HANDLE);
         if (t != nullptr) {
             v = sampled_view(*t, tx.dim, mips[tx.slot], counts[tx.slot]);
             if (v == VK_NULL_HANDLE)
@@ -1466,21 +1691,40 @@ bool prepare(const DrawState& s) {
     const Pipeline* pl = pipeline(s, vs, ps, topology);
     if (pl == nullptr) return false;
     make_stand_ins();
-    // A texture read here that a pass of this frame rendered: the pass must end
-    // first (its writes reach the read through the barrier).
-    if (d.rendering) {
-        for (unsigned i = 0; i < kSlots; ++i)
-            for (std::uint32_t id : {s.vs_srv[i], s.ps_srv[i]})
-                if (id != 0 && attached(id) && id != s.dsv) {
-                    bool target = false;
-                    for (unsigned r = 0; r < kTargets; ++r) target |= s.rtv[r] == id;
-                    if (!target) end_pass();
+    // What the draw samples: its clears and resolves recorded and, when an
+    // earlier operation wrote it, a barrier (ending the open pass for it).
+    // A draw on other targets ends the open pass first, so what that pass
+    // rendered is marked (owed a resolve, written) before this draw's reads
+    // are checked.
+    if (d.rendering && (std::memcmp(d.enc_rtv, s.rtv, sizeof d.enc_rtv) != 0 || std::memcmp(d.enc_mip, s.rtv_mip, sizeof d.enc_mip) != 0 ||
+                        std::memcmp(d.enc_slice, s.rtv_slice, sizeof d.enc_slice) != 0 || d.enc_dsv != s.dsv))
+        end_pass();
+    static std::vector<VkImage> reads;
+    reads.clear();
+    auto note_reads = [&](const Program& p, const std::uint32_t* srvs) {
+        for (const auto& tx : p.textures) {
+            Texture* t = tx.slot < kSlots && srvs[tx.slot] ? texture(srvs[tx.slot]) : nullptr;
+            if (t == nullptr) continue;
+            if (tx.dim == 6) {  // Texture2DMS: the multisampled surface itself
+                flush_clears(*t);
+                if (t->ms == VK_NULL_HANDLE) continue;
+                if (d.written.count(t->ms) != 0) {
+                    end_pass();
+                    barrier_now();
                 }
-    }
+                reads.push_back(t->ms);
+            } else {
+                reads.push_back(prepare_read(*t));
+            }
+        }
+    };
+    note_reads(vs, s.vs_srv);
+    if (ps != nullptr) note_reads(*ps, s.ps_srv);
     if (!begin_pass(s.rtv, s.rtv_mip, s.rtv_slice, s.dsv)) {
         problem("draw with no render target");
         return false;
     }
+    for (VkImage i : reads) touched(i, false);
     VkCommandBuffer c = cmd();
     Device::Bound& b = d.bound;
     if (b.pipeline != pl->pipeline) {
@@ -2083,7 +2327,8 @@ void copy_in(Texture& t, std::uint32_t layer, std::uint32_t level, std::uint32_t
     if (staging.arena == nullptr) return;
     std::memcpy(staging.contents(), bytes, size);
     end_pass();
-    barrier();
+    flush_clears(t);
+    hazard(t.image, true);
     VkBufferImageCopy r{};
     r.bufferOffset = staging.off;
     r.bufferRowLength = t.info.block ? row_pitch / t.info.bytes * 4 : row_pitch / t.info.bytes;
@@ -2092,7 +2337,7 @@ void copy_in(Texture& t, std::uint32_t layer, std::uint32_t level, std::uint32_t
     r.imageOffset = {static_cast<std::int32_t>(x), static_cast<std::int32_t>(y), 0};
     r.imageExtent = {w, h, 1};
     vkCmdCopyBufferToImage(cmd(), staging.arena->buf, t.image, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
-    d.need_barrier = true;
+    touched(t.image, true);
     ++d.stats.uploads;
 }
 }  // namespace
@@ -2124,10 +2369,11 @@ void generate_mips(std::uint32_t key) {
     Device& d = *g_dev;
     Texture* t = texture(key);
     if (t == nullptr || t->levels < 2 || t->info.block || t->depth) return;
+    prepare_read(*t);
     end_pass();
+    hazard(t->image, true);
     for (std::uint32_t level = 1; level < t->levels; ++level) {
-        d.need_barrier = true;
-        barrier();
+        if (level > 1) barrier_now();  // the level just written is the next one's source
         VkImageBlit b{};
         b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, t->layers};
         b.srcOffsets[1] = {static_cast<std::int32_t>(std::max(1u, t->desc.width >> (level - 1))),
@@ -2137,7 +2383,8 @@ void generate_mips(std::uint32_t key) {
                            static_cast<std::int32_t>(std::max(1u, t->desc.height >> level)), 1};
         vkCmdBlitImage(cmd(), t->image, VK_IMAGE_LAYOUT_GENERAL, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
     }
-    d.need_barrier = true;
+    touched(t->image, true);
+    (void)d;
 }
 
 void upload_buffer(std::uint32_t key, const std::uint8_t* bytes, std::size_t size) {
@@ -2213,19 +2460,27 @@ void clear_target(std::uint32_t key, std::uint32_t mip, std::uint32_t slice, con
     Texture* t = texture(key);
     if (g_trace) std::fprintf(stderr, "clear %06x %g %g %g %g\n", key, rgba[0], rgba[1], rgba[2], rgba[3]);
     if (t == nullptr || t->depth) return;
-    end_pass();
-    barrier();
-    VkClearColorValue v{};
-    std::memcpy(v.float32, rgba, sizeof v.float32);
+    if (attached(key)) end_pass();  // draws already recorded on it come first
     const std::uint32_t level = std::min(mip, t->levels - 1);
     const std::uint32_t layer = t->cube ? std::min(slice, t->layers - 1) : 0;
-    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, level, 1, layer, 1};
-    vkCmdClearColorImage(cmd(), t->image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
-    if (t->ms != VK_NULL_HANDLE && level == 0) {
-        const VkImageSubresourceRange r0{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCmdClearColorImage(cmd(), t->ms, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &r0);
+    if (layer != 0 || level >= 16) {
+        // A face other than the first: cleared at once (deferred clears track slice 0).
+        flush_clears(*t);
+        end_pass();
+        hazard(t->image, true);
+        VkClearColorValue v{};
+        std::memcpy(v.float32, rgba, sizeof v.float32);
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, level, 1, layer, 1};
+        vkCmdClearColorImage(cmd(), t->image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
+        touched(t->image, true);
+    } else {
+        // Deferred: the next pass on it clears as it loads (or flush_clears).
+        t->clear_mips |= 1u << level;
+        std::memcpy(t->clear_rgba[level], rgba, sizeof t->clear_rgba[level]);
+        if (t->ms != VK_NULL_HANDLE && level == t->resolve_level) t->needs_resolve = false;
+        static const bool now = test_switch("DCUSA_VK_IMMEDIATE_CLEAR");
+        if (now) flush_clears(*t);
     }
-    d.need_barrier = true;
     ++d.stats.clears;
 }
 
@@ -2233,18 +2488,14 @@ void clear_depth(std::uint32_t key, float depth, std::uint8_t stencil, std::uint
     if (!enabled()) return;
     Device& d = *g_dev;
     Texture* t = texture(key);
-    if (t == nullptr || !t->depth) return;
-    VkImageAspectFlags asp = 0;
-    if (flags & 1u) asp |= VK_IMAGE_ASPECT_DEPTH_BIT;
-    if ((flags & 2u) && t->stencil) asp |= VK_IMAGE_ASPECT_STENCIL_BIT;
-    if (asp == 0) return;
-    end_pass();
-    barrier();
-    const VkClearDepthStencilValue v{depth, stencil};
-    const VkImageSubresourceRange range{asp, 0, 1, 0, 1};
-    vkCmdClearDepthStencilImage(cmd(), t->image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
-    if (t->ms != VK_NULL_HANDLE) vkCmdClearDepthStencilImage(cmd(), t->ms, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
-    d.need_barrier = true;
+    if (t == nullptr || !t->depth || (flags & 3u) == 0) return;
+    if (attached(key)) end_pass();
+    if (flags & 1u) t->clear_depth = depth;
+    if (flags & 2u) t->clear_stencil = stencil;
+    t->clear_ds |= flags & 3u;
+    if (t->ms != VK_NULL_HANDLE) t->needs_resolve = false;
+    static const bool now = test_switch("DCUSA_VK_IMMEDIATE_CLEAR");
+    if (now) flush_clears(*t);
     ++d.stats.clears;
 }
 
@@ -2317,8 +2568,14 @@ void show(std::uint32_t key) {
         return;
     }
     if (r == VK_SUBOPTIMAL_KHR) g_swap.stale = true;
+    prepare_read(*t);
+    Texture* overlay = nullptr;
+    if (const std::uint32_t ok = g_overlay_key.load(std::memory_order_relaxed); ok != 0) {
+        overlay = texture(ok);
+        if (overlay != nullptr && overlay->desc.height != 0) prepare_read(*overlay);
+        else overlay = nullptr;
+    }
     end_pass();
-    barrier();
     VkCommandBuffer c = cmd();
     image_barrier(c, g_swap.images[index], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
@@ -2357,13 +2614,13 @@ void show(std::uint32_t key) {
         vkCmdDraw(c, 3, 1, 0, 0);
     };
     draw_quad(g_swap.show, sampled_view(*t, 4, 0, 1), (pw - w) / 2, (ph - h) / 2, w, h);
-    if (const std::uint32_t ok = g_overlay_key.load(std::memory_order_relaxed); ok != 0) {
-        if (Texture* o = texture(ok); o != nullptr && o->desc.height != 0) {
-            const double oh = h * 0.045, ow = oh * o->desc.width / o->desc.height;
-            const double ox = (pw - w) / 2 + h * 0.015, oy = (ph + h) / 2 - oh - h * 0.015;
-            draw_quad(g_swap.overlay, sampled_view(*o, 4, 0, 1), ox, oy, ow, oh);
-        }
+    if (Texture* o = overlay) {
+        const double oh = h * 0.045, ow = oh * o->desc.width / o->desc.height;
+        const double ox = (pw - w) / 2 + h * 0.015, oy = (ph + h) / 2 - oh - h * 0.015;
+        draw_quad(g_swap.overlay, sampled_view(*o, 4, 0, 1), ox, oy, ow, oh);
+        touched(o->image, false);
     }
+    touched(t->image, false);
     vkCmdEndRendering(c);
     image_barrier(c, g_swap.images[index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -2379,7 +2636,7 @@ void submit() {
 
 bool read_rgba8(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height) {
     if (!enabled()) return false;
-    Device& d = *g_dev;
+    
     Texture* t = texture(key);
     if (t == nullptr || (t->format != VK_FORMAT_R8G8B8A8_UNORM && t->format != VK_FORMAT_B8G8R8A8_UNORM &&
                          t->format != VK_FORMAT_R8G8B8A8_SRGB && t->format != VK_FORMAT_B8G8R8A8_SRGB))
@@ -2387,13 +2644,13 @@ bool read_rgba8(std::uint32_t key, std::vector<std::uint8_t>* out, std::uint32_t
     const std::uint32_t w = t->desc.width, h = t->desc.height;
     Arena* buf = new_arena(static_cast<VkDeviceSize>(w) * h * 4, true);
     if (buf == nullptr) return false;
+    prepare_read(*t);
     end_pass();
-    barrier();
     VkBufferImageCopy r{};
     r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     r.imageExtent = {w, h, 1};
     vkCmdCopyImageToBuffer(cmd(), t->image, VK_IMAGE_LAYOUT_GENERAL, buf->buf, 1, &r);
-    d.need_barrier = true;
+    touched(t->image, false);
     commit(true);
     out->assign(buf->ptr, buf->ptr + static_cast<std::size_t>(w) * h * 4);
     free_arena(buf);
@@ -2437,8 +2694,8 @@ std::string memory_report() {
     double arenas = 0;
     for (Arena* a : d.all_arenas) arenas += static_cast<double>(a->size) / 1048576.0;
     char line[256];
-    std::snprintf(line, sizeof line, "textures %zu, buffers %zu, arenas %zu (%.0f MB), pipelines %zu", d.textures.size(),
-                  d.buffers.size(), d.all_arenas.size(), arenas, d.pipelines.size());
+    std::snprintf(line, sizeof line, "textures %zu, buffers %zu, arenas %zu (%.0f MB), pipelines %zu, barriers %u", d.textures.size(),
+                  d.buffers.size(), d.all_arenas.size(), arenas, d.pipelines.size(), d.barriers);
     return line;
 }
 
