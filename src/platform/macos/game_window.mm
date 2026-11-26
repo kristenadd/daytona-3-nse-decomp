@@ -29,6 +29,109 @@
 }
 @end
 
+// The edition picker: each edition's title image with its name under it, the
+// selected one at full brightness with a white frame. Keys and clicks are
+// queued for MacGameWindow::choose.
+@interface DcusaPickerView : NSView
+@property(nonatomic) NSInteger selected;
+@property(nonatomic) NSInteger confirmed;  // -1 until a choice is made
+- (instancetype)initWithFrame:(NSRect)frame images:(NSArray<NSImage*>*)images titles:(NSArray<NSString*>*)titles;
+@end
+
+@implementation DcusaPickerView {
+    NSArray<NSImage*>* _images;
+    NSArray<NSString*>* _titles;
+}
+- (instancetype)initWithFrame:(NSRect)frame images:(NSArray<NSImage*>*)images titles:(NSArray<NSString*>*)titles {
+    if ((self = [super initWithFrame:frame])) {
+        _images = images;
+        _titles = titles;
+        _confirmed = -1;
+        self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                           options:NSTrackingMouseMoved | NSTrackingActiveInKeyWindow |
+                                                                   NSTrackingInVisibleRect
+                                                             owner:self
+                                                          userInfo:nil]];
+    }
+    return self;
+}
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+- (BOOL)isFlipped {
+    return YES;
+}
+// Slot i: two 16:9 images side by side, a gap between, centred.
+- (NSRect)slot:(NSInteger)i {
+    const NSInteger n = (NSInteger)_titles.count;
+    const CGFloat gap = self.bounds.size.width * 0.04;
+    const CGFloat w = (self.bounds.size.width - gap * (n + 1)) / n;
+    const CGFloat h = w * 9.0 / 16.0;
+    const CGFloat y = (self.bounds.size.height - h) / 2 - h * 0.08;
+    return NSMakeRect(gap + i * (w + gap), y, w, h);
+}
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    [NSColor.blackColor setFill];
+    NSRectFill(self.bounds);
+    const CGFloat text_size = MAX(14.0, self.bounds.size.width * 0.022);
+    for (NSInteger i = 0; i < (NSInteger)_titles.count; ++i) {
+        const NSRect r = [self slot:i];
+        const BOOL on = i == self.selected;
+        NSImage* image = _images[i];
+        if (image.size.width > 0) {
+            [image drawInRect:r fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
+                     fraction:on ? 1.0 : 0.45 respectFlipped:YES hints:nil];
+        } else {
+            [[NSColor colorWithWhite:on ? 0.25 : 0.12 alpha:1] setFill];
+            NSRectFill(r);
+        }
+        if (on) {
+            [NSColor.whiteColor setStroke];
+            NSBezierPath* frame = [NSBezierPath bezierPathWithRect:NSInsetRect(r, -4, -4)];
+            frame.lineWidth = 4;
+            [frame stroke];
+        }
+        NSMutableParagraphStyle* centre = [NSMutableParagraphStyle new];
+        centre.alignment = NSTextAlignmentCenter;
+        NSDictionary* attrs = @{
+            NSFontAttributeName : [NSFont boldSystemFontOfSize:text_size],
+            NSForegroundColorAttributeName : [NSColor colorWithWhite:1 alpha:on ? 1.0 : 0.5],
+            NSParagraphStyleAttributeName : centre
+        };
+        [_titles[i] drawInRect:NSMakeRect(r.origin.x, NSMaxY(r) + text_size, r.size.width, text_size * 1.6)
+                withAttributes:attrs];
+    }
+}
+- (NSInteger)hit:(NSEvent*)event {
+    const NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    for (NSInteger i = 0; i < (NSInteger)_titles.count; ++i)
+        if (NSPointInRect(p, [self slot:i])) return i;
+    return -1;
+}
+- (void)mouseMoved:(NSEvent*)event {
+    const NSInteger i = [self hit:event];
+    if (i >= 0 && i != self.selected) {
+        self.selected = i;
+        self.needsDisplay = YES;
+    }
+}
+- (void)mouseDown:(NSEvent*)event {
+    const NSInteger i = [self hit:event];
+    if (i >= 0) self.confirmed = i;
+}
+- (void)keyDown:(NSEvent*)event {
+    NSString* k = event.charactersIgnoringModifiers;
+    if (k.length == 0) return;
+    const unichar ch = [k characterAtIndex:0];
+    if (ch == NSLeftArrowFunctionKey && self.selected > 0) --self.selected;
+    else if (ch == NSRightArrowFunctionKey && self.selected + 1 < (NSInteger)_titles.count) ++self.selected;
+    else if (ch == '\r' || ch == ' ' || ch == 3) self.confirmed = self.selected;
+    self.needsDisplay = YES;
+}
+@end
+
 // Window close and Quit both end the run.
 @interface DcusaGameWindowDelegate : NSObject <NSWindowDelegate>
 @property(nonatomic) BOOL closed;
@@ -113,6 +216,57 @@ public:
     }
 
     void* layer() override { return (__bridge void*)layer_; }
+
+    int choose(const std::vector<EditionChoice>& items, PadSource* pad) override {
+        @autoreleasepool {
+            NSMutableArray<NSImage*>* images = [NSMutableArray array];
+            NSMutableArray<NSString*>* titles = [NSMutableArray array];
+            for (const EditionChoice& item : items) {
+                NSImage* image = item.image.empty() ? nil : [[NSImage alloc] initWithContentsOfFile:@(item.image.c_str())];
+                [images addObject:image ?: [NSImage new]];
+                [titles addObject:@(item.title.c_str())];
+            }
+            NSView* game_view = window_.contentView;
+            DcusaPickerView* picker = [[DcusaPickerView alloc] initWithFrame:game_view.bounds images:images titles:titles];
+            // The game view hosts the Metal layer and takes no subviews: the
+            // picker stands in for it until a choice is made.
+            window_.contentView = picker;
+            [window_ makeFirstResponder:picker];
+            PickerInput input(static_cast<int>(items.size()));
+            int chosen = -1;
+            while (chosen < 0) {
+                @autoreleasepool {
+                    NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                                        untilDate:[NSDate dateWithTimeIntervalSinceNow:1.0 / 60]
+                                                           inMode:NSDefaultRunLoopMode
+                                                          dequeue:YES];
+                    if (event != nil) [NSApp sendEvent:event];
+                }
+                if (delegate_.closed) {
+                    std::fprintf(stderr, "window closed\n");
+                    _exit(0);
+                }
+                input.select(static_cast<int>(picker.selected));
+                if (pad != nullptr) {
+                    const PadSnapshot s = pad->sample();
+                    const bool confirm = (s.buttons & (PadSnapshot::Start | PadSnapshot::View1 | PadSnapshot::View2 |
+                                                       PadSnapshot::View3 | PadSnapshot::View4)) != 0 ||
+                                         s.accelerator > 0.5f;
+                    const int before = input.selected();
+                    if (input.pad(s.steering, confirm)) chosen = input.selected();
+                    if (input.selected() != before) {
+                        picker.selected = input.selected();
+                        picker.needsDisplay = YES;
+                    }
+                }
+                if (picker.confirmed >= 0) chosen = static_cast<int>(picker.confirmed);
+            }
+            window_.contentView = game_view;
+            [window_ makeFirstResponder:game_view];
+            pump();
+            return chosen;
+        }
+    }
 
     void drawable_size(std::uint32_t& width, std::uint32_t& height) override {
         const CGSize s = layer_.drawableSize;

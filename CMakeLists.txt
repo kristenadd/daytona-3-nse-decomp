@@ -96,28 +96,36 @@ set_source_files_properties(src/recomp/d3d11.cpp PROPERTIES COMPILE_DEFINITIONS 
 dcusa_warnings(dcusa_recomp)
 
 # ---- translated game code ----
-# tools/x86tr generates it from the player's prepared EXE image. Set
-# DCUSA_PREPARED_CACHE and the build runs discovery and translation itself.
-# DCUSA_GENERATED_DIR remains for a folder that was translated by hand.
-set(DCUSA_PREPARED_CACHE "" CACHE FILEPATH
-    "dcprepare cache. When set, discovery and translation run as part of the build")
-set(DCUSA_GENERATED_DIR "" CACHE PATH
-    "translate.py output folder (holds sources.txt); empty to build without game code")
+# tools/x86tr generates it from the player's prepared EXE images. Set
+# DCUSA_PREPARED_CACHE to one cache or a list of them (one per edition,
+# separated by ;) and the build runs discovery and translation itself. Each
+# edition's code sits in its own namespace with its own entry table, so one
+# binary can hold both and pick one at start (recomp/generated.hpp).
+# DCUSA_GENERATED_DIR remains for folders that were translated by hand.
+set(DCUSA_PREPARED_CACHE "" CACHE STRING
+    "dcprepare cache(s), ;-separated. When set, discovery and translation run as part of the build")
+set(DCUSA_GENERATED_DIR "" CACHE STRING
+    "translate.py output folder(s) (each holds sources.txt); empty to build without game code")
 set(DCUSA_PYTHONPATH "${CMAKE_CURRENT_SOURCE_DIR}/build/pylib" CACHE PATH
     "PYTHONPATH for tools/x86tr (where capstone is installed)")
 
-set(dcusa_generated_dir "")
-if(DCUSA_PREPARED_CACHE)
-    if(NOT EXISTS "${DCUSA_PREPARED_CACHE}")
-        message(FATAL_ERROR "DCUSA_PREPARED_CACHE does not exist: ${DCUSA_PREPARED_CACHE}")
+set(dcusa_editions "")          # editions built in, e.g. 2019;2017
+set(dcusa_generated_names "")   # every edition's translated sources
+set(dcusa_translate_targets "")
+set(dcusa_cache_2019 "")        # the 2019 cache, for the Phase 5 tests
+set(dcusa_translate_script "${CMAKE_SOURCE_DIR}/cmake/translate.cmake")
+file(GLOB dcusa_x86tr_scripts CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/x86tr/*.py")
+foreach(dcusa_cache IN LISTS DCUSA_PREPARED_CACHE)
+    if(NOT EXISTS "${dcusa_cache}")
+        message(FATAL_ERROR "DCUSA_PREPARED_CACHE does not exist: ${dcusa_cache}")
     endif()
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     # Cache header: 8-byte magic, then five little-endian u32s. Edition is the second.
-    file(READ "${DCUSA_PREPARED_CACHE}" dcusa_hdr LIMIT 16 HEX)
+    file(READ "${dcusa_cache}" dcusa_hdr LIMIT 16 HEX)
     string(TOLOWER "${dcusa_hdr}" dcusa_hdr)
     string(SUBSTRING "${dcusa_hdr}" 0 16 dcusa_magic)
     if(NOT dcusa_magic STREQUAL "4443555341494d47")
-        message(FATAL_ERROR "DCUSA_PREPARED_CACHE is not a prepared image: ${DCUSA_PREPARED_CACHE}")
+        message(FATAL_ERROR "DCUSA_PREPARED_CACHE is not a prepared image: ${dcusa_cache}")
     endif()
     string(SUBSTRING "${dcusa_hdr}" 24 2 dcusa_e0)
     string(SUBSTRING "${dcusa_hdr}" 26 2 dcusa_e1)
@@ -127,63 +135,74 @@ if(DCUSA_PREPARED_CACHE)
     if(NOT dcusa_edition EQUAL 2017 AND NOT dcusa_edition EQUAL 2019)
         message(FATAL_ERROR "prepared image edition ${dcusa_edition} is not 2017 or 2019")
     endif()
+    if(dcusa_edition IN_LIST dcusa_editions)
+        message(FATAL_ERROR "DCUSA_PREPARED_CACHE names edition ${dcusa_edition} twice")
+    endif()
+    if(dcusa_edition EQUAL 2019)
+        set(dcusa_cache_2019 "${dcusa_cache}")
+    endif()
     set(dcusa_x86tr_dir "${CMAKE_SOURCE_DIR}/build/x86tr/${dcusa_edition}")
-    set(dcusa_generated_dir "${dcusa_x86tr_dir}/gen")
-    file(GLOB dcusa_x86tr_scripts CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/x86tr/*.py")
+    set(dcusa_gen "${dcusa_x86tr_dir}/gen")
     # The stamp lives in the build tree. The generated shards keep their own mtimes, so
     # they are not the custom command's outputs: an unchanged shard would look stale.
-    set(dcusa_stamp "${CMAKE_CURRENT_BINARY_DIR}/x86tr-translated.stamp")
-    set(dcusa_translate_script "${CMAKE_SOURCE_DIR}/cmake/translate.cmake")
-    execute_process(
-        COMMAND ${CMAKE_COMMAND}
-                -DDCUSA_CACHE=${DCUSA_PREPARED_CACHE}
-                -DDCUSA_X86TR_DIR=${dcusa_x86tr_dir}
-                -DDCUSA_GEN_DIR=${dcusa_generated_dir}
-                -DDCUSA_PYTHON=${Python3_EXECUTABLE}
-                -DDCUSA_PYTHONPATH=${DCUSA_PYTHONPATH}
-                -DDCUSA_SOURCE=${CMAKE_SOURCE_DIR}
-                -DDCUSA_STAMP=${dcusa_stamp}
-                -P "${dcusa_translate_script}"
-        RESULT_VARIABLE dcusa_translate_rc)
+    set(dcusa_stamp "${CMAKE_CURRENT_BINARY_DIR}/x86tr-translated-${dcusa_edition}.stamp")
+    set(dcusa_translate_args
+        -DDCUSA_CACHE=${dcusa_cache} -DDCUSA_X86TR_DIR=${dcusa_x86tr_dir} -DDCUSA_GEN_DIR=${dcusa_gen}
+        -DDCUSA_PYTHON=${Python3_EXECUTABLE} -DDCUSA_PYTHONPATH=${DCUSA_PYTHONPATH}
+        -DDCUSA_SOURCE=${CMAKE_SOURCE_DIR} -DDCUSA_STAMP=${dcusa_stamp})
+    execute_process(COMMAND ${CMAKE_COMMAND} ${dcusa_translate_args} -P "${dcusa_translate_script}"
+                    RESULT_VARIABLE dcusa_translate_rc)
     if(NOT dcusa_translate_rc EQUAL 0)
-        message(FATAL_ERROR "translation failed (${dcusa_translate_rc})")
+        message(FATAL_ERROR "translation of ${dcusa_edition} failed (${dcusa_translate_rc})")
     endif()
-    if(NOT EXISTS "${dcusa_generated_dir}/sources.txt")
-        message(FATAL_ERROR "translation did not write ${dcusa_generated_dir}/sources.txt")
+    if(NOT EXISTS "${dcusa_gen}/sources.txt")
+        message(FATAL_ERROR "translation did not write ${dcusa_gen}/sources.txt")
     endif()
-    message(STATUS "Translating edition ${dcusa_edition} from ${DCUSA_PREPARED_CACHE}")
-elseif(DCUSA_GENERATED_DIR)
-    set(dcusa_generated_dir "${DCUSA_GENERATED_DIR}")
-endif()
+    message(STATUS "Translating edition ${dcusa_edition} from ${dcusa_cache}")
+    add_custom_command(
+        OUTPUT "${dcusa_stamp}"
+        COMMAND ${CMAKE_COMMAND} ${dcusa_translate_args} -P "${dcusa_translate_script}"
+        DEPENDS "${dcusa_cache}" "${dcusa_translate_script}" ${dcusa_x86tr_scripts}
+        COMMENT "Discover and translate Daytona.exe (${dcusa_edition})"
+        VERBATIM USES_TERMINAL)
+    add_custom_target(dcusa_translate_${dcusa_edition} DEPENDS "${dcusa_stamp}")
+    list(APPEND dcusa_translate_targets dcusa_translate_${dcusa_edition})
+    list(APPEND dcusa_editions ${dcusa_edition})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${dcusa_gen}/sources.txt")
+    file(STRINGS "${dcusa_gen}/sources.txt" dcusa_names)
+    list(TRANSFORM dcusa_names PREPEND "${dcusa_gen}/")
+    list(APPEND dcusa_generated_names ${dcusa_names})
+    set(dcusa_generated_dir_${dcusa_edition} "${dcusa_gen}")
+endforeach()
+# Hand-translated folders: the edition comes from their coverage.json.
+foreach(dcusa_gen IN LISTS DCUSA_GENERATED_DIR)
+    if(NOT EXISTS "${dcusa_gen}/sources.txt" OR NOT EXISTS "${dcusa_gen}/coverage.json")
+        message(FATAL_ERROR "DCUSA_GENERATED_DIR ${dcusa_gen} has no sources.txt / coverage.json: run tools/x86tr/translate.py first")
+    endif()
+    file(READ "${dcusa_gen}/coverage.json" dcusa_cov LIMIT 200)
+    string(REGEX MATCH "\"edition\": *([0-9]+)" dcusa_m "${dcusa_cov}")
+    set(dcusa_edition "${CMAKE_MATCH_1}")
+    if(dcusa_edition IN_LIST dcusa_editions)
+        message(WARNING "DCUSA_GENERATED_DIR ${dcusa_gen}: edition ${dcusa_edition} already comes from DCUSA_PREPARED_CACHE; ignored")
+        continue()
+    endif()
+    list(APPEND dcusa_editions ${dcusa_edition})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${dcusa_gen}/sources.txt")
+    file(STRINGS "${dcusa_gen}/sources.txt" dcusa_names)
+    list(TRANSFORM dcusa_names PREPEND "${dcusa_gen}/")
+    list(APPEND dcusa_generated_names ${dcusa_names})
+    set(dcusa_generated_dir_${dcusa_edition} "${dcusa_gen}")
+endforeach()
 
-if(dcusa_generated_dir)
-    if(NOT EXISTS "${dcusa_generated_dir}/sources.txt")
-        message(FATAL_ERROR "DCUSA_GENERATED_DIR has no sources.txt: run tools/x86tr/translate.py first")
-    endif()
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${dcusa_generated_dir}/sources.txt")
-    file(STRINGS "${dcusa_generated_dir}/sources.txt" dcusa_generated_names)
-    list(TRANSFORM dcusa_generated_names PREPEND "${dcusa_generated_dir}/")
-    if(DCUSA_PREPARED_CACHE)
-        add_custom_command(
-            OUTPUT "${dcusa_stamp}"
-            COMMAND ${CMAKE_COMMAND}
-                    -DDCUSA_CACHE=${DCUSA_PREPARED_CACHE}
-                    -DDCUSA_X86TR_DIR=${dcusa_x86tr_dir}
-                    -DDCUSA_GEN_DIR=${dcusa_generated_dir}
-                    -DDCUSA_PYTHON=${Python3_EXECUTABLE}
-                    -DDCUSA_PYTHONPATH=${DCUSA_PYTHONPATH}
-                    -DDCUSA_SOURCE=${CMAKE_SOURCE_DIR}
-                    -DDCUSA_STAMP=${dcusa_stamp}
-                    -P "${dcusa_translate_script}"
-            DEPENDS "${DCUSA_PREPARED_CACHE}" "${dcusa_translate_script}" ${dcusa_x86tr_scripts}
-            COMMENT "Discover and translate Daytona.exe"
-            VERBATIM USES_TERMINAL)
-        add_custom_target(dcusa_translate DEPENDS "${dcusa_stamp}")
-    endif()
-    add_library(dcusa_generated STATIC ${dcusa_generated_names})
+if(dcusa_editions)
+    add_library(dcusa_generated STATIC ${dcusa_generated_names} src/recomp/generated_select.cpp)
     target_link_libraries(dcusa_generated PUBLIC dcusa_recomp)
-    if(TARGET dcusa_translate)
-        add_dependencies(dcusa_generated dcusa_translate)
+    foreach(dcusa_edition IN LISTS dcusa_editions)
+        target_compile_definitions(dcusa_generated PRIVATE DCUSA_HAS_EDITION_${dcusa_edition}=1)
+    endforeach()
+    message(STATUS "Game editions built in: ${dcusa_editions}")
+    if(dcusa_translate_targets)
+        add_dependencies(dcusa_generated ${dcusa_translate_targets})
     endif()
     # Same floating-point rules as the runtime; no warnings (the code mirrors the
     # guest instruction by instruction) and no debug info (it would run to gigabytes).
@@ -200,8 +219,12 @@ if(dcusa_generated_dir)
                               XCODE_ATTRIBUTE_CLANG_DEBUG_INFORMATION_LEVEL line-tables-only)
     else()
         foreach(f IN LISTS DCUSA_GENERATED_LINES)
-            set_source_files_properties("${dcusa_generated_dir}/${f}" TARGET_DIRECTORY dcusa_generated
-                                        PROPERTIES COMPILE_OPTIONS "-gline-tables-only")
+            foreach(dcusa_edition IN LISTS dcusa_editions)
+                if(EXISTS "${dcusa_generated_dir_${dcusa_edition}}/${f}")
+                    set_source_files_properties("${dcusa_generated_dir_${dcusa_edition}}/${f}" TARGET_DIRECTORY
+                                                dcusa_generated PROPERTIES COMPILE_OPTIONS "-gline-tables-only")
+                endif()
+            endforeach()
         endforeach()
     endif()
     # Profile-guided optimisation of the translated code and the runtime (PHASE3
@@ -227,7 +250,8 @@ if(dcusa_generated_dir)
 
     if(NOT DCUSA_IOS)
         add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm
-                             src/platform/macos/game_window.mm src/platform/macos/core_audio_output.mm)
+                             src/platform/macos/game_window.mm src/platform/macos/core_audio_output.mm
+                             src/platform/edition_choice.cpp)
         set_source_files_properties(src/platform/macos/gamecontroller_pad.mm src/platform/macos/game_window.mm
                                     src/platform/macos/core_audio_output.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system "-framework GameController" "-framework AppKit"
@@ -238,7 +262,7 @@ if(dcusa_generated_dir)
         # a device build needs a development team (DCUSA_IOS_TEAM) and the
         # extended virtual addressing entitlement (the 4 GB guest space).
         add_executable(DaytonaUSA MACOSX_BUNDLE src/platform/ios/ios_app.mm src/platform/macos/gamecontroller_pad.mm
-                                                src/platform/macos/core_audio_output.mm)
+                                                src/platform/macos/core_audio_output.mm src/platform/edition_choice.cpp)
         set_source_files_properties(src/platform/ios/ios_app.mm src/platform/macos/gamecontroller_pad.mm
                                     src/platform/macos/core_audio_output.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         set(DCUSA_IOS_BUNDLE_ID "local.dcusa.DaytonaUSA" CACHE STRING "bundle identifier of the iOS app")
@@ -279,6 +303,14 @@ if(dcusa_generated_dir)
         endif()
         # The label's font, if one is beside the title (font.ttf; not committed).
         get_filename_component(dcusa_boot_dir "${DCUSA_BOOT_TITLE}" DIRECTORY)
+        # The 2017 edition's title (title2017.png beside it), for the edition
+        # picker and that edition's boot screen.
+        if(EXISTS "${dcusa_boot_dir}/title2017.png")
+            add_custom_command(TARGET DaytonaUSA POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy "${dcusa_boot_dir}/title2017.png"
+                        "$<TARGET_BUNDLE_DIR:DaytonaUSA>/boot_title2017.png"
+                COMMENT "Copying the 2017 boot title")
+        endif()
         if(EXISTS "${dcusa_boot_dir}/font.ttf")
             add_custom_command(TARGET DaytonaUSA POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy "${dcusa_boot_dir}/font.ttf" "$<TARGET_BUNDLE_DIR:DaytonaUSA>/boot_font.ttf"
@@ -392,15 +424,15 @@ dcusa_test(test_game_files "${DCUSA_GAME_LIBRARY}" "${CMAKE_CURRENT_BINARY_DIR}/
 # the attract loop (DCUSA_REFERENCE_VIDEO). Missing inputs skip (77).
 set(DCUSA_REFERENCE_VIDEO "${DCUSA_GAME_LIBRARY}/../Daytona Championship USA Reference Footage/Daytona Championship USA New Season Edition Attract Mode.mp4"
     CACHE FILEPATH "A Windows capture of the attract loop, for phase5_attract")
-if(TARGET dcrun AND DCUSA_PREPARED_CACHE)
+if(TARGET dcrun AND dcusa_cache_2019)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(NAME phase5_controls
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/phase5/controls_smoke.py
-                     --dcrun $<TARGET_FILE:dcrun> --cache ${DCUSA_PREPARED_CACHE} --content ${DCUSA_GAME_LIBRARY}
+                     --dcrun $<TARGET_FILE:dcrun> --cache ${dcusa_cache_2019} --content ${DCUSA_GAME_LIBRARY}
                      --out ${CMAKE_CURRENT_BINARY_DIR}/phase5/controls)
     add_test(NAME phase5_attract
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/phase5/attract_compare.py
-                     --dcrun $<TARGET_FILE:dcrun> --cache ${DCUSA_PREPARED_CACHE} --content ${DCUSA_GAME_LIBRARY}
+                     --dcrun $<TARGET_FILE:dcrun> --cache ${dcusa_cache_2019} --content ${DCUSA_GAME_LIBRARY}
                      --reference ${DCUSA_REFERENCE_VIDEO} --out ${CMAKE_CURRENT_BINARY_DIR}/phase5/attract)
     set_tests_properties(phase5_controls phase5_attract PROPERTIES LABELS phase5 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
     set_tests_properties(phase5_controls PROPERTIES TIMEOUT 600)

@@ -268,9 +268,23 @@ int main() {
     call(c, "WS2_32.dll!#10", {1u, 0x8004667Eu, Buf});
     CHECK(c.r[Cpu::EAX] == 0);
 
-    c = make_cpu(mem);
-    call(c, "WS2_32.dll!#4", {1u, Buf, 16u});
-    CHECK(c.r[Cpu::EAX] == 0);
+    // connect: loopback (the shell link) connects; another address is refused,
+    // as on a cabinet alone on its network (the 2017 build's cabinet discovery).
+    {
+        const std::uint8_t shell[8] = {2, 0, 0x69, 0x78, 127, 0, 0, 1};
+        const std::uint8_t cabinet[8] = {2, 0, 0x65, 0x90, 192, 168, 1, 2};
+        for (unsigned n = 0; n < 8; ++n) st8(m, Buf + 0x100 + n, shell[n]);
+        for (unsigned n = 0; n < 8; ++n) st8(m, Buf + 0x200 + n, cabinet[n]);
+        c = make_cpu(mem);
+        call(c, "WS2_32.dll!#4", {1u, Buf + 0x100, 16u});
+        CHECK(c.r[Cpu::EAX] == 0);
+        c = make_cpu(mem);
+        call(c, "WS2_32.dll!#4", {1u, Buf + 0x200, 16u});
+        CHECK(c.r[Cpu::EAX] == 0xFFFFFFFFu);
+        c = make_cpu(mem);
+        call(c, "WS2_32.dll!#111", {});
+        CHECK(c.r[Cpu::EAX] == 10061u);  // WSAECONNREFUSED
+    }
 
     c = make_cpu(mem);
     call(c, "WS2_32.dll!#2", {1u, Buf, 16u});

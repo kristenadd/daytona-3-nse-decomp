@@ -1856,6 +1856,12 @@ def main():
         insns_done += n
         if k % 5000 == 0:
             print('%d / %d functions, %.0fs' % (k, len(selected), time.time() - t0), flush=True)
+    # Each edition's functions live in their own namespace and its table is
+    # translated_entries_<edition>() (recomp/generated.hpp), so one app can
+    # link both editions and pick one at start.
+    edition = tr.img.edition
+    ns = 'dcusa_e%d' % edition
+    ns_open, ns_close = 'namespace %s {\n\n' % ns, '\n}  // namespace %s\n' % ns
     shards = []
     for start in sorted(bodies):
         if not bodies[start]:
@@ -1863,7 +1869,7 @@ def main():
         name = 'tr_%08X.cpp' % start
         decls = ['void f_%08X(Cpu&);' % r for r in sorted(refs_of[start])]
         body = tr.resolve_sync_to('\n\n'.join(bodies[start]), translated_set)
-        write_if_changed(os.path.join(args.out, name), HEADER + '\n'.join(decls) + '\n\n' + body + '\n')
+        write_if_changed(os.path.join(args.out, name), HEADER + ns_open + '\n'.join(decls) + '\n\n' + body + '\n' + ns_close)
         shards.append(name)
     keep = set(shards)
     for name in os.listdir(args.out):
@@ -1871,13 +1877,13 @@ def main():
             os.remove(os.path.join(args.out, name))
     for entry in sorted(tr.entries - chosen):
         stubs.append(STUB % (entry, entry, 'not reachable from any root'))
-    write_if_changed(os.path.join(args.out, 'stubs.cpp'), HEADER + '\n'.join(stubs) + '\n')
+    write_if_changed(os.path.join(args.out, 'stubs.cpp'), HEADER + ns_open + '\n'.join(stubs) + '\n' + ns_close)
     entries = sorted(tr.entries)
-    table = [HEADER, '#include <span>\n']
+    table = [HEADER, '#include <span>\n', ns_open]
     table += ['void f_%08X(Cpu&);' % e for e in entries]
-    table.append('\nnamespace dcusa::recomp {\n\nstatic const GuestEntry k_entries[] = {')
-    table += ['    {0x%08Xu, f_%08X},' % (e, e) for e in entries]
-    table.append('};\n\nstd::span<const GuestEntry> translated_entries() { return k_entries; }\n\n}')
+    table.append(ns_close + '\nnamespace dcusa::recomp {\n\nstatic const GuestEntry k_entries[] = {')
+    table += ['    {0x%08Xu, %s::f_%08X},' % (e, ns, e) for e in entries]
+    table.append('};\n\nstd::span<const GuestEntry> translated_entries_%d() { return k_entries; }\n\n}' % edition)
     write_if_changed(os.path.join(args.out, 'entries.cpp'), '\n'.join(table) + '\n')
     report = {
         'edition': tr.data.get('edition'),

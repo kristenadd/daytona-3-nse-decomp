@@ -204,9 +204,19 @@ agreed to this).
    connect. TeknoParrot's patch does not touch this (its four code edits are
    input mapping, the frame gate 0x4DD697 and its shell window message
    0x52958F). Not yet checked: a race, sound, movies, the window and pad.
-   Next: one app holding both translations (each in its own namespace with
-   its own entry table, picked at start; a container folder per edition,
-   since today it sits beside the cache).
+   **One app with a game choice: done.** The translator puts each edition
+   in its own namespace (`dcusa_e2019`, `dcusa_e2017`) with its table
+   `translated_entries_<year>()`; `DCUSA_PREPARED_CACHE` (and
+   `DCUSA_GENERATED_DIR`) take a `;` list and link every edition into one
+   binary (`recomp/generated_select.cpp`). Launchers offer the editions
+   with a cache and game folder present (`platform/edition_choice`): the
+   picker shows the two titles (`boot/title.png`, `boot/title2017.png`, made
+   by `capture_title.py`) side by side. Verified: a Mac window (picker drawn,
+   Right + Return chose 2017, which booted) and the iPad Simulator (picker
+   drawn, a tap on 2017 booted it with its own boot screen title); headless,
+   `--edition 2017` and the 2019 default both reach attract from one dcrun;
+   `ctest -LE phase5` passes. Not yet tried: choosing with a controller (Mac
+   or iOS), a device build. Containers: `container` (2019), `container-2017`.
 
 ## Future work
 

@@ -6,11 +6,15 @@
 // each frame into (gpu::show, on the render thread).
 //
 // The player's files live in the app's Documents folder, which the Files app
-// and Finder can reach (UIFileSharingEnabled): the prepared cache built on a Mac
-// by dcprepare (DCUSA2019.cache), its translated shaders (shaders/msl, shaders/src)
-// and the game install folder as found on the PC. Settings the game writes go to
-// Documents/container. Shaders cannot be translated on the device (no Python, no
-// processes), so the shaders folder must hold every one the game uses.
+// and Finder can reach (UIFileSharingEnabled): the prepared caches built on a
+// Mac by dcprepare (DCUSA2019.cache, DCUSA2017.cache), the translated shaders
+// (shaders/msl, shaders/src) and the game install folders as found on the PC.
+// With both editions there, the app first shows their title images to choose
+// from (controller or tap). Settings the game writes go to Documents/container
+// (2019) or Documents/container-2017. Shaders cannot be translated on the
+// device (no Python, no processes), so the shaders folder must hold every one
+// the game uses.
+#import <GameController/GameController.h>
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <UIKit/UIKit.h>
@@ -20,17 +24,21 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "audio/ds_mixer.hpp"
 #include "gpu/metal.hpp"
+#include "platform/edition_choice.hpp"
 #include "platform/macos/core_audio_output.hpp"
 #include "platform/macos/gamecontroller_pad.hpp"
 #include "recomp/d3d11.hpp"
@@ -76,6 +84,8 @@ struct Game {
     std::unique_ptr<LayerPresenter> presenter;
     std::unique_ptr<dcusa::PadSource> pad;
     std::unique_ptr<dcusa::AudioOutput> audio;
+    std::optional<dcusa::EditionChoice> choice;  // the edition to run (set before the game thread starts)
+    std::string no_choice;                        // why none could be offered
     dcusa::ExeImage image;
     std::unique_ptr<dcusa::recomp::GuestProcess> process;
     void (^report)(NSString*) = nil;  // a message on screen
@@ -93,12 +103,16 @@ void say(const std::string& text) {
     if (report != nil) dispatch_async(dispatch_get_main_queue(), ^{ report(message); });
 }
 
-// The first file in Documents with a name ending in .cache.
-std::filesystem::path find_cache(const std::filesystem::path& docs) {
-    std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(docs, ec))
-        if (entry.is_regular_file() && entry.path().extension() == ".cache") return entry.path();
-    return {};
+// The editions this app can run from Documents. Title images: Documents/boot,
+// else the ones the build put in the bundle (boot_title.png, boot_title2017.png).
+std::vector<dcusa::EditionChoice> find_choices(const std::filesystem::path& docs, std::string* why) {
+    std::vector<dcusa::EditionChoice> choices = dcusa::available_editions(docs, docs, {docs / "boot"}, why);
+    for (dcusa::EditionChoice& c : choices) {
+        if (!c.image.empty()) continue;
+        NSString* name = c.edition == dcusa::Edition::Dcu2017 ? @"boot_title2017" : @"boot_title";
+        if (NSString* bundled = [NSBundle.mainBundle pathForResource:name ofType:@"png"]) c.image = bundled.UTF8String;
+    }
+    return choices;
 }
 
 void* run_game(void*) {
@@ -125,16 +139,17 @@ void* run_game(void*) {
                              heat >= 0 && heat < 4 ? kThermal[heat] : "?");
         }
     }).detach();
-    const std::filesystem::path cache = find_cache(docs);
     const std::filesystem::path shaders = docs / "shaders";
     std::error_code ec;
-    if (cache.empty() || !std::filesystem::is_directory(shaders / "msl", ec)) {
+    if (!g.choice || !std::filesystem::is_directory(shaders / "msl", ec)) {
         say("Copy into this app's folder (Files app, or Finder with the device connected):\n"
-            "  DCUSA2019.cache (from dcprepare on a Mac)\n"
+            "  DCUSA2019.cache and / or DCUSA2017.cache (from dcprepare on a Mac)\n"
             "  shaders (with msl and src inside)\n"
-            "  the Daytona Championship USA game folder");
+            "  the Daytona Championship USA game folder(s)\n\n" + g.no_choice);
         return nullptr;
     }
+    const dcusa::EditionChoice choice = *g.choice;
+    const std::filesystem::path cache = choice.cache;
     setenv("DCUSA_METAL", "1", 0);
     setenv("DCUSA_SHADERS", shaders.c_str(), 0);
     // The boot screen (the Settings app's "Title boot screen", on unless turned
@@ -146,11 +161,7 @@ void* run_game(void*) {
         // "Show frame rate": pictures per second and the build, lower left.
         if ([defaults boolForKey:@"show_fps"]) setenv("DCUSA_SHOW_FPS", "1", 0);
         const bool on = [defaults objectForKey:@"boot_screen"] == nil || [defaults boolForKey:@"boot_screen"];
-        std::string image = (docs / "boot" / "title.png").string();
-        if (!std::filesystem::exists(image, ec)) {
-            NSString* bundled = [NSBundle.mainBundle pathForResource:@"boot_title" ofType:@"png"];
-            image = bundled != nil ? bundled.UTF8String : "";
-        }
+        const std::string image = choice.image.string();  // the chosen edition's title
         if (on && !image.empty()) {
             setenv("DCUSA_BOOT_SCREEN", "1", 0);
             setenv("DCUSA_BOOT_SCREEN_IMAGE", image.c_str(), 0);
@@ -159,16 +170,7 @@ void* run_game(void*) {
         }
     }
     std::string error;
-    bool loaded = false;
-    for (dcusa::Edition edition : {dcusa::Edition::Nse2019, dcusa::Edition::Dcu2017}) {
-        std::string one;
-        if (dcusa::exe_image_load_cache(cache.c_str(), edition, g.image, &one)) {
-            loaded = true;
-            break;
-        }
-        error += one + "\n";
-    }
-    if (!loaded) {
+    if (!dcusa::exe_image_load_cache(cache.c_str(), choice.edition, g.image, &error)) {
         say("Cannot read " + cache.filename().string() + ":\n" + error);
         return nullptr;
     }
@@ -187,7 +189,7 @@ void* run_game(void*) {
         say(why);
         return nullptr;
     }
-    const std::filesystem::path writable = docs / "container";
+    const std::filesystem::path writable = docs / dcusa::container_name(choice.edition);
     std::filesystem::create_directories(writable, ec);
     dcusa::recomp::set_guest_files(install->install_root, install->game_dir.filename().string(), writable);
     if (!dcusa::gpu::enabled()) {
@@ -219,7 +221,7 @@ void* run_game(void*) {
         g.audio.reset();
     std::fprintf(stderr, "ios: starting the game\n");
     try {
-        g.process->start(dcusa::recomp::translated_entries());
+        g.process->start(dcusa::recomp::translated_entries(choice.edition));
         say("The game ended.");
     } catch (const dcusa::FailClosed& stopped) {
         say("The game stopped:\n" + stopped.report().describe());
@@ -248,6 +250,13 @@ void start_game_thread() {
 @implementation DCViewController {
     UILabel* _message;
     BOOL _started;
+    // The edition picker, while it is up.
+    std::vector<dcusa::EditionChoice> _choices;
+    std::unique_ptr<dcusa::PickerInput> _input;
+    UIView* _picker;
+    NSMutableArray<UIImageView*>* _images;
+    NSMutableArray<UILabel*>* _titles;
+    CADisplayLink* _poll;
 }
 
 - (void)loadView {
@@ -266,6 +275,7 @@ void start_game_thread() {
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     _message.frame = CGRectInset(self.view.bounds, 24, 24);
+    [self layoutPicker];
     CAMetalLayer* layer = (CAMetalLayer*)self.view.layer;
     const CGFloat scale = self.view.window.windowScene.screen.nativeScale ?: 2.0;
     layer.contentsScale = scale;
@@ -284,6 +294,112 @@ void start_game_thread() {
         label.text = text;
         label.hidden = NO;
     };
+    _choices = find_choices(g.documents, &g.no_choice);
+    if (_choices.size() > 1 && !std::getenv("DCUSA_EDITION")) {
+        [self showPicker];
+        return;
+    }
+    // One edition, or DCUSA_EDITION (devicectl --environment-variables) picks it.
+    const std::optional<dcusa::Edition> want = dcusa::edition_from_environment();
+    for (const dcusa::EditionChoice& c : _choices)
+        if (!want || c.edition == *want) {
+            g.choice = c;
+            break;
+        }
+    start_game_thread();
+}
+
+// The editions' title images side by side, the selected one bright and framed.
+- (void)showPicker {
+    _input = std::make_unique<dcusa::PickerInput>(static_cast<int>(_choices.size()));
+    _picker = [UIView new];
+    _picker.backgroundColor = UIColor.blackColor;
+    _images = [NSMutableArray array];
+    _titles = [NSMutableArray array];
+    for (std::size_t i = 0; i < _choices.size(); ++i) {
+        UIImageView* image = [UIImageView new];
+        image.contentMode = UIViewContentModeScaleAspectFit;
+        image.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
+        if (!_choices[i].image.empty()) image.image = [UIImage imageWithContentsOfFile:@(_choices[i].image.c_str())];
+        image.userInteractionEnabled = YES;
+        image.tag = static_cast<NSInteger>(i);
+        image.layer.borderColor = UIColor.whiteColor.CGColor;
+        [image addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped:)]];
+        UILabel* title = [UILabel new];
+        title.text = @(_choices[i].title.c_str());
+        title.textColor = UIColor.whiteColor;
+        title.textAlignment = NSTextAlignmentCenter;
+        title.adjustsFontSizeToFitWidth = YES;
+        [_picker addSubview:image];
+        [_picker addSubview:title];
+        [_images addObject:image];
+        [_titles addObject:title];
+    }
+    [self.view addSubview:_picker];
+    [self layoutPicker];
+    [self showSelection];
+    _poll = [CADisplayLink displayLinkWithTarget:self selector:@selector(pollPad)];
+    [_poll addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+}
+
+- (void)layoutPicker {
+    if (_picker == nil) return;
+    const CGRect b = self.view.bounds;
+    _picker.frame = b;
+    const CGFloat n = _images.count;
+    const CGFloat gap = b.size.width * 0.04;
+    const CGFloat w = (b.size.width - gap * (n + 1)) / n;
+    const CGFloat h = w * 9 / 16;
+    const CGFloat y = (b.size.height - h) / 2 - h * 0.08;
+    const CGFloat text = MAX(14.0, b.size.width * 0.022);
+    for (NSUInteger i = 0; i < _images.count; ++i) {
+        _images[i].frame = CGRectMake(gap + i * (w + gap), y, w, h);
+        _titles[i].frame = CGRectMake(gap + i * (w + gap), y + h + text * 0.8, w, text * 1.6);
+        _titles[i].font = [UIFont boldSystemFontOfSize:text];
+    }
+}
+
+- (void)showSelection {
+    for (NSUInteger i = 0; i < _images.count; ++i) {
+        const BOOL on = static_cast<int>(i) == _input->selected();
+        _images[i].alpha = on ? 1.0 : 0.45;
+        _images[i].layer.borderWidth = on ? 4 : 0;
+        _titles[i].alpha = on ? 1.0 : 0.5;
+    }
+}
+
+- (void)tapped:(UITapGestureRecognizer*)tap {
+    [self choose:static_cast<int>(tap.view.tag)];
+}
+
+// The controller: left / right (d-pad or stick), then A, Menu or the right trigger.
+- (void)pollPad {
+    GCExtendedGamepad* pad = GCController.current.extendedGamepad;
+    if (pad == nil) {
+        for (GCController* c in GCController.controllers)
+            if (c.extendedGamepad != nil) {
+                pad = c.extendedGamepad;
+                break;
+            }
+    }
+    if (pad == nil) return;
+    const float x = std::fabs(pad.dpad.xAxis.value) > std::fabs(pad.leftThumbstick.xAxis.value) ? pad.dpad.xAxis.value
+                                                                                                 : pad.leftThumbstick.xAxis.value;
+    const bool confirm = pad.buttonA.pressed || pad.buttonMenu.pressed || pad.rightTrigger.value > 0.5f;
+    const int before = _input->selected();
+    const bool chosen = _input->pad(x, confirm);
+    if (_input->selected() != before) [self showSelection];
+    if (chosen) [self choose:_input->selected()];
+}
+
+- (void)choose:(int)index {
+    if (_picker == nil || index < 0 || index >= static_cast<int>(_choices.size())) return;
+    [_poll invalidate];
+    _poll = nil;
+    [_picker removeFromSuperview];
+    _picker = nil;
+    game().choice = _choices[static_cast<std::size_t>(index)];
+    std::fprintf(stderr, "ios: edition %s chosen\n", dcusa::edition_info(_choices[static_cast<std::size_t>(index)].edition).id.data());
     start_game_thread();
 }
 

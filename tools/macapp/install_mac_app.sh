@@ -2,10 +2,12 @@
 # Builds "Daytona USA.app" from build/mac-host/dcrun and installs it in
 # /Applications (or the folder given as the first argument).
 #
-# The app holds a copy of dcrun, the app icon and the boot screen's title and
-# font (both made from the player's files, see README "Playing"); it reads the
-# prepared cache and shaders from this checkout, so saves stay in the cache's
-# container. The game folder is the sibling "Daytona Championship USA".
+# The app holds a copy of dcrun, the app icon and the boot screen's titles and
+# font (made from the player's files, see README "Playing"); it reads the
+# prepared caches and shaders from this checkout, so saves stay in the caches'
+# container folders. With both editions built in and both caches there, it
+# opens on the edition picker. The game folder is the sibling
+# "Daytona Championship USA".
 # Messages go to ~/Library/Logs/DaytonaUSA.log.
 set -e
 repo=${0:A:h:h:h}
@@ -22,8 +24,9 @@ stage="$work/Daytona USA.app/Contents"
 mkdir -p $stage/MacOS $stage/Resources
 
 cp $repo/build/mac-host/dcrun $stage/MacOS/dcrun
-for f in title.png font.ttf; do
-    [[ -f $prepared/boot/$f ]] && cp $prepared/boot/$f $stage/Resources/boot_$f
+mkdir -p $stage/Resources/boot
+for f in title.png title2017.png font.ttf; do
+    [[ -f $prepared/boot/$f ]] && cp $prepared/boot/$f $stage/Resources/boot/$f
 done
 
 # The icon: the iOS app's 1024 px image at the sizes an .icns holds.
@@ -45,12 +48,13 @@ export DCUSA_SHADERS="$prepared/shaders"
 export DCUSA_BOOT_SCREEN=\${DCUSA_BOOT_SCREEN:-1}
 # defaults write local.dcusa.mac ShowFPS -bool true: the frame rate and build, lower left.
 [[ \$(defaults read local.dcusa.mac ShowFPS 2>/dev/null) == 1 ]] && export DCUSA_SHOW_FPS=\${DCUSA_SHOW_FPS:-1}
-[[ -f \$res/boot_title.png ]] && export DCUSA_BOOT_SCREEN_IMAGE=\${DCUSA_BOOT_SCREEN_IMAGE:-\$res/boot_title.png}
-[[ -f \$res/boot_font.ttf ]] && export DCUSA_BOOT_SCREEN_FONT=\${DCUSA_BOOT_SCREEN_FONT:-\$res/boot_font.ttf}
+# The editions' titles (title.png, title2017.png): the picker and the boot screen.
+export DCUSA_TITLE_DIR=\${DCUSA_TITLE_DIR:-\$res/boot}
+[[ -f \$res/boot/font.ttf ]] && export DCUSA_BOOT_SCREEN_FONT=\${DCUSA_BOOT_SCREEN_FONT:-\$res/boot/font.ttf}
 mkdir -p ~/Library/Logs
 # From Finder the working directory is /, where the game's boot never finished.
 cd "$repo"
-exec \$here/dcrun --content "$content" "$prepared/DCUSA2019.cache" >> ~/Library/Logs/DaytonaUSA.log 2>&1
+exec \$here/dcrun --content "$content" "$prepared" >> ~/Library/Logs/DaytonaUSA.log 2>&1
 EOF
 chmod +x $stage/MacOS/DaytonaUSA
 

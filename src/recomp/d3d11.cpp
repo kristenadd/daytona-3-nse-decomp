@@ -1812,7 +1812,7 @@ int g_boot_percent = -1;         // "Data Loading" percentage (boot_progress), -
 // DCUSA_BOOT_SCREEN=1: until the boot state reaches 8 (attract), the display
 // shows the attract title with a progress bar (gpu/boot_screen) instead of
 // "Data Loading" and the network check. The title image is
-// DCUSA_BOOT_SCREEN_IMAGE, else <prepared>/boot/title.png beside the shader
+// DCUSA_BOOT_SCREEN_IMAGE, else <prepared>/boot/title.png (2017: title2017.png) beside the shader
 // folder (tools/bootscreen/capture_title.py makes it). Frame dumps still
 // read the game's own frame.
 constexpr std::uint32_t kBootScreenTexture = 0xFFFFB007u;
@@ -1886,7 +1886,9 @@ bool boot_screen_shown() {
         std::string path;
         if (const char* img = std::getenv("DCUSA_BOOT_SCREEN_IMAGE")) path = img;
         else if (const char* shaders = std::getenv("DCUSA_SHADERS"))
-            path = (std::filesystem::path(shaders).parent_path() / "boot" / "title.png").string();
+            path = (std::filesystem::path(shaders).parent_path() / "boot" /
+                    (game_addresses().edition == dcusa::Edition::Dcu2017 ? "title2017.png" : "title.png"))
+                       .string();
         // DCUSA_BOOT_SCREEN_FONT=<ttf>, else <prepared>/boot/font.ttf when there is one.
         std::string font;
         if (const char* f = std::getenv("DCUSA_BOOT_SCREEN_FONT")) font = f;

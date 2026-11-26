@@ -19,7 +19,7 @@ to C++ that builds for arm64. Guest threads run cooperatively on host threads,
 one at a time.
 
 Phases 3 and 4 (in progress): `dcrun --content <folder>` boots the 2019
-executable in a window and plays: attract mode, then a race from Start, drawn
+executable (or the 2017 one, which reaches attract) in a window and plays: attract mode, then a race from Start, drawn
 with Metal from the game's HLSL translated to MSL. Boot takes about two minutes.
 An Xbox or PlayStation controller drives it (layout in [PHASE4.md](PHASE4.md)).
 The attract loop's colours match a Windows capture. There is no sound or movie
@@ -28,8 +28,18 @@ playback yet. See [PHASE3.md](PHASE3.md) and [PHASE4.md](PHASE4.md).
 ## Playing
 
 ```bash
-build/mac-host/dcrun --content "<folder>" build/mac-host/prepared/DCUSA2019.cache
+build/mac-host/dcrun --content "<folder>" build/mac-host/prepared
 ```
+
+Given the cache folder, dcrun offers every edition it was built with
+(`DCUSA_PREPARED_CACHE`, below) whose cache (`DCUSA2019.cache`,
+`DCUSA2017.cache`) and game folder are there. With two, the window opens on
+the edition picker: the two title images side by side, chosen with the pad
+(left / right, then Start, gas or A), the arrow keys and Return, or a click.
+`--edition 2017|2019` or `DCUSA_EDITION` skips it; a headless run takes 2019.
+A cache file instead of the folder runs that edition. Each edition keeps what
+the game writes in its own container folder beside the caches (`container`
+for 2019, `container-2017`).
 
 This opens a 1280×720 window (resizable; Ctrl-Cmd-F for full screen, Cmd-Q to
 quit). Metal, the shader folder (`build/mac-host/prepared/shaders`) and
@@ -57,18 +67,25 @@ the repository):
 
 ```bash
 tools/bootscreen/capture_title.py --dcrun build/mac-host/dcrun --cache build/mac-host/prepared/DCUSA2019.cache --content "<folder>" --out build/mac-host/prepared/boot/title.png
-DCUSA_BOOT_SCREEN=1 build/mac-host/dcrun --content "<folder>" build/mac-host/prepared/DCUSA2019.cache
+tools/bootscreen/capture_title.py --dcrun build/mac-host/dcrun --cache build/mac-host/prepared/DCUSA2017.cache --content "<folder>" --out build/mac-host/prepared/boot/title2017.png
+DCUSA_BOOT_SCREEN=1 build/mac-host/dcrun --content "<folder>" build/mac-host/prepared
 ```
+
+The two titles (`title.png` for 2019, `title2017.png` for 2017) are also the
+edition picker's images; each edition's boot screen shows its own.
 
 The capture runs attract headless for a few minutes with the "PRESS START
 BUTTON" / "FREE PLAY" image left out (the copyright stays) and keeps the first
-settled title frame. `DCUSA_BOOT_SCREEN_IMAGE=<png>` picks another image. The
+settled title frame. `DCUSA_BOOT_SCREEN_IMAGE=<png>` picks another image
+for the boot screen; `DCUSA_TITLE_DIR=<folder>` is where both titles are
+looked for first. The
 label uses `build/mac-host/prepared/boot/font.ttf` when there is one
 (`DCUSA_BOOT_SCREEN_FONT=<ttf>` otherwise; Eurostile matches the game's text,
 and it is not in the repository either), else Helvetica Neue Bold. On
-iOS the build puts the title in the app (`DCUSA_BOOT_TITLE`, default that
-path, with font.ttf beside it) for the launch screen and the boot screen, which the Settings app
-switches off ("Title boot screen").
+iOS the build puts the titles in the app (`DCUSA_BOOT_TITLE`, default that
+path, with title2017.png and font.ttf beside it) for the launch screen, the
+edition picker and the boot screen, which the Settings app switches off
+("Title boot screen").
 
 ## iPhone and iPad
 
@@ -85,9 +102,13 @@ cmake --build --preset ios-sim
 
 That gives `build/ios-sim/DaytonaUSA.app`, signed ad hoc for the Simulator.
 The app reads its files from its Documents folder (reachable from the Files
-app, or Finder with the device connected): `DCUSA2019.cache` and the
-`shaders` folder (both from the Mac's `build/mac-host/prepared`) and the game
-folder. Shaders cannot be translated on the device, so the shaders folder must
+app, or Finder with the device connected): `DCUSA2019.cache` and / or
+`DCUSA2017.cache` and the `shaders` folder (all from the Mac's
+`build/mac-host/prepared`) and the game folders. With both editions there
+(and built in), the app opens on the edition picker (controller: left /
+right, then A, Menu or the right trigger; or a tap);
+`DEVICECTL_CHILD_DCUSA_EDITION=2017` skips it. The game writes to
+`Documents/container` (2019) or `Documents/container-2017`. Shaders cannot be translated on the device, so the shaders folder must
 already hold every shader the game uses. In the Simulator, put them in place
 with `xcrun simctl get_app_container booted local.dcusa.DaytonaUSA data` and
 copy into its `Documents`; `cp -cR` clones the 5 GB game folder without using
@@ -101,7 +122,7 @@ decoder on a Mac.
 On a device (an Xcode project, signed automatically for your team):
 
 ```bash
-cmake --preset ios-device -DDCUSA_IOS_TEAM=<team id> -DDCUSA_GENERATED_DIR=$PWD/build/x86tr/2019/gen
+cmake --preset ios-device -DDCUSA_IOS_TEAM=<team id> "-DDCUSA_GENERATED_DIR=$PWD/build/x86tr/2019/gen;$PWD/build/x86tr/2017/gen"
 xcodebuild -project build/ios-device/DaytonaUSA.xcodeproj -target DaytonaUSA -configuration RelWithDebInfo -allowProvisioningUpdates
 xcrun devicectl device install app --device <udid> build/ios-device/RelWithDebInfo-iphoneos/DaytonaUSA.app
 ```
@@ -154,7 +175,8 @@ overrides that too.
 The cabinet's operator menu belongs to `Shell.exe`, which does not run here.
 The game reads a copy of the file kept in a `container` folder next to the
 cache file: `build/mac-host/prepared/container/ShellData/ShellData.ini` with
-the usual cache path, `Documents/container/ShellData/ShellData.ini` on iOS.
+the usual cache path, `Documents/container/ShellData/ShellData.ini` on iOS
+(`container-2017` for the 2017 edition).
 The copy is made from the game folder's file the first time you change a
 setting. Edit the copy directly, or use:
 
@@ -236,6 +258,8 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | Variable | Effect |
 | --- | --- |
 | `DCUSA_WINDOW=0` | No window (the same as `--headless`). |
+| `DCUSA_EDITION=2017\|2019` | Run that edition without the edition picker (dcrun's `--edition`; on iOS through devicectl). Unset: the picker when two are offered, else the one there is. |
+| `DCUSA_TITLE_DIR=<folder>` | Where the editions' title images (`title.png`, `title2017.png`) are looked for first, for the picker and the boot screen (default `<cache folder>/boot`; the Mac app sets its own). |
 | `DCUSA_PAD=0` | Ignore game controllers. |
 | `DCUSA_PAD_SCRIPT=<file>` | Play a pad script instead of a controller (`src/runtime/pad_script.hpp`; on iOS a file in Documents). Its frames count presents. |
 | `DCUSA_PAD_SCRIPT_FROM=attract` | Frame 1 of the script is the first present of attract, so one script fits both a paced and an unpaced boot. |
@@ -263,7 +287,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_BOOT_UNPACE_UNTIL=<percent>` | Leave the boot unpaced only below this loading percentage. |
 | `DCUSA_BOOT_GIVE=0` | During an unpaced boot, do not give the loader threads their turns first (the old behaviour). |
 | `DCUSA_BOOT_SCREEN=1` | The attract title with a progress bar during boot (Playing, above). |
-| `DCUSA_BOOT_SCREEN_IMAGE=<png>` | Title image (default `<prepared>/boot/title.png`). |
+| `DCUSA_BOOT_SCREEN_IMAGE=<png>` | Boot screen image (default the chosen edition's title: `<prepared>/boot/title.png`, or `title2017.png` for 2017). |
 | `DCUSA_BOOT_SCREEN_FONT=<ttf>` | Label font (default `font.ttf` beside the image, else Helvetica Neue Bold). |
 | `DCUSA_TEXTURE_LIMIT=<px>` | Largest texture size kept (default 1024 on iOS, none on the Mac). |
 | `DCUSA_BC_DECODE=1` | Decode BC textures on upload even where the GPU samples them (as on iOS). |
@@ -320,8 +344,8 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | Option | Effect |
 | --- | --- |
 | `DCUSA_GAME_LIBRARY` | Game folder for the tests (default `../Daytona Championship USA`). |
-| `DCUSA_PREPARED_CACHE` | Prepared image; the build translates it. |
-| `DCUSA_GENERATED_DIR` | A folder translated by hand, instead. |
+| `DCUSA_PREPARED_CACHE` | Prepared image, or a `;`-separated list (one per edition); the build translates each and builds them all in, for the edition picker. |
+| `DCUSA_GENERATED_DIR` | Folder(s) translated by hand, instead (`;`-separated; the edition is read from each one's `coverage.json`). |
 | `DCUSA_PYTHONPATH` | Python packages for the translator (default `build/pylib`). |
 | `DCUSA_GENERATED_OPT` | Optimisation level of the translated code (default `-O2`). |
 | `DCUSA_GENERATED_LINES` | Translated files built with line tables, or `all` (for profiling). |
@@ -329,7 +353,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_ORDER_FILE` | Linker order file for dcrun. |
 | `DCUSA_IOS_TEAM` | Development team for a device build. |
 | `DCUSA_IOS_BUNDLE_ID` | iOS bundle identifier (default `local.dcusa.DaytonaUSA`). |
-| `DCUSA_BOOT_TITLE` | Title image put in the iOS app (default `<prepared>/boot/title.png`). |
+| `DCUSA_BOOT_TITLE` | Title image put in the iOS app (default `<prepared>/boot/title.png`; a `title2017.png` beside it goes in too). |
 
 ## Building and testing (macOS, Apple silicon)
 
@@ -361,13 +385,14 @@ The output is derived from the player's executable, so it stays in the build
 tree and is never committed.
 
 ```bash
-cmake --preset mac-host -DDCUSA_PREPARED_CACHE=$PWD/build/mac-host/prepared/DCUSA2019.cache
+cmake --preset mac-host "-DDCUSA_PREPARED_CACHE=$PWD/build/mac-host/prepared/DCUSA2019.cache;$PWD/build/mac-host/prepared/DCUSA2017.cache"
 cmake --build --preset mac-host --target dcrun
 ```
 
 The build runs `discover.py` and `translate.py` when the cache or a translator script is newer
 than the last translation. Output goes to `build/x86tr/<edition>/` (2017 or 2019, read from the
-cache header). The first configure translates immediately when that folder has no `sources.txt`.
+cache header). Each edition's code is in its own namespace (`dcusa_e2019`, `dcusa_e2017`) with its own
+entry table, so both link into one binary. The first configure translates immediately when that folder has no `sources.txt`.
 `DCUSA_GENERATED_DIR` still selects a folder that was translated by hand.
 
 `discover.py` finds function entries (call graph, RTTI vtables, SafeSEH

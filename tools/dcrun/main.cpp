@@ -29,6 +29,7 @@
 #include "recomp/host_files.hpp"
 #include "recomp/loader.hpp"
 #include "recomp/win32.hpp"
+#include "platform/edition_choice.hpp"
 #include "platform/macos/gamecontroller_pad.hpp"
 #include "runtime/pad_script.hpp"
 #include "runtime/fail_closed.hpp"
@@ -198,8 +199,10 @@ bool apply_shell_setting(const std::filesystem::path& install_root, const std::f
 void usage() {
     std::fprintf(stderr,
                  "usage: dcrun [--edition 2017|2019] [--content <folder>] [--headless]\n"
-                 "             [--shell-setting Section.Key=Value ...] <prepared-cache>\n"
+                 "             [--shell-setting Section.Key=Value ...] <prepared cache or cache folder>\n"
                  "  Opens a window and plays; --headless (or DCUSA_WINDOW=0) runs offscreen.\n"
+                 "  Given the cache folder (DCUSA2019.cache, DCUSA2017.cache), a window first\n"
+                 "  shows the editions to choose from; --edition or DCUSA_EDITION picks one.\n"
                  "  --shell-setting changes the operator settings in ShellData.ini, for example\n"
                  "  Credit.Freeplay=0 (coins) or 1 (free play), Audio.MusicVolume=80, and the\n"
                  "  game rules in GameSettings.ini: \"GameSettings.DIFFICULTY=HARD\",\n"
@@ -210,10 +213,10 @@ void usage() {
 // seen; each is on unless the environment already says otherwise.
 // The shader folder is <cache folder>/shaders: the game's HLSL is captured
 // there on first use and translated during the run.
-void windowed_defaults(const char* cache) {
+void windowed_defaults(const std::filesystem::path& cache_dir) {
     setenv("DCUSA_METAL", "1", 0);
     setenv("DCUSA_TRANSLATE", "1", 0);
-    const std::filesystem::path shaders = std::filesystem::absolute(cache).parent_path() / "shaders";
+    const std::filesystem::path shaders = cache_dir / "shaders";
     std::error_code ec;
     std::filesystem::create_directories(shaders, ec);
     if (!ec) setenv("DCUSA_SHADERS", shaders.c_str(), 0);
@@ -272,26 +275,91 @@ int main(int argc, char** argv) {
         usage();
         return 2;
     }
-    windowed_defaults(path);  // headless runs draw with Metal too; DCUSA_METAL=0 selects the 2D reference
+    if (!want) want = dcusa::edition_from_environment();
+    // The cache argument: one prepared cache, or the folder that holds them
+    // (then each edition built in with its cache there is offered).
+    std::error_code fs_ec;
+    const std::filesystem::path given = std::filesystem::absolute(path);
+    const bool cache_folder = std::filesystem::is_directory(given, fs_ec);
+    const std::filesystem::path cache_dir = cache_folder ? given : given.parent_path();
+    windowed_defaults(cache_dir);  // headless runs draw with Metal too; DCUSA_METAL=0 selects the 2D reference
+
+    // The controls: DCUSA_PAD_SCRIPT=<file> plays a script (runtime/pad_script.hpp);
+    // otherwise the first game controller, unless DCUSA_PAD=0. The picker reads them too.
+    std::unique_ptr<dcusa::PadSource> pad;
+    if (const char* script = std::getenv("DCUSA_PAD_SCRIPT")) {
+        std::ifstream in(script);
+        std::stringstream text;
+        text << in.rdbuf();
+        auto scripted = std::make_unique<dcusa::ScriptPad>();
+        std::string why;
+        if (!in || !scripted->parse(text.str(), &why)) {
+            std::fprintf(stderr, "%s\n", why.empty() ? "cannot read DCUSA_PAD_SCRIPT" : why.c_str());
+            return 1;
+        }
+        pad = std::move(scripted);
+    } else if (const char* off = std::getenv("DCUSA_PAD"); off == nullptr || std::string(off) != "0") {
+        pad = dcusa::make_gamecontroller_pad();
+    }
+    std::unique_ptr<dcusa::GameWindow> window;
+    if (!headless) {
+        if (!dcusa::gpu::enabled()) {
+            std::fprintf(stderr, "no Metal device or no translated shaders (DCUSA_SHADERS); use --headless\n");
+            return 1;
+        }
+        window = dcusa::make_game_window("Daytona Championship USA", 1280, 720);
+    }
 
     dcusa::ExeImage image;
     std::string error;
     bool loaded = false;
-    if (want) {
-        loaded = dcusa::exe_image_load_cache(path, *want, image, &error);
+    std::filesystem::path chosen_image;  // the chosen edition's title image
+    if (cache_folder) {
+        // Title images: DCUSA_TITLE_DIR, else <cache folder>/boot.
+        std::vector<std::filesystem::path> image_dirs;
+        if (const char* d = std::getenv("DCUSA_TITLE_DIR")) image_dirs.emplace_back(d);
+        image_dirs.push_back(cache_dir / "boot");
+        std::string why;
+        std::vector<dcusa::EditionChoice> choices =
+            dcusa::available_editions(cache_dir, content ? std::filesystem::path(content) : std::filesystem::path(),
+                                      image_dirs, &why);
+        if (want) std::erase_if(choices, [&](const dcusa::EditionChoice& c) { return c.edition != *want; });
+        if (choices.empty()) {
+            std::fprintf(stderr, "no edition to run from %s:\n%s", cache_dir.c_str(), why.c_str());
+            return 1;
+        }
+        std::size_t pick = 0;
+        if (choices.size() > 1 && window) {
+            pick = static_cast<std::size_t>(window->choose(choices, pad.get()));
+        }
+        const dcusa::EditionChoice& c = choices[pick];
+        std::fprintf(stderr, "edition %s%s\n", dcusa::edition_info(c.edition).id.data(),
+                     choices.size() > 1 && window ? " (chosen)" : "");
+        chosen_image = c.image;
+        loaded = dcusa::exe_image_load_cache(c.cache.c_str(), c.edition, image, &error);
         if (!loaded) std::fprintf(stderr, "%s\n", error.c_str());
     } else {
-        for (dcusa::Edition edition : {dcusa::Edition::Nse2019, dcusa::Edition::Dcu2017}) {
+        for (dcusa::Edition edition : dcusa::recomp::built_editions()) {
+            if (want && edition != *want) continue;
             std::string one;
-            if (dcusa::exe_image_load_cache(path, edition, image, &one)) {
+            if (dcusa::exe_image_load_cache(given.c_str(), edition, image, &one)) {
                 loaded = true;
                 break;
             }
             error = std::string(dcusa::edition_info(edition).id) + ": " + one;
             std::fprintf(stderr, "%s\n", error.c_str());
         }
+        if (!loaded && dcusa::recomp::built_editions().empty()) std::fprintf(stderr, "no game code built in\n");
+        if (loaded) {
+            const std::filesystem::path image_dir =
+                std::getenv("DCUSA_TITLE_DIR") ? std::filesystem::path(std::getenv("DCUSA_TITLE_DIR")) : cache_dir / "boot";
+            chosen_image = image_dir / dcusa::title_image_name(image.edition);
+            if (!std::filesystem::is_regular_file(chosen_image, fs_ec)) chosen_image.clear();
+        }
     }
     if (!loaded) return 1;
+    // The boot screen shows the chosen edition's title (DCUSA_BOOT_SCREEN_IMAGE overrides).
+    if (!chosen_image.empty()) setenv("DCUSA_BOOT_SCREEN_IMAGE", chosen_image.c_str(), 0);
 
     dcusa::recomp::GuestProcess process;
     if (!process.load(image, &error)) {
@@ -309,7 +377,8 @@ int main(int argc, char** argv) {
             for (const std::string& problem : scan.problems) std::fprintf(stderr, "%s\n", problem.c_str());
             return 1;
         }
-        const std::filesystem::path writable = std::filesystem::path(path).parent_path() / "container";
+        // What the game writes: a container folder per edition beside the caches.
+        const std::filesystem::path writable = cache_dir / dcusa::container_name(image.edition);
         std::error_code ec;
         std::filesystem::create_directories(writable, ec);
         for (const std::string& setting : shell_settings)
@@ -317,31 +386,8 @@ int main(int argc, char** argv) {
         dcusa::recomp::set_guest_files(install->install_root, install->game_dir.filename().string(), writable);
         std::fprintf(stderr, "content %s\n", install->game_dir.string().c_str());
     }
-    // The controls: DCUSA_PAD_SCRIPT=<file> plays a script (runtime/pad_script.hpp);
-    // otherwise the first game controller, unless DCUSA_PAD=0.
-    std::unique_ptr<dcusa::PadSource> pad;
-    if (const char* script = std::getenv("DCUSA_PAD_SCRIPT")) {
-        std::ifstream in(script);
-        std::stringstream text;
-        text << in.rdbuf();
-        auto scripted = std::make_unique<dcusa::ScriptPad>();
-        std::string why;
-        if (!in || !scripted->parse(text.str(), &why)) {
-            std::fprintf(stderr, "%s\n", why.empty() ? "cannot read DCUSA_PAD_SCRIPT" : why.c_str());
-            return 1;
-        }
-        pad = std::move(scripted);
-    } else if (const char* off = std::getenv("DCUSA_PAD"); off == nullptr || std::string(off) != "0") {
-        pad = dcusa::make_gamecontroller_pad();
-    }
     dcusa::recomp::set_pad_source(pad.get());
-    std::unique_ptr<dcusa::GameWindow> window;
-    if (!headless) {
-        if (!dcusa::gpu::enabled()) {
-            std::fprintf(stderr, "no Metal device or no translated shaders (DCUSA_SHADERS); use --headless\n");
-            return 1;
-        }
-        window = dcusa::make_game_window("Daytona Championship USA", 1280, 720);
+    if (window) {
         dcusa::gpu::set_layer(window->layer());
         dcusa::recomp::set_presenter(window.get());
     }
@@ -367,7 +413,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "%.*s entry %08X, %zu imports\n", static_cast<int>(info.id.size()), info.id.data(),
                  static_cast<unsigned>(process.entry()), process.imports().size());
     try {
-        process.start(dcusa::recomp::translated_entries());
+        process.start(dcusa::recomp::translated_entries(image.edition));
     } catch (const dcusa::FailClosed& stopped) {
         std::fprintf(stderr, "%s\n", stopped.report().describe().c_str());
         return 1;
