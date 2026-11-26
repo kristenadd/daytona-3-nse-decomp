@@ -35,6 +35,27 @@
         "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CMAKE_OSX_DEPLOYMENT_TARGET": "17.0"
       }
+    },
+    {
+      "name": "mac-sdl",
+      "displayName": "macOS with SDL3 and Vulkan (MoltenVK): tests the Linux code paths",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/mac-sdl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "DCUSA_PLATFORM": "sdl"
+      }
+    },
+    {
+      "name": "linux-deck",
+      "displayName": "Linux x86_64 (Steam Deck), cross-compiled against the Steam Runtime sysroot",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-deck",
+      "toolchainFile": "${sourceDir}/cmake/linux-x86_64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
   "buildPresets": [
@@ -53,6 +74,14 @@
       "nativeToolOptions": [
         "-allowProvisioningUpdates"
       ]
+    },
+    {
+      "name": "mac-sdl",
+      "configurePreset": "mac-sdl"
+    },
+    {
+      "name": "linux-deck",
+      "configurePreset": "linux-deck"
     }
   ],
   "testPresets": [

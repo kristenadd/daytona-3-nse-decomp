@@ -1,10 +1,9 @@
 #include "recomp/d3d11.hpp"
 #include "recomp/game_addresses.hpp"
 
-#include <TargetConditionals.h>
+#include "runtime/platform_compat.hpp"
 #include "runtime/hitch.hpp"
 
-#include <mach/mach.h>
 #include <sys/mman.h>
 
 #include <algorithm>
@@ -2205,13 +2204,10 @@ void memdump(const std::uint8_t* mem, int present_no) {
         len = 0;
     };
     // Pages the host cannot read (reserved, no access) are left out: each is
-    // copied with vm_read_overwrite, which fails instead of faulting.
+    // copied with host_page_readable, which fails instead of faulting.
     static std::vector<std::uint8_t> page(kPage);
     auto mapped = [&](std::uint64_t a) {
-        vm_size_t got = 0;
-        return vm_read_overwrite(mach_task_self(), reinterpret_cast<vm_address_t>(mem + a), kPage,
-                                 reinterpret_cast<vm_address_t>(page.data()), &got) == KERN_SUCCESS &&
-               got == kPage;
+        return host_page_readable(mem + a, kPage, page.data());
     };
     // DCUSA_MEMDUMP_IMAGE=1: only the program image (its globals).
     static const bool image_only = std::getenv("DCUSA_MEMDUMP_IMAGE") != nullptr;
@@ -4338,7 +4334,7 @@ void D3DCompile(Cpu& c) {
     bool prepared = prepared_binds(request.key, &binds, &buffers);
     // DCUSA_TRANSLATE=1: a request with no translation yet is translated now,
     // so a run that reaches a new scene does not need a restart.
-#if !TARGET_OS_IPHONE  // iOS has no Python and no processes: it ships the shaders translated
+#if !TARGET_OS_IPHONE && !defined(__linux__)  // iOS and the Deck ship the shaders translated (no translator there)
     if (!prepared && shader_dir() != nullptr && std::getenv("DCUSA_TRANSLATE") != nullptr) {
         const std::string cmd = std::string("python3 '") + DCUSA_SOURCE_DIR "/tools/shaderprep/translate_shaders.py' '" +
                                 shader_dir() + "' --quiet --only " + key_text(request.key);

@@ -1,3 +1,4 @@
+#include "runtime/platform_compat.hpp"
 #include "recomp/win32.hpp"
 #include "recomp/game_addresses.hpp"
 

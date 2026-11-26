@@ -228,6 +228,25 @@ agreed to this).
    (the rest are re-exported textures), and the user did not want the cost
    of deltas decoded at load time.
 
+10. **Linux and the Steam Deck.** A native x86_64 build (README "Linux and
+   the Steam Deck"): `src/gpu/vulkan.cpp` (the Metal backend's behaviour in
+   Vulkan 1.3: dynamic rendering, every image in GENERAL with full barriers
+   between passes, per-draw descriptor sets, upload arenas, MSAA resolve,
+   frame timestamps), `src/platform/sdl` (window, picker, pad, sound),
+   `src/gpu/boot_screen_stb.cpp`, `src/runtime/platform_compat.hpp`.
+   `translate_shaders.py` also writes `<key>.spv` (vertex set 0, pixel set
+   1; b# at #, t# at 16 + #, s# at 32 + #; FMin / FMax / FClamp made NMin /
+   NMax / NClamp for D3D's NaN rules). Cross-compiled with Homebrew LLVM
+   against the Steam Runtime 3 sysroot (`tools/linux/fetch_sysroot.sh`,
+   preset `linux-deck`); `tools/linux/package.sh` makes the Deck folder.
+   Verified on the Mac through MoltenVK (preset `mac-sdl`): boots to attract
+   headless and in a window (60 FPS, sound, overlay), the SDL picker draws,
+   Phase 5 attract passes (colour p95 0.472, luma 101.5 / 101.6, saturation
+   0.375 / 0.335: a little more saturated than Metal's 0.336). The Linux
+   binary links (glibc 2.29 at most, needs only SDL3, packaged beside it)
+   but has not been run: a Linux VM for a smoke test was not allowed in
+   this session. Not yet: the user's test on the Deck.
+
 ## Future work
 
 - **Attract playlist** (not wanted for now: the user is content with the fixed

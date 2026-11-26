@@ -22,6 +22,9 @@ void draw_indexed(const DrawState& s, std::uint32_t count, std::uint32_t start, 
 void draw(const DrawState& s, std::uint32_t count, std::uint32_t start);
 void submit();
 void set_layer(void* ca_metal_layer);
+// Called on the caller's thread before set_layer is queued (Vulkan: the
+// window's surface; Metal: nothing).
+void prepare_layer(void* layer);
 void show(std::uint32_t texture);
 void antialias(std::uint32_t texture);
 bool read_rgba8(std::uint32_t texture, std::vector<std::uint8_t>* out, std::uint32_t* width, std::uint32_t* height);

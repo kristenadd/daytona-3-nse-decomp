@@ -144,6 +144,37 @@ gets the footprint every 10 s. Variables for a run go through devicectl with
 a `DEVICECTL_CHILD_` prefix; relative paths are in Documents, so
 `DEVICECTL_CHILD_DCUSA_FRAME=f DEVICECTL_CHILD_DCUSA_EVERY=500` saves frames there
 and `DEVICECTL_CHILD_DCUSA_PAD_SCRIPT=race.txt` plays a pad script.
+## Linux and the Steam Deck
+
+A native x86_64 Linux build: the same game code and host layer, with a Vulkan
+renderer (`src/gpu/vulkan.cpp`, in place of Metal) and SDL3 for the window,
+the controller, the sound and the edition picker (`src/platform/sdl`). It is
+cross-compiled on the Mac against Valve's Steam Runtime 3 ("sniper") SDK, so
+it runs on SteamOS as it is:
+
+```bash
+brew install llvm lld glslang
+tools/linux/fetch_sysroot.sh            # the Steam Runtime sysroot (1.2 GB download)
+cmake --preset linux-deck -DDCUSA_GENERATED_DIR="$PWD/build/x86tr/2019/gen;$PWD/build/x86tr/2017/gen"
+cmake --build --preset linux-deck --target dcrun
+python3 tools/shaderprep/translate_shaders.py build/mac-host/prepared/shaders   # writes the .spv beside the .metal
+tools/linux/package.sh                  # build/deck/daytona-usa-deck.tar.gz
+```
+
+The package holds `dcrun`, SDL3 (from the sysroot), the prepared caches, the
+Vulkan shaders, the title images and `run.sh`; its `README.txt` says how to
+add it to Steam. The game folders stay on the Deck (put or link them in its
+`games` folder). Shaders cannot be translated there, so the package must
+hold every shader the game uses.
+
+The same code runs on a Mac through MoltenVK, to test it there:
+
+```bash
+brew install sdl3 molten-vk vulkan-loader vulkan-headers
+cmake --preset mac-sdl -DDCUSA_GENERATED_DIR="$PWD/build/x86tr/2019/gen;$PWD/build/x86tr/2017/gen"
+cmake --build --preset mac-sdl --target dcrun
+```
+
 ## Settings
 
 The port has no settings file of its own. The game reads three .ini
@@ -261,6 +292,9 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | Variable | Effect |
 | --- | --- |
 | `DCUSA_WINDOW=0` | No window (the same as `--headless`). |
+| `DCUSA_FULLSCREEN=0\|1` | SDL builds (Linux, Steam Deck): start full screen. Default on a Steam Deck (and set by its `run.sh`), off elsewhere; F11 or Alt+Return toggles it. |
+| `DCUSA_VSYNC=0` | Vulkan: present without waiting for the display (mailbox or immediate). Default: vsync. |
+| `DCUSA_GAMES=<folder>` | The Steam Deck package's `run.sh`: the folder holding the game folders (default its `games` folder). |
 | `DCUSA_EDITION=2017\|2019` | Run that edition without the edition picker (dcrun's `--edition`; on iOS through devicectl). Unset: the picker when two are offered, else the one there is. |
 | `DCUSA_TITLE_DIR=<folder>` | Where the editions' title images (`title.png`, `title2017.png`) are looked for first, for the picker and the boot screen (default `<cache folder>/boot`; the Mac app sets its own). |
 | `DCUSA_PAD=0` | Ignore game controllers. |
@@ -294,7 +328,8 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_BOOT_SCREEN_FONT=<ttf>` | Label font (default `font.ttf` beside the image, else Helvetica Neue Bold). |
 | `DCUSA_TEXTURE_LIMIT=<px>` | Largest texture size kept (default 1024 on iOS, none on the Mac). |
 | `DCUSA_BC_DECODE=1` | Decode BC textures on upload even where the GPU samples them (as on iOS). |
-| `DCUSA_METAL=0` | The 2D software reference instead of Metal (on by default in dcrun and on iOS). |
+| `DCUSA_METAL=0` | The 2D software reference instead of Metal (or Vulkan, on Linux; on by default in dcrun and on iOS). |
+| `DCUSA_VK_VALIDATION=1` | Vulkan: load the Khronos validation layer (when installed). |
 | `DCUSA_SHADERS=<dir>` | Shader folder (default `<cache folder>/shaders`; `Documents/shaders` on iOS). |
 | `DCUSA_TRANSLATE=1` | Translate shaders that have no translation yet, during the run. dcrun always sets it (any value counts as on); iOS never translates. |
 
@@ -356,6 +391,8 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_ORDER_FILE` | Linker order file for dcrun. |
 | `DCUSA_IOS_TEAM` | Development team for a device build. |
 | `DCUSA_IOS_BUNDLE_ID` | iOS bundle identifier (default `local.dcusa.DaytonaUSA`). |
+| `DCUSA_PLATFORM` | `apple` (Metal, AppKit / UIKit) or `sdl` (Vulkan and SDL3: Linux, and the Mac test build). Default: `apple` on Apple systems, `sdl` elsewhere. Presets `mac-sdl` and `linux-deck`. |
+| `DCUSA_LINUX_SYSROOT`, `DCUSA_LLVM` | The Linux cross build (`cmake/linux-x86_64.cmake`): the sysroot (default `build/toolchains/sniper`) and the LLVM folder (default `/opt/homebrew/opt/llvm`). |
 | `DCUSA_BOOT_TITLE` | Title image put in the iOS app (default `<prepared>/boot/title.png`; a `title2017.png` beside it goes in too). |
 
 ## Building and testing (macOS, Apple silicon)
@@ -419,7 +456,8 @@ build/mac-host/mslcheck build/mac-host/prepared/shaders/msl
 
 Later runs with the same `DCUSA_SHADERS` use the translations' bindings, and
 capture any request they have not seen (a windowed run does this by itself).
-Headless, add `DCUSA_METAL=1` to draw with Metal instead of the 2D software
+The translation also writes `<key>.spv`, the Vulkan module the Linux build
+uses. Headless, add `DCUSA_METAL=1` to draw with Metal instead of the 2D software
 reference; `DCUSA_FRAME=<path>` writes presented frames as PPM. The shader folder holds the player's
 shader source and stays out of the repository.
 

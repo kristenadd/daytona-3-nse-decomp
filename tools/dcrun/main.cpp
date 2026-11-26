@@ -1,5 +1,7 @@
 // Runs a prepared Daytona.exe until the first thing that is not ported.
+#if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#endif
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -22,15 +24,21 @@
 
 #include "audio/null_output.hpp"
 #include "gpu/metal.hpp"
+#if DCUSA_PLATFORM_SDL
+#include "platform/sdl/sdl_platform.hpp"
+#else
 #include "platform/macos/core_audio_output.hpp"
 #include "platform/macos/game_window.hpp"
+#endif
 #include "recomp/d3d11.hpp"
 #include "recomp/generated.hpp"
 #include "recomp/host_files.hpp"
 #include "recomp/loader.hpp"
 #include "recomp/win32.hpp"
 #include "platform/edition_choice.hpp"
+#if !DCUSA_PLATFORM_SDL
 #include "platform/macos/gamecontroller_pad.hpp"
+#endif
 #include "runtime/pad_script.hpp"
 #include "runtime/fail_closed.hpp"
 #include "system/content.hpp"
@@ -59,7 +67,7 @@ void on_fault(int sig, siginfo_t* info, void* context) {
     char buf[192];
     int n;
     if (g_watch_on.load(std::memory_order_relaxed) && (at & ~static_cast<std::uintptr_t>(16383)) == g_watch_page) {
-#if defined(__aarch64__)
+#if defined(__APPLE__) && defined(__aarch64__)
         const auto* uc = static_cast<const ucontext_t*>(context);
         const std::uint64_t pc = uc->uc_mcontext->__ss.__pc;
         const std::uint32_t guest = static_cast<std::uint32_t>(at - g_guest_base);
@@ -88,7 +96,7 @@ void on_fault(int sig, siginfo_t* info, void* context) {
         n = std::snprintf(buf, sizeof buf, "host fault (signal %d) at %p\n", sig, info->si_addr);
     }
     if (n > 0) (void)!write(2, buf, static_cast<std::size_t>(n));
-#if defined(__aarch64__)
+#if defined(__APPLE__) && defined(__aarch64__)
     // For `atos -o dcrun -l <0x100000000 + slide> <pc> <lr>`: names the translated function.
     const auto* uc = static_cast<const ucontext_t*>(context);
     n = std::snprintf(buf, sizeof buf, "host pc %llx lr %llx slide %llx\n",
@@ -299,15 +307,25 @@ int main(int argc, char** argv) {
         }
         pad = std::move(scripted);
     } else if (const char* off = std::getenv("DCUSA_PAD"); off == nullptr || std::string(off) != "0") {
+#if DCUSA_PLATFORM_SDL
+        pad = dcusa::make_sdl_pad();
+#else
         pad = dcusa::make_gamecontroller_pad();
+#endif
     }
     std::unique_ptr<dcusa::GameWindow> window;
     if (!headless) {
+        // The window first: on SDL the graphics device takes its surface
+        // extensions from the video system the window starts.
+#if DCUSA_PLATFORM_SDL
+        window = dcusa::make_sdl_game_window("Daytona Championship USA", 1280, 720);
+#else
+        window = dcusa::make_game_window("Daytona Championship USA", 1280, 720);
+#endif
         if (!dcusa::gpu::enabled()) {
-            std::fprintf(stderr, "no Metal device or no translated shaders (DCUSA_SHADERS); use --headless\n");
+            std::fprintf(stderr, "no graphics device or no translated shaders (DCUSA_SHADERS); use --headless\n");
             return 1;
         }
-        window = dcusa::make_game_window("Daytona Championship USA", 1280, 720);
     }
 
     dcusa::ExeImage image;
@@ -400,7 +418,11 @@ int main(int argc, char** argv) {
         const char* on = std::getenv("DCUSA_AUDIO");
         const bool speakers = !headless && wav == nullptr && !(on != nullptr && std::string(on) == "0");
         if (speakers) {
+#if DCUSA_PLATFORM_SDL
+            audio = dcusa::make_sdl_audio_output();
+#else
             audio = dcusa::make_core_audio_output();
+#endif
             if (!audio->start(dcusa::audio::DsMixer::kOutputRate, dcusa::audio::DsMixer::pull,
                               &dcusa::recomp::sound_mixer()))
                 audio.reset();

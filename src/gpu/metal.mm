@@ -3045,6 +3045,8 @@ void antialias(std::uint32_t key) {
     [blit endEncoding];
 }
 
+void prepare_layer(void*) {}
+
 void set_layer(void* layer) {
     if (!enabled()) return;
     g_layer = (__bridge CAMetalLayer*)layer;

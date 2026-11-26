@@ -2,7 +2,7 @@
 #include "recomp/game_addresses.hpp"
 
 #include <pthread.h>
-#include <TargetConditionals.h>
+#include "runtime/platform_compat.hpp"
 #include <sys/mman.h>
 
 #include <algorithm>

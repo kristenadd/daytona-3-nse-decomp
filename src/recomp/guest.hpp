@@ -1,6 +1,7 @@
 #pragma once
 // Included by every generated translation shard.
 #include <bit>
+#include "runtime/platform_compat.hpp"
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>

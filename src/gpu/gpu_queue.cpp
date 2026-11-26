@@ -13,14 +13,19 @@
 // DCUSA_GPU_THREAD=0 runs every call directly on the caller's thread.
 #include <chrono>
 #include <pthread.h>
-#include <TargetConditionals.h>
+#include "runtime/platform_compat.hpp"
 #include <cstdlib>
 #include <cstring>
 #include "gpu/metal.hpp"
 #include "gpu/metal_direct.hpp"
 #include "runtime/hitch.hpp"
 
+#if defined(__OBJC__)
 #import <Foundation/Foundation.h>
+#define DCUSA_AUTORELEASE @autoreleasepool
+#else
+#define DCUSA_AUTORELEASE
+#endif
 
 #include <condition_variable>
 #include <cstdlib>
@@ -78,7 +83,7 @@ struct Batch {
 };
 
 void replay(const Batch& b) {
-    @autoreleasepool {
+    DCUSA_AUTORELEASE {
         for (const Cmd& c : b.cmds) {
             switch (c.op) {
             case Op::CreateTexture: direct::create_texture(c.id, b.textures[c.index]); break;
@@ -326,6 +331,7 @@ void submit() {
 }
 
 void set_layer(void* ca_metal_layer) {
+    direct::prepare_layer(ca_metal_layer);  // what must happen on the caller's thread
     if (!threaded()) return direct::set_layer(ca_metal_layer);
     record(Op::SetLayer).ptr = ca_metal_layer;
 }

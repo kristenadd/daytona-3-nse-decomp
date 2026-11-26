@@ -7,6 +7,10 @@ is a hash of the source, the macros, the entry point and the profile.
 
 Output, in <dir>/msl/:
   <key>.metal  MSL 2.1 source, entry point main0
+  <key>.spv    the same shader as Vulkan SPIR-V (the Linux / Steam Deck build,
+               src/gpu/vulkan.cpp): vertex resources in descriptor set 0,
+               pixel resources in set 1; in each, constant buffer b# at
+               binding #, texture t# at 16 + #, sampler s# at 32 + #
   <key>.json   what D3DReflect reports for it: textures, samplers and constant
                buffers with their slots, and each buffer's members and offsets
   <key>.refl   the same, one resource per line, for the runtime
@@ -170,20 +174,26 @@ def explicit_registers(hlsl, stage):
     return {m.group(1): int(m.group(3)) for m in REGISTER.finditer(out)} if rc == 0 else {}
 
 
-def renumber_bindings(spv, refl, explicit):
+VK_BASES = {'separate_images': 16, 'separate_samplers': 32, 'ubos': 0}
+
+
+def renumber_bindings(spv, refl, explicit, vulkan_set=None):
     """Slots the way D3D assigns them: textures (t#), samplers (s#) and constant
     buffers (b#) are numbered per class; a resource with an explicit register
     keeps it, and the others take the lowest free slots in declaration order.
     glslang's --auto-map-bindings gave every resource a distinct binding in
-    declaration order; the OpDecorate Binding words are rewritten in place."""
+    declaration order; the OpDecorate Binding words are rewritten in place.
+    With `vulkan_set`, each class starts at its VK_BASES binding and every
+    resource's DescriptorSet decoration becomes vulkan_set."""
     import struct
     remap = {}
     for group in ('separate_images', 'separate_samplers', 'ubos'):
         resources = sorted(refl.get(group, []), key=lambda r: r.get('binding', 0))
         taken = {explicit[r['name']] for r in resources if r['name'] in explicit}
         free = (n for n in range(128) if n not in taken)
+        base = VK_BASES[group] if vulkan_set is not None else 0
         for r in resources:
-            remap[r.get('binding', 0)] = explicit[r['name']] if r['name'] in explicit else next(free)
+            remap[r.get('binding', 0)] = base + (explicit[r['name']] if r['name'] in explicit else next(free))
     data = bytearray(open(spv, 'rb').read())
     words = list(struct.unpack('<%dI' % (len(data) // 4), data))
     i = 5
@@ -193,6 +203,29 @@ def renumber_bindings(spv, refl, explicit):
             break
         if op == 71 and count >= 4 and words[i + 2] == 33 and words[i + 3] in remap:  # OpDecorate .. Binding
             words[i + 3] = remap[words[i + 3]]
+        elif op == 71 and count >= 4 and words[i + 2] == 34 and vulkan_set is not None:  # .. DescriptorSet
+            words[i + 3] = vulkan_set
+        i += count
+    open(spv, 'wb').write(struct.pack('<%dI' % len(words), *words))
+
+
+def d3d_float_rules_spirv(spv):
+    """D3D11's NaN rules for min / max / clamp (see d3d_float_rules) in SPIR-V:
+    GLSL.std.450 FMin, FMax and FClamp (NaN results undefined) become NMin,
+    NMax and NClamp, which return the operand that is not NaN."""
+    import struct
+    words = spirv_words(spv)
+    std450 = None
+    swap = {37: 79, 40: 80, 43: 81}  # FMin, FMax, FClamp -> NMin, NMax, NClamp
+    i = 5
+    while i < len(words):
+        count, op = words[i] >> 16, words[i] & 0xFFFF
+        if count == 0:
+            break
+        if op == 11 and spirv_string(words, i + 2) == 'GLSL.std.450':  # OpExtInstImport
+            std450 = words[i + 1]
+        elif op == 12 and words[i + 3] == std450 and words[i + 4] in swap:  # OpExtInst
+            words[i + 4] = swap[words[i + 4]]
         i += count
     open(spv, 'wb').write(struct.pack('<%dI' % len(words), *words))
 
@@ -338,11 +371,22 @@ def translate_one(src_dir, out_dir, key, tmp):
     options, log = compile_spirv(os.path.join(src_dir, key + '.hlsl'), stage, spv, tmp)
     if options is None:
         return 'glslang: ' + ' '.join(l for l in log.splitlines() if 'ERROR' in l or 'error' in l)[:300]
-    renumber_bindings(spv, reflect(spv), explicit_registers(os.path.join(src_dir, key + '.hlsl'), stage))
+    vk_spv = os.path.join(tmp, key + '.vk.spv')
+    shutil.copyfile(spv, vk_spv)
+    explicit = explicit_registers(os.path.join(src_dir, key + '.hlsl'), stage)
+    renumber_bindings(spv, reflect(spv), explicit)
     try:
         inputs = interface(spv, stage)
     except ValueError as e:
         return str(e)
+    # The Vulkan module: the same steps, with Vulkan's binding numbers.
+    renumber_bindings(vk_spv, reflect(vk_spv), explicit, vulkan_set=0 if stage == 'vert' else 1)
+    interface(vk_spv, stage)
+    d3d_float_rules_spirv(vk_spv)
+    rc, out = run(['spirv-val', vk_spv])
+    if rc != 0:
+        return 'spirv-val (Vulkan module): ' + out.strip()[:300]
+    shutil.copyfile(vk_spv, os.path.join(out_dir, key + '.spv'))
     msl = os.path.join(out_dir, key + '.metal')
     rc, out = run(['spirv-cross', '--msl', '--msl-version', '20100', '--msl-decoration-binding', spv,
                    '--output', msl])

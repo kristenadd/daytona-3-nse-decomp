@@ -27,6 +27,25 @@ set(DCUSA_GAME_LIBRARY "${DCUSA_DEFAULT_LIBRARY}" CACHE PATH
 
 find_package(ZLIB REQUIRED)
 
+# The platform layer: apple (Metal, AppKit / UIKit, Core Audio,
+# GameController) or sdl (Vulkan, SDL3: Linux and the Steam Deck; on a Mac,
+# through MoltenVK, to test that code). Empty: apple on Apple, sdl elsewhere.
+set(DCUSA_PLATFORM "" CACHE STRING "platform layer: apple or sdl (empty: apple on Apple systems, sdl elsewhere)")
+if(NOT DCUSA_PLATFORM)
+    if(APPLE)
+        set(DCUSA_PLATFORM apple)
+    else()
+        set(DCUSA_PLATFORM sdl)
+    endif()
+endif()
+if(DCUSA_PLATFORM STREQUAL "sdl")
+    find_package(SDL3 REQUIRED CONFIG)
+    find_program(DCUSA_GLSLANG NAMES glslangValidator glslang REQUIRED)
+elseif(NOT DCUSA_PLATFORM STREQUAL "apple")
+    message(FATAL_ERROR "DCUSA_PLATFORM must be apple or sdl")
+endif()
+message(STATUS "Platform layer: ${DCUSA_PLATFORM}")
+
 function(dcusa_warnings target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /fp:strict)
@@ -78,19 +97,45 @@ add_library(dcusa_recomp STATIC
     src/recomp/avi_video.cpp
     src/audio/ds_mixer.cpp
     src/audio/null_output.cpp
-    src/gpu/metal.mm
     src/gpu/bc_decode.cpp
-    src/gpu/boot_screen.mm
-    src/gpu/gpu_queue.mm
+    src/gpu/gpu_queue.cpp
     # meshoptimizer (MIT, third_party/meshoptimizer): the simplifier for DCUSA_LOD.
     third_party/meshoptimizer/src/simplifier.cpp
     third_party/meshoptimizer/src/allocator.cpp)
 target_include_directories(dcusa_recomp PUBLIC src)
 target_include_directories(dcusa_recomp PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 add_dependencies(dcusa_recomp dcusa_build_info)
-target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime "-framework Foundation" "-framework Metal" "-framework QuartzCore"
-                      "-framework CoreGraphics" "-framework CoreText" "-framework ImageIO")
-set_source_files_properties(src/gpu/metal.mm src/gpu/gpu_queue.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+target_link_libraries(dcusa_recomp PUBLIC dcusa_runtime)
+if(DCUSA_PLATFORM STREQUAL "apple")
+    target_sources(dcusa_recomp PRIVATE src/gpu/metal.mm src/gpu/boot_screen.mm)
+    target_link_libraries(dcusa_recomp PUBLIC "-framework Foundation" "-framework Metal" "-framework QuartzCore"
+                          "-framework CoreGraphics" "-framework CoreText" "-framework ImageIO")
+    set_source_files_properties(src/gpu/gpu_queue.cpp PROPERTIES LANGUAGE OBJCXX)
+    set_source_files_properties(src/gpu/metal.mm src/gpu/gpu_queue.cpp PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+else()
+    # The Vulkan renderer's own shaders (the frame shown in the window),
+    # compiled to SPIR-V headers.
+    set(dcusa_shader_out "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    foreach(dcusa_stage vert frag)
+        set(dcusa_var kShow${dcusa_stage})
+        string(REPLACE "kShowvert" "kShowVert" dcusa_var "${dcusa_var}")
+        string(REPLACE "kShowfrag" "kShowFrag" dcusa_var "${dcusa_var}")
+        add_custom_command(
+            OUTPUT "${dcusa_shader_out}/show_${dcusa_stage}.h"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${dcusa_shader_out}"
+            COMMAND ${DCUSA_GLSLANG} -V --vn ${dcusa_var} -o "${dcusa_shader_out}/show_${dcusa_stage}.h"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/shaders/show.${dcusa_stage}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/shaders/show.${dcusa_stage}"
+            COMMENT "SPIR-V for show.${dcusa_stage}")
+    endforeach()
+    target_sources(dcusa_recomp PRIVATE src/gpu/vulkan.cpp src/gpu/boot_screen_stb.cpp
+                   "${dcusa_shader_out}/show_vert.h" "${dcusa_shader_out}/show_frag.h")
+    target_link_libraries(dcusa_recomp PUBLIC SDL3::SDL3 ${CMAKE_DL_LIBS})
+    target_compile_definitions(dcusa_recomp PUBLIC DCUSA_PLATFORM_SDL=1)
+    if(APPLE)
+        target_include_directories(dcusa_recomp PRIVATE /opt/homebrew/include)  # Vulkan headers (brew vulkan-headers)
+    endif()
+endif()
 # d3d11.cpp runs tools/shaderprep on a shader it has no translation for (DCUSA_TRANSLATE=1).
 set_source_files_properties(src/recomp/d3d11.cpp PROPERTIES COMPILE_DEFINITIONS "DCUSA_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
 dcusa_warnings(dcusa_recomp)
@@ -248,7 +293,16 @@ if(dcusa_editions)
                                -Wno-profile-instr-out-of-date)
     endif()
 
-    if(NOT DCUSA_IOS)
+    if(NOT DCUSA_IOS AND DCUSA_PLATFORM STREQUAL "sdl")
+        add_executable(dcrun tools/dcrun/main.cpp src/platform/sdl/sdl_platform.cpp src/platform/edition_choice.cpp)
+        target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system SDL3::SDL3)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            # Libraries packaged beside the binary (tools/linux/package.sh) are found there.
+            set_target_properties(dcrun PROPERTIES BUILD_RPATH "$ORIGIN/lib" INSTALL_RPATH "$ORIGIN/lib")
+            target_link_libraries(dcrun PRIVATE pthread)
+        endif()
+        dcusa_warnings(dcrun)
+    elseif(NOT DCUSA_IOS)
         add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm
                              src/platform/macos/game_window.mm src/platform/macos/core_audio_output.mm
                              src/platform/edition_choice.cpp)
@@ -375,19 +429,21 @@ dcusa_test(test_loader)
 dcusa_test(test_native)
 dcusa_test(test_imports)
 dcusa_test(test_threads)
+if(DCUSA_PLATFORM STREQUAL "apple")
 dcusa_test(test_metal)
 add_executable(test_bc_decode tests/test_bc_decode.mm)
 target_link_libraries(test_bc_decode PRIVATE dcusa_recomp)
 target_compile_options(test_bc_decode PRIVATE -fobjc-arc)
 add_test(NAME test_bc_decode COMMAND test_bc_decode)
 set_tests_properties(test_bc_decode PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 dcusa_test(test_shell)
 dcusa_test(test_pad)
 dcusa_test(test_ds_mixer)
 
 # Prepared MSL compiles with the system Metal device. The shaders come from the
 # player's executable (tools/shaderprep), so the test skips where none exist.
-if(APPLE)
+if(APPLE AND DCUSA_PLATFORM STREQUAL "apple")
     add_executable(mslcheck tools/mslcheck/main.mm)
     target_compile_options(mslcheck PRIVATE -fobjc-arc)
     target_link_libraries(mslcheck PRIVATE "-framework Foundation" "-framework Metal")

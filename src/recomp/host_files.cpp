@@ -1,6 +1,6 @@
 #include "recomp/host_files.hpp"
 
-#include <TargetConditionals.h>
+#include "runtime/platform_compat.hpp"
 #include "runtime/hitch.hpp"
 
 #include <algorithm>
