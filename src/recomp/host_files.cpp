@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cerrno>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -50,6 +51,10 @@ constexpr std::uint32_t kBackupSemantics = 0x02000000u;
 
 fs::path g_readable;
 fs::path g_writable;
+// A slim install's base (set_guest_base): lowercase "a/b/c" keys of the files
+// read from it.
+fs::path g_base;
+std::unordered_set<std::string> g_shared;
 std::vector<std::string> g_cwd;
 std::vector<std::string> g_start_dir;
 
@@ -187,9 +192,18 @@ std::unordered_map<std::string, std::optional<fs::path>> g_install_lookups;
 
 std::optional<fs::path> descend_uncached(const fs::path& root, const std::vector<std::string>& parts);
 
-std::optional<fs::path> descend(const fs::path& root, const std::vector<std::string>& parts) {
-    if (root.empty() || root != g_readable) return descend_uncached(root, parts);
+std::string shared_key(const std::vector<std::string>& parts) {
     std::string key;
+    for (const std::string& part : parts) {
+        if (!key.empty()) key.push_back('/');
+        for (char ch : part) key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return key;
+}
+
+std::optional<fs::path> descend(const fs::path& root, const std::vector<std::string>& parts) {
+    if (root.empty() || (root != g_readable && root != g_base)) return descend_uncached(root, parts);
+    std::string key = root == g_base ? "base:" : "";
     for (const std::string& part : parts) {
         for (char ch : part) key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
         key.push_back('/');
@@ -255,7 +269,10 @@ Located locate(const std::vector<std::string>& parts) {
         loc.is_dir = fs::is_directory(loc.overlay_file, ec);
         if (!loc.is_dir) loc.size = fs::file_size(loc.overlay_file, ec);
     }
-    if (auto hit = hidden_content(parts) ? std::nullopt : descend(g_readable, parts)) {
+    std::optional<fs::path> found = hidden_content(parts) ? std::nullopt : descend(g_readable, parts);
+    if (!found && !g_base.empty() && !hidden_content(parts) && g_shared.count(shared_key(parts)))
+        found = descend(g_base, parts);
+    if (auto hit = found) {
         loc.content = true;
         loc.content_path = *hit;
         if (!loc.overlay) {
@@ -358,8 +375,21 @@ std::string read_whole(const fs::path& path) {
 
 }  // namespace
 
+void set_guest_base(fs::path base, const std::vector<std::string>& shared) {
+    g_base = std::move(base);
+    g_shared.clear();
+    for (const std::string& path : shared) {
+        std::string key;
+        for (char ch : path) key.push_back(ch == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        g_shared.insert(std::move(key));
+    }
+    g_install_lookups.clear();
+}
+
 void set_guest_files(fs::path readable, std::string cwd_relative, fs::path writable) {
     g_readable = std::move(readable);
+    g_base.clear();
+    g_shared.clear();
     g_install_lookups.clear();
     g_writable = std::move(writable);
     g_cwd.clear();
@@ -670,6 +700,22 @@ std::uint32_t guest_find_first(std::string_view pattern, GuestDirEntry* first, s
         entries.push_back(GuestDirEntry{".", true, 0, kAttrDir});
         entries.push_back(GuestDirEntry{"..", true, 0, kAttrDir});
         if (auto dir = descend(g_readable, p.parts)) list_dir(*dir, &entries);
+        // A slim install: the base's shared files in this folder.
+        if (!g_base.empty()) {
+            if (auto dir = descend(g_base, p.parts)) {
+                std::vector<GuestDirEntry> base_entries;
+                list_dir(*dir, &base_entries);
+                std::vector<std::string> child = p.parts;
+                child.emplace_back();
+                for (GuestDirEntry& e : base_entries) {
+                    child.back() = e.name;
+                    if (e.is_dir || !g_shared.count(shared_key(child))) continue;
+                    bool have = false;
+                    for (const GuestDirEntry& h : entries) have = have || ieq(h.name, e.name);
+                    if (!have) entries.push_back(std::move(e));
+                }
+            }
+        }
         if (!g_writable.empty()) {
             if (auto dir = descend(g_writable, p.parts)) list_dir(*dir, &entries);
         }

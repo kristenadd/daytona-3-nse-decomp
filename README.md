@@ -34,8 +34,10 @@ build/mac-host/dcrun --content "<folder>" build/mac-host/prepared
 Given the cache folder, dcrun offers every edition it was built with
 (`DCUSA_PREPARED_CACHE`, below) whose cache (`DCUSA2019.cache`,
 `DCUSA2017.cache`) and game folder are there. With two, the window opens on
-the edition picker: the two title images side by side, chosen with the pad
-(left / right, then Start, gas or A), the arrow keys and Return, or a click.
+the edition picker: the title images on a carousel that turns as you move
+(the cards always face you, the chosen one at the front), chosen with the pad
+(left / right, then Start, gas or A), the arrow keys and Return, or a click
+(on the front card: choose it; on another: turn to it).
 `--edition 2017|2019` or `DCUSA_EDITION` skips it; a headless run takes 2019.
 A cache file instead of the folder runs that edition. Each edition keeps what
 the game writes in its own container folder beside the caches (`container`
@@ -106,7 +108,8 @@ app, or Finder with the device connected): `DCUSA2019.cache` and / or
 `DCUSA2017.cache` and the `shaders` folder (all from the Mac's
 `build/mac-host/prepared`) and the game folders. With both editions there
 (and built in), the app opens on the edition picker (controller: left /
-right, then A, Menu or the right trigger; or a tap);
+right, then A, Menu or the right trigger; or a tap on the front card, while a
+tap on another turns the carousel to it);
 `DEVICECTL_CHILD_DCUSA_EDITION=2017` skips it. The game writes to
 `Documents/container` (2019) or `Documents/container-2017`. Shaders cannot be translated on the device, so the shaders folder must
 already hold every shader the game uses. In the Simulator, put them in place
@@ -367,6 +370,20 @@ ctest --preset mac-host
 (override with `-DDCUSA_GAME_LIBRARY=<folder>`) and skips when it is absent.
 
 ## Preparing the game files
+
+**Both editions in less space.** About 1.3 GB of the 2017 edition's 5.4 GB
+are the same files as the 2019 edition's. `tools/overlay/make_overlay.py`
+makes a slim copy of the 2017 folder holding only the files that differ (4.1
+GB), with `dcusa-overlay.txt` listing the ones it reads from the 2019 folder
+beside it:
+
+```bash
+tools/overlay/make_overlay.py --edition "<library>/Daytona Championship USA (2017-12-21)[Sega PC][TP]" --base "<library>/Daytona Championship USA New Season Edition (2019)[Sega PC][TP]" --base-id 2019 --out build/overlay
+```
+
+Put the slim folder in place of the full 2017 one, next to the full 2019
+folder (on an iPhone or iPad: copy those two into Documents). The install
+scan links the two; a slim folder without its base is reported, not used.
 
 ```bash
 build/mac-host/dcprepare "<folder>" [--edition 2017|2019|all] [--cache-dir <dir>]

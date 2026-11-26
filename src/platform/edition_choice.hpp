@@ -61,4 +61,32 @@ private:
     bool confirm_armed_ = false;
 };
 
+// The picker's carousel: the cards stand on a ring seen in perspective, the
+// selected one at the front, and always face the viewer. Turning the ring is
+// animated (step); the platforms draw each card where card() puts it,
+// farthest first (draw_order), with a faint reflection below.
+struct CarouselCard {
+    float cx = 0, cy = 0;     // centre, in view points
+    float w = 0, h = 0;       // size (16:9)
+    float brightness = 1;     // 1 at the front, darker behind
+    float title_alpha = 0;    // the name under the front card
+    float depth = 0;          // 0 front .. 1 back of the ring
+};
+
+class Carousel {
+public:
+    explicit Carousel(int count) : count_(count) {}
+    void select(int index) { target_ = static_cast<float>(index); }
+    // Advances the turn by dt seconds; true while still moving.
+    bool step(double dt);
+    CarouselCard card(int index, float view_w, float view_h) const;
+    std::vector<int> draw_order(float view_w, float view_h) const;  // back to front
+    // The card under (x, y), front ones first; -1 for none.
+    int hit(float x, float y, float view_w, float view_h) const;
+
+private:
+    int count_;
+    float pos_ = 0, target_ = 0;  // the ring's turn, in cards
+};
+
 }  // namespace dcusa

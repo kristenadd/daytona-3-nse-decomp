@@ -3,6 +3,7 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include <chrono>
 #include <cstdio>
 #include <unistd.h>
 
@@ -29,12 +30,16 @@
 }
 @end
 
-// The edition picker: each edition's title image with its name under it, the
-// selected one at full brightness with a white frame. Keys and clicks are
-// queued for MacGameWindow::choose.
+// The edition picker: the editions' title images on a carousel
+// (dcusa::Carousel: a ring seen in perspective, the cards always facing the
+// viewer), each with a faint reflection on a dark floor. The front card has a
+// white frame and its name below. Keys and clicks are queued for
+// MacGameWindow::choose: a click on the front card chooses it, on another
+// turns the ring to it.
 @interface DcusaPickerView : NSView
 @property(nonatomic) NSInteger selected;
 @property(nonatomic) NSInteger confirmed;  // -1 until a choice is made
+@property(nonatomic) dcusa::Carousel* carousel;
 - (instancetype)initWithFrame:(NSRect)frame images:(NSArray<NSImage*>*)images titles:(NSArray<NSString*>*)titles;
 @end
 
@@ -48,11 +53,6 @@
         _titles = titles;
         _confirmed = -1;
         self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-        [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect
-                                                           options:NSTrackingMouseMoved | NSTrackingActiveInKeyWindow |
-                                                                   NSTrackingInVisibleRect
-                                                             owner:self
-                                                          userInfo:nil]];
     }
     return self;
 }
@@ -62,64 +62,89 @@
 - (BOOL)isFlipped {
     return YES;
 }
-// Slot i: two 16:9 images side by side, a gap between, centred.
-- (NSRect)slot:(NSInteger)i {
-    const NSInteger n = (NSInteger)_titles.count;
-    const CGFloat gap = self.bounds.size.width * 0.04;
-    const CGFloat w = (self.bounds.size.width - gap * (n + 1)) / n;
-    const CGFloat h = w * 9.0 / 16.0;
-    const CGFloat y = (self.bounds.size.height - h) / 2 - h * 0.08;
-    return NSMakeRect(gap + i * (w + gap), y, w, h);
+- (NSRect)rectOf:(const dcusa::CarouselCard&)k {
+    return NSMakeRect(k.cx - k.w / 2, k.cy - k.h / 2, k.w, k.h);
 }
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
+    if (_carousel == nullptr) return;
+    const NSRect b = self.bounds;
+    const float vw = static_cast<float>(b.size.width), vh = static_cast<float>(b.size.height);
+    // Black above, a dark floor fading in below the cards' feet.
     [NSColor.blackColor setFill];
-    NSRectFill(self.bounds);
-    const CGFloat text_size = MAX(14.0, self.bounds.size.width * 0.022);
-    for (NSInteger i = 0; i < (NSInteger)_titles.count; ++i) {
-        const NSRect r = [self slot:i];
-        const BOOL on = i == self.selected;
-        NSImage* image = _images[i];
-        if (image.size.width > 0) {
-            [image drawInRect:r fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
-                     fraction:on ? 1.0 : 0.45 respectFlipped:YES hints:nil];
+    NSRectFill(b);
+    const dcusa::CarouselCard front = _carousel->card(static_cast<int>(self.selected), vw, vh);
+    const CGFloat floor_y = front.cy + front.h / 2;
+    NSGradient* floor = [[NSGradient alloc] initWithStartingColor:[NSColor colorWithWhite:0.0 alpha:1]
+                                                      endingColor:[NSColor colorWithWhite:0.10 alpha:1]];
+    [floor drawInRect:NSMakeRect(0, floor_y - vh * 0.25, vw, vh - floor_y + vh * 0.25) angle:90];
+    for (int i : _carousel->draw_order(vw, vh)) {
+        const dcusa::CarouselCard k = _carousel->card(i, vw, vh);
+        const NSRect r = [self rectOf:k];
+        NSImage* image = _images[static_cast<NSUInteger>(i)];
+        const bool has_image = image.size.width > 0;
+        // The reflection: the card upside down below it, fading out over half
+        // its height (drawn in strips, each fainter than the last).
+        if (has_image) {
+            NSRect m = r;
+            m.origin.y = NSMaxY(r) + 3;
+            [NSGraphicsContext saveGraphicsState];
+            NSAffineTransform* flip = [NSAffineTransform transform];
+            [flip translateXBy:0 yBy:NSMaxY(m) + m.origin.y];
+            [flip scaleXBy:1 yBy:-1];
+            [flip concat];
+            constexpr int kStrips = 24;
+            const CGFloat strip = m.size.height * 0.5 / kStrips;
+            for (int j = 0; j < kStrips; ++j) {
+                // Strip j of the mirror, counted from the card's foot; in the
+                // flipped drawing it is the image's bottom rows.
+                const NSRect dst = NSMakeRect(m.origin.x, NSMaxY(m) - (j + 1) * strip, m.size.width, strip);
+                const NSRect src = NSMakeRect(0, image.size.height * (j * strip / m.size.height), image.size.width,
+                                              image.size.height * (strip / m.size.height));
+                const CGFloat fade = 1.0 - (j + 0.5) / kStrips;
+                [image drawInRect:dst fromRect:src operation:NSCompositingOperationSourceOver
+                         fraction:0.28 * fade * fade * k.brightness respectFlipped:NO hints:nil];
+            }
+            [NSGraphicsContext restoreGraphicsState];
+        }
+        if (has_image) {
+            [image drawInRect:r fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0
+                     respectFlipped:YES hints:nil];
         } else {
-            [[NSColor colorWithWhite:on ? 0.25 : 0.12 alpha:1] setFill];
+            [[NSColor colorWithWhite:0.25 alpha:1] setFill];
             NSRectFill(r);
         }
-        if (on) {
-            [NSColor.whiteColor setStroke];
+        if (k.brightness < 1) {  // farther round the ring: darker
+            [[NSColor colorWithWhite:0 alpha:1 - k.brightness] setFill];
+            NSRectFillUsingOperation(r, NSCompositingOperationSourceOver);
+        }
+        if (k.title_alpha > 0) {
+            [[NSColor colorWithWhite:1 alpha:k.title_alpha] setStroke];
             NSBezierPath* frame = [NSBezierPath bezierPathWithRect:NSInsetRect(r, -4, -4)];
             frame.lineWidth = 4;
             [frame stroke];
+            const CGFloat text_size = MAX(14.0, vw * 0.024);
+            NSMutableParagraphStyle* centre = [NSMutableParagraphStyle new];
+            centre.alignment = NSTextAlignmentCenter;
+            NSDictionary* attrs = @{
+                NSFontAttributeName : [NSFont boldSystemFontOfSize:text_size],
+                NSForegroundColorAttributeName : [NSColor colorWithWhite:1 alpha:k.title_alpha],
+                NSParagraphStyleAttributeName : centre
+            };
+            [_titles[static_cast<NSUInteger>(i)] drawInRect:NSMakeRect(0, vh * 0.88, vw, text_size * 1.6)
+                                              withAttributes:attrs];
         }
-        NSMutableParagraphStyle* centre = [NSMutableParagraphStyle new];
-        centre.alignment = NSTextAlignmentCenter;
-        NSDictionary* attrs = @{
-            NSFontAttributeName : [NSFont boldSystemFontOfSize:text_size],
-            NSForegroundColorAttributeName : [NSColor colorWithWhite:1 alpha:on ? 1.0 : 0.5],
-            NSParagraphStyleAttributeName : centre
-        };
-        [_titles[i] drawInRect:NSMakeRect(r.origin.x, NSMaxY(r) + text_size, r.size.width, text_size * 1.6)
-                withAttributes:attrs];
-    }
-}
-- (NSInteger)hit:(NSEvent*)event {
-    const NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    for (NSInteger i = 0; i < (NSInteger)_titles.count; ++i)
-        if (NSPointInRect(p, [self slot:i])) return i;
-    return -1;
-}
-- (void)mouseMoved:(NSEvent*)event {
-    const NSInteger i = [self hit:event];
-    if (i >= 0 && i != self.selected) {
-        self.selected = i;
-        self.needsDisplay = YES;
     }
 }
 - (void)mouseDown:(NSEvent*)event {
-    const NSInteger i = [self hit:event];
-    if (i >= 0) self.confirmed = i;
+    if (_carousel == nullptr) return;
+    const NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    const NSRect b = self.bounds;
+    const int i = _carousel->hit(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(b.size.width),
+                                 static_cast<float>(b.size.height));
+    if (i < 0) return;
+    if (i == self.selected) self.confirmed = i;
+    else self.selected = i;
 }
 - (void)keyDown:(NSEvent*)event {
     NSString* k = event.charactersIgnoringModifiers;
@@ -128,7 +153,6 @@
     if (ch == NSLeftArrowFunctionKey && self.selected > 0) --self.selected;
     else if (ch == NSRightArrowFunctionKey && self.selected + 1 < (NSInteger)_titles.count) ++self.selected;
     else if (ch == '\r' || ch == ' ' || ch == 3) self.confirmed = self.selected;
-    self.needsDisplay = YES;
 }
 @end
 
@@ -233,7 +257,10 @@ public:
             window_.contentView = picker;
             [window_ makeFirstResponder:picker];
             PickerInput input(static_cast<int>(items.size()));
+            Carousel carousel(static_cast<int>(items.size()));
+            picker.carousel = &carousel;
             int chosen = -1;
+            auto last = std::chrono::steady_clock::now();
             while (chosen < 0) {
                 @autoreleasepool {
                     NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
@@ -254,13 +281,16 @@ public:
                                          s.accelerator > 0.5f;
                     const int before = input.selected();
                     if (input.pad(s.steering, confirm)) chosen = input.selected();
-                    if (input.selected() != before) {
-                        picker.selected = input.selected();
-                        picker.needsDisplay = YES;
-                    }
+                    if (input.selected() != before) picker.selected = input.selected();
                 }
                 if (picker.confirmed >= 0) chosen = static_cast<int>(picker.confirmed);
+                // Turn the ring towards the selection, redrawing while it moves.
+                const auto now = std::chrono::steady_clock::now();
+                carousel.select(static_cast<int>(picker.selected));
+                if (carousel.step(std::chrono::duration<double>(now - last).count())) picker.needsDisplay = YES;
+                last = now;
             }
+            picker.carousel = nullptr;
             window_.contentView = game_view;
             [window_ makeFirstResponder:game_view];
             pump();

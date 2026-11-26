@@ -192,6 +192,10 @@ void* run_game(void*) {
     const std::filesystem::path writable = docs / dcusa::container_name(choice.edition);
     std::filesystem::create_directories(writable, ec);
     dcusa::recomp::set_guest_files(install->install_root, install->game_dir.filename().string(), writable);
+    if (!install->base_root.empty()) {  // a slim install: its shared files come from the base
+        dcusa::recomp::set_guest_base(install->base_root, install->shared);
+        std::fprintf(stderr, "shared files from %s: %zu\n", install->base_root.c_str(), install->shared.size());
+    }
     if (!dcusa::gpu::enabled()) {
         say("No Metal device, or no translated shaders in the shaders folder.");
         return nullptr;
@@ -253,8 +257,12 @@ void start_game_thread() {
     // The edition picker, while it is up.
     std::vector<dcusa::EditionChoice> _choices;
     std::unique_ptr<dcusa::PickerInput> _input;
+    std::unique_ptr<dcusa::Carousel> _carousel;
     UIView* _picker;
+    CAGradientLayer* _floor;
     NSMutableArray<UIImageView*>* _images;
+    NSMutableArray<UIImageView*>* _mirrors;
+    NSMutableArray<UIView*>* _dims;
     NSMutableArray<UILabel*>* _titles;
     CADisplayLink* _poll;
 }
@@ -309,71 +317,109 @@ void start_game_thread() {
     start_game_thread();
 }
 
-// The editions' title images side by side, the selected one bright and framed.
+// The editions' title images on a carousel (dcusa::Carousel: a ring seen in
+// perspective, the cards always facing the viewer), each with a reflection
+// on a dark floor; the front card framed, its name below.
 - (void)showPicker {
     _input = std::make_unique<dcusa::PickerInput>(static_cast<int>(_choices.size()));
+    _carousel = std::make_unique<dcusa::Carousel>(static_cast<int>(_choices.size()));
     _picker = [UIView new];
     _picker.backgroundColor = UIColor.blackColor;
+    [_picker addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped:)]];
+    _floor = [CAGradientLayer layer];
+    _floor.colors = @[ (id)UIColor.blackColor.CGColor, (id)[UIColor colorWithWhite:0.10 alpha:1].CGColor ];
+    [_picker.layer addSublayer:_floor];
     _images = [NSMutableArray array];
+    _mirrors = [NSMutableArray array];
+    _dims = [NSMutableArray array];
     _titles = [NSMutableArray array];
     for (std::size_t i = 0; i < _choices.size(); ++i) {
-        UIImageView* image = [UIImageView new];
-        image.contentMode = UIViewContentModeScaleAspectFit;
-        image.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
-        if (!_choices[i].image.empty()) image.image = [UIImage imageWithContentsOfFile:@(_choices[i].image.c_str())];
-        image.userInteractionEnabled = YES;
-        image.tag = static_cast<NSInteger>(i);
+        UIImage* picture = _choices[i].image.empty() ? nil : [UIImage imageWithContentsOfFile:@(_choices[i].image.c_str())];
+        UIImageView* image = [[UIImageView alloc] initWithImage:picture];
+        image.contentMode = UIViewContentModeScaleToFill;
+        image.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1];
         image.layer.borderColor = UIColor.whiteColor.CGColor;
-        [image addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped:)]];
+        UIView* dim = [UIView new];  // farther round the ring: darker
+        dim.backgroundColor = UIColor.blackColor;
+        [image addSubview:dim];
+        // The reflection: upside down, fading out over half its height.
+        UIImageView* mirror = [[UIImageView alloc] initWithImage:picture];
+        mirror.contentMode = UIViewContentModeScaleToFill;
+        mirror.transform = CGAffineTransformMakeScale(1, -1);
+        CAGradientLayer* fade = [CAGradientLayer layer];
+        fade.colors = @[ (id)[UIColor colorWithWhite:0 alpha:0].CGColor, (id)[UIColor colorWithWhite:0 alpha:0.3].CGColor ];
+        fade.locations = @[ @0.5, @1.0 ];  // flipped: the card's foot is at the bottom of this layer
+        mirror.layer.mask = fade;
         UILabel* title = [UILabel new];
         title.text = @(_choices[i].title.c_str());
         title.textColor = UIColor.whiteColor;
         title.textAlignment = NSTextAlignmentCenter;
-        title.adjustsFontSizeToFitWidth = YES;
+        [_picker addSubview:mirror];
         [_picker addSubview:image];
         [_picker addSubview:title];
         [_images addObject:image];
+        [_mirrors addObject:mirror];
+        [_dims addObject:dim];
         [_titles addObject:title];
     }
     [self.view addSubview:_picker];
     [self layoutPicker];
-    [self showSelection];
-    _poll = [CADisplayLink displayLinkWithTarget:self selector:@selector(pollPad)];
+    _poll = [CADisplayLink displayLinkWithTarget:self selector:@selector(pollPad:)];
     [_poll addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 
+// Every card where the carousel puts it now, back to front.
 - (void)layoutPicker {
     if (_picker == nil) return;
     const CGRect b = self.view.bounds;
+    const float vw = static_cast<float>(b.size.width), vh = static_cast<float>(b.size.height);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     _picker.frame = b;
-    const CGFloat n = _images.count;
-    const CGFloat gap = b.size.width * 0.04;
-    const CGFloat w = (b.size.width - gap * (n + 1)) / n;
-    const CGFloat h = w * 9 / 16;
-    const CGFloat y = (b.size.height - h) / 2 - h * 0.08;
-    const CGFloat text = MAX(14.0, b.size.width * 0.022);
-    for (NSUInteger i = 0; i < _images.count; ++i) {
-        _images[i].frame = CGRectMake(gap + i * (w + gap), y, w, h);
-        _titles[i].frame = CGRectMake(gap + i * (w + gap), y + h + text * 0.8, w, text * 1.6);
-        _titles[i].font = [UIFont boldSystemFontOfSize:text];
+    const dcusa::CarouselCard front = _carousel->card(_input->selected(), vw, vh);
+    const CGFloat floor_y = front.cy + front.h / 2 - vh * 0.25;
+    _floor.frame = CGRectMake(0, floor_y, vw, vh - floor_y);
+    const CGFloat text = MAX(14.0, b.size.width * 0.024);
+    CGFloat z = 0;
+    for (int i : _carousel->draw_order(vw, vh)) {
+        const dcusa::CarouselCard k = _carousel->card(i, vw, vh);
+        const CGRect r = CGRectMake(k.cx - k.w / 2, k.cy - k.h / 2, k.w, k.h);
+        UIImageView* image = _images[static_cast<NSUInteger>(i)];
+        UIImageView* mirror = _mirrors[static_cast<NSUInteger>(i)];
+        image.frame = r;
+        image.layer.zPosition = z + 2;
+        image.layer.borderWidth = 4 * k.title_alpha;
+        _dims[static_cast<NSUInteger>(i)].frame = image.bounds;
+        _dims[static_cast<NSUInteger>(i)].alpha = 1 - k.brightness;
+        mirror.bounds = CGRectMake(0, 0, r.size.width, r.size.height);
+        mirror.center = CGPointMake(CGRectGetMidX(r), CGRectGetMaxY(r) + 3 + r.size.height / 2);
+        mirror.layer.mask.frame = mirror.bounds;
+        mirror.alpha = k.brightness;
+        mirror.layer.zPosition = z + 1;
+        UILabel* title = _titles[static_cast<NSUInteger>(i)];
+        title.font = [UIFont boldSystemFontOfSize:text];
+        title.frame = CGRectMake(0, vh * 0.88, vw, text * 1.6);
+        title.alpha = k.title_alpha;
+        title.layer.zPosition = 100;
+        z += 3;
     }
+    [CATransaction commit];
 }
 
-- (void)showSelection {
-    for (NSUInteger i = 0; i < _images.count; ++i) {
-        const BOOL on = static_cast<int>(i) == _input->selected();
-        _images[i].alpha = on ? 1.0 : 0.45;
-        _images[i].layer.borderWidth = on ? 4 : 0;
-        _titles[i].alpha = on ? 1.0 : 0.5;
-    }
-}
-
+// A tap on the front card chooses it; on another, turns the ring to it.
 - (void)tapped:(UITapGestureRecognizer*)tap {
-    [self choose:static_cast<int>(tap.view.tag)];
+    const CGPoint p = [tap locationInView:_picker];
+    const CGRect b = _picker.bounds;
+    const int i = _carousel->hit(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(b.size.width),
+                                 static_cast<float>(b.size.height));
+    if (i < 0) return;
+    if (i == _input->selected()) [self choose:i];
+    else _input->select(i);
 }
 
-// The controller: left / right (d-pad or stick), then A, Menu or the right trigger.
-- (void)pollPad {
+// Every frame: the controller (left / right on the d-pad or stick, then A,
+// Menu or the right trigger) and the ring's turn.
+- (void)pollPad:(CADisplayLink*)link {
     GCExtendedGamepad* pad = GCController.current.extendedGamepad;
     if (pad == nil) {
         for (GCController* c in GCController.controllers)
@@ -382,14 +428,18 @@ void start_game_thread() {
                 break;
             }
     }
-    if (pad == nil) return;
-    const float x = std::fabs(pad.dpad.xAxis.value) > std::fabs(pad.leftThumbstick.xAxis.value) ? pad.dpad.xAxis.value
-                                                                                                 : pad.leftThumbstick.xAxis.value;
-    const bool confirm = pad.buttonA.pressed || pad.buttonMenu.pressed || pad.rightTrigger.value > 0.5f;
-    const int before = _input->selected();
-    const bool chosen = _input->pad(x, confirm);
-    if (_input->selected() != before) [self showSelection];
-    if (chosen) [self choose:_input->selected()];
+    if (pad != nil) {
+        const float x = std::fabs(pad.dpad.xAxis.value) > std::fabs(pad.leftThumbstick.xAxis.value)
+                            ? pad.dpad.xAxis.value
+                            : pad.leftThumbstick.xAxis.value;
+        const bool confirm = pad.buttonA.pressed || pad.buttonMenu.pressed || pad.rightTrigger.value > 0.5f;
+        if (_input->pad(x, confirm)) {
+            [self choose:_input->selected()];
+            return;
+        }
+    }
+    _carousel->select(_input->selected());
+    if (_carousel->step(link.targetTimestamp - link.timestamp)) [self layoutPicker];
 }
 
 - (void)choose:(int)index {
