@@ -137,7 +137,18 @@ agreed to this).
       stretch is still about 18 ms of GPU (stadium shading 4.8 ms of it), and
       some frames take 20 to 26 ms of main-thread CPU; after hours of runs
       the phone reaches thermal "serious" and slows (56 pictures). A lighter
-      stadium shader (as the fence) is the next GPU step.
+      stadium shader (as the fence) is the next GPU step. Done since: the
+      stadium's lighter shader (59.3 and 58.7), all three shadow cascades
+      again (two left distant trees unshadowed and bright; 58.0). The GPU now
+      averages 12 to 14 ms; the skips (2 to 4%) are in busy stretches where
+      the main thread needs 13 to 15 ms of CPU a rendered tick (race 0:39,
+      0:53, 1:14, 1:23, 1:28; 1,100 to 1,200 draws). Main thread by Time
+      Profiler: the game's render (0x4514D0) about 54%, the Model 2
+      interpreter (0x5C1C10, the Daytona ROM) 22%, our host code about 15%;
+      the hottest line is the scene walk's per-object call at 0x4423BA
+      (memory misses; it already prefetches). Calling the interpreter's
+      handlers straight from their table (0x11EC910) instead of through
+      call_indirect gained nothing (57.9 and 57.4 against 59.5 and 57.8).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
