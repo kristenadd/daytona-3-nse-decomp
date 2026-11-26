@@ -244,8 +244,11 @@ agreed to this).
    Phase 5 attract passes (colour p95 0.472, luma 101.5 / 101.6, saturation
    0.375 / 0.335: a little more saturated than Metal's 0.336). The Linux
    binary links (glibc 2.29 at most, needs only SDL3, packaged beside it)
-   but has not been run: a Linux VM for a smoke test was not allowed in
-   this session. Not yet: the user's test on the Deck.
+   and **runs on the user's Steam Deck** (RADV, Vulkan 1.4; Steam
+   controller, PipeWire sound; 2017 edition; the boot screen shows, from
+   Konsole and from a Steam shortcut). Steam's file browser refuses .sh:
+   `add-to-menu.sh` makes a desktop entry its Add a Non-Steam Game list
+   shows. Not yet reported: race frame rate, the picker on the Deck.
 
 ## Future work
 
