@@ -25,8 +25,9 @@ find "$prepared/shaders/msl" -name '*.spv' -exec cp {} "$pkg/prepared/shaders/ms
 find "$prepared/shaders/msl" -name '*.refl' -exec cp {} "$pkg/prepared/shaders/msl/" \;
 [ -d "$prepared/boot" ] && cp -R "$prepared/boot" "$pkg/prepared/boot"
 cp "$root/tools/linux/run.sh" "$pkg/run.sh"
+cp "$root/tools/linux/add-to-menu.sh" "$pkg/add-to-menu.sh"
 cp "$root/tools/linux/README-DECK.txt" "$pkg/README.txt"
-chmod +x "$pkg/run.sh" "$pkg/dcrun"
+chmod +x "$pkg/run.sh" "$pkg/dcrun" "$pkg/add-to-menu.sh"
 (cd "$out" && tar -czf daytona-usa-deck.tar.gz daytona-usa)
 echo "$out/daytona-usa-deck.tar.gz: $(du -h "$out/daytona-usa-deck.tar.gz" | cut -f1)"
 echo "shaders: $(ls "$pkg/prepared/shaders/msl" | grep -c '\.spv$')"

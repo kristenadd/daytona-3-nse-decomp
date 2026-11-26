@@ -31,9 +31,21 @@ Daytona Championship USA for the Steam Deck (Linux, x86_64, Vulkan)
    Konsole). With both editions present the edition picker opens: left /
    right on the stick or d-pad, A or Start to choose.
 
-4. For Gaming Mode: in Steam (Desktop Mode), Games > Add a Non-Steam Game,
-   Browse to run.sh, Add. Leave its compatibility setting off (it is a
-   native Linux program, not a Windows one).
+4. For Gaming Mode, add it to Steam (Desktop Mode):
+
+   a. Double-click add-to-menu.sh (or run ./add-to-menu.sh in Konsole). It
+      puts Daytona Championship USA in the application menu. Then in Steam:
+      Games > Add a Non-Steam Game, tick Daytona Championship USA, Add
+      Selected Programs.
+
+   b. Or by hand: Games > Add a Non-Steam Game > Browse; change the file
+      type at the bottom of the dialog to "All Files" and pick run.sh. If
+      Steam still refuses it, add any program (dcrun), then in that
+      shortcut's Properties set Target to the full path of run.sh, in
+      quotes, and Start In to its folder.
+
+   Leave its compatibility setting off: it is a native Linux program, not
+   a Windows one.
 
 Controls (Steam Input's default gamepad layout):
    Left stick          steer
