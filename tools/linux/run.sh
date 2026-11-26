@@ -7,6 +7,7 @@
 dir="$(cd "$(dirname "$0")" && pwd)"
 games="${DCUSA_GAMES:-$dir/games}"
 export DCUSA_FULLSCREEN="${DCUSA_FULLSCREEN:-1}"
+export DCUSA_BOOT_SCREEN="${DCUSA_BOOT_SCREEN:-1}"
 export DCUSA_SHOW_FPS="${DCUSA_SHOW_FPS:-1}"
 cd "$dir"
 exec "$dir/dcrun" --content "$games" "$@" "$dir/prepared" > "$dir/log.txt" 2>&1

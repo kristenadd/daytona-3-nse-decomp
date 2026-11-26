@@ -323,7 +323,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_BOOT_PACE=1\|0` | Pace the boot's loading screen too (default: only with a pad script). |
 | `DCUSA_BOOT_UNPACE_UNTIL=<percent>` | Leave the boot unpaced only below this loading percentage. |
 | `DCUSA_BOOT_GIVE=0` | During an unpaced boot, do not give the loader threads their turns first (the old behaviour). |
-| `DCUSA_BOOT_SCREEN=1` | The attract title with a progress bar during boot (Playing, above). |
+| `DCUSA_BOOT_SCREEN=1` | The attract title with a progress bar during boot (Playing, above). Off by default; on in the Mac app, the iOS app and the Steam Deck `run.sh`. |
 | `DCUSA_BOOT_SCREEN_IMAGE=<png>` | Boot screen image (default the chosen edition's title: `<prepared>/boot/title.png`, or `title2017.png` for 2017). |
 | `DCUSA_BOOT_SCREEN_FONT=<ttf>` | Label font (default `font.ttf` beside the image, else Helvetica Neue Bold). |
 | `DCUSA_TEXTURE_LIMIT=<px>` | Largest texture size kept (default 1024 on iOS, none on the Mac). |
