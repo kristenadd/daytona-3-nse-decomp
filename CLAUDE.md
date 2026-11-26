@@ -156,7 +156,14 @@ agreed to this).
       the line: there the main pass has about 390 more draws (1,480 at race
       0:45 against 1,058 at 0:58; `DCUSA_METAL_TRACE_RACE`), many small
       objects around the pit lane and start/finish (shaders e7fb5c9b,
-      161ddc7e, 6849c2de): CPU per draw, not GPU.
+      161ddc7e, 6849c2de): CPU per draw, not GPU. They come through the
+      render-list loop 0x76D510 -> 0x733490 (one model) -> 0x735430 (its
+      parts) -> 0x6D3E50 (engine draw). Culling them at our D3D draw when far
+      and small (`DCUSA_FAR_CULL=200,2000`, 359 of 563 at race 0:45, no
+      visible change) gained nothing on the phone (58.7 and 59.2 against
+      59.2 and 58.1): the game's per-object work is already spent there. A
+      real saving needs the cull before 0x733490 (the object's position and
+      size in the game's own structures, not yet found).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.

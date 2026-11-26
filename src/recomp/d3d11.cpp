@@ -1968,6 +1968,7 @@ bool g_render_skipped = false;
 // apart for ticks that rendered and ticks that skipped (DCUSA_SKIP_LOG).
 std::chrono::steady_clock::time_point g_tick_start{};
 double g_gpu_sum = 0, g_gpu_max = 0;
+std::uint32_t g_far_culled = 0;  // draws left out by DCUSA_FAR_CULL since the last skip log
 int g_gpu_n = 0;
 double g_tick_ms[2]{}, g_tick_cpu_ms[2]{}, g_tick_draws[2]{};
 std::uint32_t g_tick_n[2]{};
@@ -2322,7 +2323,9 @@ void present(Cpu& c) {
                          g_tick_n[0] ? g_tick_draws[0] / g_tick_n[0] : 0.0, g_tick_n[1] ? g_tick_draws[1] / g_tick_n[1] : 0.0);
             {
                 // GPU time per frame over the interval (command buffer start to end).
-                std::fprintf(stderr, "gpu %d: %.2f ms mean, %.2f ms max per frame\n", all_presents, g_gpu_n ? g_gpu_sum / g_gpu_n : 0.0, g_gpu_max);
+                std::fprintf(stderr, "gpu %d: %.2f ms mean, %.2f ms max per frame, far culled %u draws\n", all_presents,
+                             g_gpu_n ? g_gpu_sum / g_gpu_n : 0.0, g_gpu_max, g_far_culled);
+                g_far_culled = 0;
                 g_gpu_sum = 0;
                 g_gpu_max = 0;
                 g_gpu_n = 0;
@@ -3063,7 +3066,15 @@ void draw_stack_probe(Cpu& c) {
         static const std::uint32_t min_draws = std::getenv("DCUSA_DRAW_STACK_MIN") ? std::atoi(std::getenv("DCUSA_DRAW_STACK_MIN")) : 0;
         static std::uint64_t chosen = ~0ull, seen_frame = ~0ull;
         static std::uint32_t last_count = 0;
-        if (min_draws != 0) {
+        // DCUSA_DRAW_STACK_RACE=<s>: instead, the frame the race timer first passes s seconds in.
+        static const double race_at = std::getenv("DCUSA_DRAW_STACK_RACE") ? std::atof(std::getenv("DCUSA_DRAW_STACK_RACE")) : -1;
+        if (race_at >= 0) {
+            if (g_frames_presented != seen_frame) {
+                if (chosen == ~0ull && race_timer(c.mem) / 64.0 >= race_at) chosen = g_frames_presented;
+                seen_frame = g_frames_presented;
+            }
+            if (g_frames_presented != chosen) return;
+        } else if (min_draws != 0) {
             if (g_frames_presented != seen_frame) {
                 if (chosen == ~0ull && last_count >= min_draws && g_frames_presented > 3000) chosen = g_frames_presented;
                 seen_frame = g_frames_presented;
@@ -3073,7 +3084,7 @@ void draw_stack_probe(Cpu& c) {
         } else if (g_frames_presented != at) {
             return;
         }
-        std::fprintf(stderr, "draw stack %gx%g:", gs.viewport[2], gs.viewport[3]);
+        std::fprintf(stderr, "draw stack %gx%g ps %016llx:", gs.viewport[2], gs.viewport[3], static_cast<unsigned long long>(gs.ps));
         const std::uint32_t esp = c.r[Cpu::ESP];
         int n = 0;
         for (std::uint32_t p = esp; p < esp + 0x3000u && n < 40; p += 4) {
@@ -3100,9 +3111,71 @@ void draw_stack_probe(Cpu& c) {
     std::fprintf(stderr, "\n");
 }
 
+// A buffer's current bytes: its home in guest memory when it has one (the
+// stored copy is stale then), else the stored copy; nullptr if smaller than need.
+const std::uint8_t* buffer_now(Cpu& c, std::uint32_t buffer, std::uint32_t need) {
+    if (auto h = buffer_home.find(buffer); h != buffer_home.end()) return c.mem + h->second;
+    auto it = stored.find(buffer);
+    if (it == stored.end() || it->second.bytes.size() < need) return nullptr;
+    return it->second.bytes.data();
+}
+
+// DCUSA_FAR_CULL=<distance>,<max indices>: draws with the pixel shaders in
+// DCUSA_FAR_CULL_PS (hex keys; default the small objects around the oval
+// tracks' start/finish and pit lane: e7fb5c9b, 161ddc7e, 6849c2de) farther
+// from the camera than distance (game units) and with fewer indices than max
+// are left out. The object's position is its world matrix's translation
+// (VS constant buffer 1, CB_PER_MESH), the camera CB_PER_SCENE_VIEW.CameraPos
+// (VS constant buffer 0, byte 128). Off unless set.
+bool far_culled(Cpu& c, std::uint32_t count) {
+    static const std::pair<float, std::uint32_t> cfg = [] {
+        float d = 0;
+        unsigned n = 0;
+        if (const char* v = std::getenv("DCUSA_FAR_CULL")) std::sscanf(v, "%f,%u", &d, &n);
+        return std::make_pair(d, static_cast<std::uint32_t>(n));
+    }();
+    // DCUSA_FAR_CULL_LOG=<s>: each candidate draw's distance and size in the frame at race time s.
+    static const double log_at = std::getenv("DCUSA_FAR_CULL_LOG") ? std::atof(std::getenv("DCUSA_FAR_CULL_LOG")) : -1;
+    const bool log = log_at >= 0 && std::abs(race_timer(c.mem) / 64.0 - log_at) < 0.02;
+    if (!log && (cfg.first <= 0 || count >= cfg.second)) return false;
+    static const std::vector<std::uint64_t> keys = [] {
+        std::vector<std::uint64_t> k;
+        const char* v = std::getenv("DCUSA_FAR_CULL_PS");
+        if (v == nullptr) return std::vector<std::uint64_t>{0xe7fb5c9b18073828ull, 0x161ddc7e6fa78e7eull, 0x6849c2de0ba2c1c8ull};
+        for (const char* p = v; *p;) {
+            char* end = nullptr;
+            k.push_back(std::strtoull(p, &end, 16));
+            if (end == p) break;
+            p = *end == ',' ? end + 1 : end;
+        }
+        return k;
+    }();
+    if (std::find(keys.begin(), keys.end(), gs.ps) == keys.end()) return false;
+    const std::uint8_t* view = gs.vs_cb[0] ? buffer_now(c, gs.vs_cb[0], 140) : nullptr;
+    const std::uint8_t* mesh = gs.vs_cb[1] ? buffer_now(c, gs.vs_cb[1], 48) : nullptr;
+    if (view == nullptr || mesh == nullptr) return false;
+    float cam[3], m[12];
+    std::memcpy(cam, view + 128, 12);
+    std::memcpy(m, mesh, 48);
+    const float dx = m[3] - cam[0], dy = m[7] - cam[1], dz = m[11] - cam[2];
+    if (log) std::fprintf(stderr, "far cull: ps %016llx dist %.1f indices %u\n", static_cast<unsigned long long>(gs.ps),
+                          std::sqrt(dx * dx + dy * dy + dz * dz), count);
+    if (cfg.first <= 0 || count >= cfg.second) return false;
+    if (dx * dx + dy * dy + dz * dz <= cfg.first * cfg.first) return false;
+    // DCUSA_FAR_CULL_ODD=1: odd frames only, so neighbouring frames show what goes.
+    static const bool odd = std::getenv("DCUSA_FAR_CULL_ODD") != nullptr;
+    if (odd && (g_frames_presented & 1) == 0) return false;
+    ++g_far_culled;
+    return true;
+}
+
 void draw_indexed(Cpu& c) {                                        // +0x30  0x6D0792
     g_mem_for_trace = c.mem;
     draw_stack_probe(c);
+    if (gpu::enabled() && far_culled(c, arg(c, 1))) {
+        ret_stdcall(c, kSOk, 16);
+        return;
+    }
     if (gpu::enabled()) {
         resolve_shaders();
         ++g_frame_draws;
