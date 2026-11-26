@@ -278,6 +278,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_FRAME=<prefix>` | Write frames as `<prefix>.<n>.ppm` (presents 1, 30, every `DCUSA_EVERY`). |
 | `DCUSA_FRAME_RANGE=<a>-<b>` | Write every present from a to b. |
 | `DCUSA_RACE_RANGE=<a>-<b>` | Write every present while the HUD's race timer reads a to b seconds (finds a phone run's slow moment in a Mac run). |
+| `DCUSA_METAL_TRACE_RACE=<s>[,...]` | The Metal draw list (as `DCUSA_METAL_TRACE`) of the frame after the race timer first passes each of those times. |
 | `DCUSA_READBACK=1` | Read every frame back from the GPU. |
 | `DCUSA_EXIT_AT=<n>` | Exit cleanly after n presents (an instrumented build writes its profile). |
 | `DCUSA_HITCH=<ms>` | One line for each frame slower than this, with where the time went. |

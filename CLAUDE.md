@@ -149,6 +149,14 @@ agreed to this).
       (memory misses; it already prefetches). Calling the interpreter's
       handlers straight from their table (0x11EC910) instead of through
       call_indirect gained nothing (57.9 and 57.4 against 59.5 and 57.8).
+      Nor did a deeper scene-walk prefetch (every line the clean check reads,
+      six objects ahead, sub-objects three ahead): 58.4 and 56.6 against 58.8
+      and 58.9. The user noticed the drops come a few seconds before the
+      finish line on Daytona and Three Seven (not Lakeside Castle) and stop at
+      the line: there the main pass has about 390 more draws (1,480 at race
+      0:45 against 1,058 at 0:58; `DCUSA_METAL_TRACE_RACE`), many small
+      objects around the pit lane and start/finish (shaders e7fb5c9b,
+      161ddc7e, 6849c2de): CPU per draw, not GPU.
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.

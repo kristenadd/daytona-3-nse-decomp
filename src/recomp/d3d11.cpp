@@ -2409,6 +2409,29 @@ void present(Cpu& c) {
             if (on) std::fprintf(stderr, "trace frame %d\n", next);
             gpu::set_trace(on);
         }
+        // DCUSA_METAL_TRACE_RACE=<s>[,<s>...]: the draw list of the frame after the
+        // race timer first passes each of those times (seconds as the HUD shows
+        // them), for a moment that drifts in present numbers between runs.
+        if (const char* list = std::getenv("DCUSA_METAL_TRACE_RACE")) {
+            static std::vector<double> at = [list] {
+                std::vector<double> v;
+                for (const char* p = list; *p;) {
+                    char* end = nullptr;
+                    v.push_back(std::strtod(p, &end));
+                    if (end == p) break;
+                    p = *end == ',' ? end + 1 : end;
+                }
+                return v;
+            }();
+            static double last = 0;
+            const double now_s = race_timer(c.mem) / 64.0;
+            bool on = false;
+            for (double t : at)
+                if (last < t && now_s >= t) on = true;
+            if (now_s > 0) last = now_s;
+            if (on) std::fprintf(stderr, "trace frame %d (race %.2f s)\n", presents + 1, now_s);
+            gpu::set_trace(on);
+        }
         // Reading the frame back waits for the GPU, so only the frames that are
         // written out or reported pay for it (DCUSA_READBACK=1: every frame).
         static const bool every_frame = std::getenv("DCUSA_READBACK") != nullptr;
