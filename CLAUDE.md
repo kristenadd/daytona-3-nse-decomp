@@ -203,7 +203,10 @@ agreed to this).
    rest (WSAECONNREFUSED), as on a lone cabinet; 2019 makes no other
    connect. TeknoParrot's patch does not touch this (its four code edits are
    input mapping, the frame gate 0x4DD697 and its shell window message
-   0x52958F). Not yet checked: a race, sound, movies, the window and pad.
+   0x52958F). A scripted race (`race_attract.txt`, headless, unpaced boot) runs: the race
+   timer (0x19B576C) counts 0'10 to 2'01, 600 to 1,500 draws a frame, no
+   fault, and no shader beyond 2019's set plus attract's. Not yet checked:
+   sound, movies, the window and pad.
    **One app with a game choice: done.** The translator puts each edition
    in its own namespace (`dcusa_e2019`, `dcusa_e2017`) with its table
    `translated_entries_<year>()`; `DCUSA_PREPARED_CACHE` (and
