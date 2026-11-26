@@ -192,10 +192,6 @@ void* run_game(void*) {
     const std::filesystem::path writable = docs / dcusa::container_name(choice.edition);
     std::filesystem::create_directories(writable, ec);
     dcusa::recomp::set_guest_files(install->install_root, install->game_dir.filename().string(), writable);
-    if (!install->base_root.empty()) {  // a slim install: its shared files come from the base
-        dcusa::recomp::set_guest_base(install->base_root, install->shared);
-        std::fprintf(stderr, "shared files from %s: %zu\n", install->base_root.c_str(), install->shared.size());
-    }
     if (!dcusa::gpu::enabled()) {
         say("No Metal device, or no translated shaders in the shaders folder.");
         return nullptr;

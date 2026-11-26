@@ -220,12 +220,10 @@ agreed to this).
    The picker is a carousel (`Carousel` in `platform/edition_choice`: a ring
    in perspective, cards facing the viewer, reflections on a dark floor);
    checked turning on the Mac (keys) and in the iPad Simulator (tap).
-   Slim 2017 install (`tools/overlay/make_overlay.py`): only the files that
-   differ from 2019 (4.09 of 5.39 GB), the rest read from the 2019 folder
-   through `set_guest_base`; booted to attract and played the demos on the
-   Mac (`build/slimlib`). The differing files are re-exported textures:
-   zstd `--patch-from` against 2019 halves them (sample: 48%), which would
-   take the slim folder to about 2.3 GB but needs decoding on every open.
+   A slim 2017 install (only the files that differ from 2019, the rest
+   read from the 2019 folder) was tried and dropped: it saved 1.3 of 5.4 GB
+   (the rest are re-exported textures), and the user did not want the cost
+   of deltas decoded at load time.
 
 ## Future work
 

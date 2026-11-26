@@ -6,7 +6,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace dcusa::recomp {
 
@@ -14,11 +13,6 @@ namespace dcusa::recomp {
 // `cwd_relative` is the starting directory inside it ("Daytona").
 // `writable` receives every create, write, and delete.
 void set_guest_files(std::filesystem::path readable, std::string cwd_relative, std::filesystem::path writable);
-// A slim install (system/content.hpp): the files in `shared` (paths relative
-// to `readable`, forward slashes, any case) are read from `base` instead,
-// another edition's install root. Other base files stay out of sight. Call
-// after set_guest_files, which clears it.
-void set_guest_base(std::filesystem::path base, const std::vector<std::string>& shared);
 void clear_guest_files();
 bool guest_files_ready();
 // "D:\\Daytona\\<exe>": the executable inside the starting directory. Just

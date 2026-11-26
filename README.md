@@ -371,20 +371,6 @@ ctest --preset mac-host
 
 ## Preparing the game files
 
-**Both editions in less space.** About 1.3 GB of the 2017 edition's 5.4 GB
-are the same files as the 2019 edition's. `tools/overlay/make_overlay.py`
-makes a slim copy of the 2017 folder holding only the files that differ (4.1
-GB), with `dcusa-overlay.txt` listing the ones it reads from the 2019 folder
-beside it:
-
-```bash
-tools/overlay/make_overlay.py --edition "<library>/Daytona Championship USA (2017-12-21)[Sega PC][TP]" --base "<library>/Daytona Championship USA New Season Edition (2019)[Sega PC][TP]" --base-id 2019 --out build/overlay
-```
-
-Put the slim folder in place of the full 2017 one, next to the full 2019
-folder (on an iPhone or iPad: copy those two into Documents). The install
-scan links the two; a slim folder without its base is reported, not used.
-
 ```bash
 build/mac-host/dcprepare "<folder>" [--edition 2017|2019|all] [--cache-dir <dir>]
 ```

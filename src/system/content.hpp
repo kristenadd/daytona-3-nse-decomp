@@ -3,13 +3,6 @@
 // folder itself (the one holding Daytona.exe), the edition's top folder
 // (2017: <top>/Daytona, 2019: <top>/Sega/Daytona) or a folder holding both
 // editions. The port only ever reads these folders.
-//
-// A slim install (tools/overlay/make_overlay.py) holds only the files of one
-// edition that differ from another edition's install, with the folder tree
-// and dcusa-overlay.txt in its root: "base <edition id>" and then the
-// relative paths (forward slashes) it shares with that base. The scan links
-// it to the base install found in the same search; the game then reads a
-// shared file from the base (recomp/host_files: set_guest_base).
 #include <filesystem>
 #include <span>
 #include <string>
@@ -25,16 +18,7 @@ struct GameInstall {
     std::filesystem::path game_dir;      // Daytona.exe, rom/, nrt/
     std::filesystem::path install_root;  // parent of game_dir: GameData/, ShellData/
     std::filesystem::path exe;           // the verified executable (may be Daytona.exe.original)
-    // A slim install: the base install's root and the paths shared with it
-    // (relative to install_root, forward slashes). Empty for a full install.
-    std::filesystem::path base_root;
-    std::vector<std::string> shared;
-    // A file of the install by relative path: in the install, else the base's copy.
-    std::filesystem::path resolve(const std::filesystem::path& relative) const;
 };
-
-// The file in a slim install's root that names its base and shared files.
-inline constexpr const char* kOverlayManifest = "dcusa-overlay.txt";
 
 struct InstallScan {
     std::vector<GameInstall> installs;   // at most one per edition, the first found

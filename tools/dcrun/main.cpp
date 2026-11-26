@@ -384,10 +384,6 @@ int main(int argc, char** argv) {
         for (const std::string& setting : shell_settings)
             if (!apply_shell_setting(install->install_root, writable, setting)) return 2;
         dcusa::recomp::set_guest_files(install->install_root, install->game_dir.filename().string(), writable);
-        if (!install->base_root.empty()) {  // a slim install: its shared files come from the base
-            dcusa::recomp::set_guest_base(install->base_root, install->shared);
-            std::fprintf(stderr, "shared files from %s: %zu\n", install->base_root.c_str(), install->shared.size());
-        }
         std::fprintf(stderr, "content %s\n", install->game_dir.string().c_str());
     }
     dcusa::recomp::set_pad_source(pad.get());

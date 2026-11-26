@@ -1,13 +1,9 @@
 // Installation discovery on made-up folder trees (no game files needed).
-#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <unistd.h>
 
-#include <fstream>
-
 #include "check.hpp"
-#include "recomp/host_files.hpp"
 #include "system/content.hpp"
 #include "system/files.hpp"
 
@@ -58,43 +54,6 @@ int main() {
     std::string error;
     CHECK(!verify_content(fake, &error));
     CHECK(error.find("missing folder rom/daytona_rom") != std::string::npos);
-
-    // A slim install: its shared files come from the base install, the base's
-    // other files stay out of sight, and folder listings show both.
-    {
-        auto write = [](const fs::path& p, const char* text) {
-            fs::create_directories(p.parent_path());
-            std::ofstream(p, std::ios::binary) << text;
-        };
-        const fs::path base = root / "slim" / "base", slim = root / "slim" / "own", out = root / "slim" / "out";
-        write(base / "Daytona" / "rom" / "Shared.bin", "shared");
-        write(base / "Daytona" / "rom" / "base_only.bin", "base");
-        write(slim / "Daytona" / "rom" / "own.bin", "own");
-        write(slim / "Daytona" / "rom" / "both.bin", "slim's");
-        write(base / "Daytona" / "rom" / "both.bin", "base's");
-        using namespace dcusa::recomp;
-        set_guest_files(slim, "Daytona", out);
-        GuestFileInfo info;
-        CHECK(guest_stat("rom\\shared.bin", &info) == 0 && !info.exists);  // no base yet
-        set_guest_base(base, {"Daytona/rom/shared.bin", "Daytona/rom/both.bin"});
-        CHECK(guest_stat("ROM\\SHARED.BIN", &info) == 0 && info.exists && info.size == 6);
-        CHECK(guest_stat("rom\\base_only.bin", &info) == 0 && !info.exists);
-        CHECK(guest_stat("rom\\both.bin", &info) == 0 && info.exists && info.size == 6);  // its own copy wins
-        GuestDirEntry e;
-        std::uint32_t h = 0;
-        std::vector<std::string> names;
-        if (guest_find_first("rom\\*.bin", &e, &h) == 0) {
-            names.push_back(e.name);
-            while (guest_find_next(h, &e) == 0) names.push_back(e.name);
-            guest_find_close(h);
-        }
-        std::sort(names.begin(), names.end());
-        CHECK((names == std::vector<std::string>{"Shared.bin", "both.bin", "own.bin"}));
-        GameInstall slim_install{Edition::Dcu2017, slim / "Daytona", slim, {}, base, {"Daytona/rom/Shared.bin"}};
-        CHECK(slim_install.resolve("Daytona/rom/own.bin") == slim / "Daytona/rom/own.bin");
-        CHECK(slim_install.resolve("Daytona/rom/Shared.bin") == base / "Daytona/rom/Shared.bin");
-        clear_guest_files();
-    }
 
     fs::remove_all(root);
     return check_result();
