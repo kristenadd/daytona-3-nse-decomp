@@ -28,8 +28,12 @@ Daytona Championship USA for the Steam Deck (Linux, x86_64, Vulkan)
    /run/media/deck/<card name>/.
 
 3. Try it in Desktop Mode first: double-click run.sh (or run ./run.sh in
-   Konsole). With both editions present the edition picker opens: left /
-   right on the stick or d-pad, A or Start to choose.
+   Konsole). The launcher opens first: the edition under the logo (left /
+   right when both are there), START, OPTIONS (free play, volumes and the
+   game's rules) and CONTROLS (the controller layout: A on an action, then
+   press the button or move the stick or trigger to use). D-pad or left
+   stick to move, A to select, B to go back; B on the title closes it.
+   Settings are saved when you leave a list.
 
 4. For Gaming Mode, add it to Steam (Desktop Mode):
 
@@ -47,7 +51,7 @@ Daytona Championship USA for the Steam Deck (Linux, x86_64, Vulkan)
    Leave its compatibility setting off: it is a native Linux program, not
    a Windows one.
 
-Controls (Steam Input's default gamepad layout):
+Controls (Steam Input's default gamepad layout; CONTROLS changes them):
    Left stick          steer
    R2 / L2             gas / brake
    R1 / L1             shift up / down
