@@ -156,6 +156,30 @@ gets the footprint every 10 s. Variables for a run go through devicectl with
 a `DEVICECTL_CHILD_` prefix; relative paths are in Documents, so
 `DEVICECTL_CHILD_DCUSA_FRAME=f DEVICECTL_CHILD_DCUSA_EVERY=500` saves frames there
 and `DEVICECTL_CHILD_DCUSA_PAD_SCRIPT=race.txt` plays a pad script.
+
+## Apple Vision Pro
+
+The same app builds for visionOS: a floating window that opens at 1280x720
+points and stays 16:9 as you resize it (drag its corner), with the game drawn
+flat in it (no stereo, no immersive space). A game controller drives it, as on
+iPhone and iPad (the launcher, then the game); a Bluetooth keyboard works in
+the launcher. Its files go in its Documents folder as on iOS.
+
+```bash
+cmake --preset visionos-sim "-DDCUSA_GENERATED_DIR=$PWD/build/x86tr/2019/gen;$PWD/build/x86tr/2017/gen"
+cmake --build --preset visionos-sim
+```
+
+On a headset (an Xcode project, signed for your team, as `ios-device`):
+
+```bash
+cmake --preset visionos-device -DDCUSA_IOS_TEAM=<team id> "-DDCUSA_GENERATED_DIR=$PWD/build/x86tr/2019/gen;$PWD/build/x86tr/2017/gen"
+xcodebuild -project build/visionos-device/DaytonaUSA.xcodeproj -target DaytonaUSA -configuration RelWithDebInfo -allowProvisioningUpdates
+xcrun devicectl device install app --device <udid> build/visionos-device/RelWithDebInfo-xros/DaytonaUSA.app
+```
+
+It has no app icon yet (visionOS icons are layered image stacks).
+
 ## Linux and the Steam Deck
 
 A native x86_64 Linux build: the same game code and host layer, with a Vulkan

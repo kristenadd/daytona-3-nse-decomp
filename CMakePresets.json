@@ -37,6 +37,31 @@
       }
     },
     {
+      "name": "visionos-sim",
+      "displayName": "Apple Vision Pro Simulator app (arm64)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/visionos-sim",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_SYSTEM_NAME": "visionOS",
+        "CMAKE_OSX_SYSROOT": "xrsimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "2.0"
+      }
+    },
+    {
+      "name": "visionos-device",
+      "displayName": "Apple Vision Pro app (arm64; pass -DDCUSA_IOS_TEAM=<team id>)",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/visionos-device",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "visionOS",
+        "CMAKE_OSX_SYSROOT": "xros",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "2.0"
+      }
+    },
+    {
       "name": "mac-sdl",
       "displayName": "macOS with SDL3 and Vulkan (MoltenVK): tests the Linux code paths",
       "generator": "Ninja",
@@ -70,6 +95,18 @@
     {
       "name": "ios-device",
       "configurePreset": "ios-device",
+      "configuration": "RelWithDebInfo",
+      "nativeToolOptions": [
+        "-allowProvisioningUpdates"
+      ]
+    },
+    {
+      "name": "visionos-sim",
+      "configurePreset": "visionos-sim"
+    },
+    {
+      "name": "visionos-device",
+      "configurePreset": "visionos-device",
       "configuration": "RelWithDebInfo",
       "nativeToolOptions": [
         "-allowProvisioningUpdates"

@@ -10,9 +10,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # iOS / iPadOS (the ios-sim preset): the same libraries and an app instead of
 # the Mac tools and tests (src/platform/ios).
+# visionOS (the visionos-sim / visionos-device presets) builds the same app,
+# shown in a floating 16:9 window.
 set(DCUSA_IOS OFF)
+set(DCUSA_VISIONOS OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(DCUSA_IOS ON)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "visionOS")
+    set(DCUSA_IOS ON)
+    set(DCUSA_VISIONOS ON)
 endif()
 
 if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
@@ -344,8 +350,13 @@ if(dcusa_editions)
                                     src/platform/macos/core_audio_output.mm src/platform/launcher/launcher_metal.mm
                                     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         set(DCUSA_IOS_BUNDLE_ID "local.dcusa.DaytonaUSA" CACHE STRING "bundle identifier of the iOS app")
+        if(DCUSA_VISIONOS)
+            set(dcusa_info_plist "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Info.vision.plist.in")
+        else()
+            set(dcusa_info_plist "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Info.plist.in")
+        endif()
         set_target_properties(DaytonaUSA PROPERTIES
-            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Info.plist.in"
+            MACOSX_BUNDLE_INFO_PLIST "${dcusa_info_plist}"
             MACOSX_BUNDLE_GUI_IDENTIFIER "${DCUSA_IOS_BUNDLE_ID}"
             MACOSX_BUNDLE_BUNDLE_NAME "DaytonaUSA"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
@@ -357,6 +368,8 @@ if(dcusa_editions)
         else()
             set(DCUSA_IOS_PLATFORM iphoneos)
         endif()
+        # (visionOS: no icon yet; its icons are layered image stacks.)
+        if(NOT DCUSA_VISIONOS)
         add_custom_command(TARGET DaytonaUSA POST_BUILD
             COMMAND xcrun actool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>"
                     --platform ${DCUSA_IOS_PLATFORM}
@@ -366,6 +379,7 @@ if(dcusa_editions)
                     --output-format human-readable-text --errors --warnings
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Assets.xcassets"
             COMMENT "Compiling the app icon")
+        endif()
         # The launch screen and the boot screen's title: the attract title made
         # from the player's game on the Mac (tools/bootscreen/capture_title.py),
         # never committed. Without it the launch screen is black and the boot
@@ -394,6 +408,12 @@ if(dcusa_editions)
                 COMMAND ${CMAKE_COMMAND} -E copy "${dcusa_boot_dir}/font.ttf" "$<TARGET_BUNDLE_DIR:DaytonaUSA>/boot_font.ttf"
                 COMMENT "Copying the boot screen font")
         endif()
+        if(DCUSA_VISIONOS)
+            add_custom_command(TARGET DaytonaUSA POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Settings.bundle"
+                        "$<TARGET_BUNDLE_DIR:DaytonaUSA>/Settings.bundle"
+                COMMENT "Copying Settings.bundle")
+        else()
         add_custom_command(TARGET DaytonaUSA POST_BUILD
             COMMAND xcrun ibtool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>/LaunchScreen.storyboardc"
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/LaunchScreen.storyboard"
@@ -401,6 +421,7 @@ if(dcusa_editions)
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Settings.bundle"
                     "$<TARGET_BUNDLE_DIR:DaytonaUSA>/Settings.bundle"
             COMMENT "Compiling the launch screen, copying Settings.bundle")
+        endif()
         target_link_libraries(DaytonaUSA PRIVATE dcusa_generated dcusa_system dcusa_launcher "-framework UIKit" "-framework GameController"
                                                  "-framework QuartzCore" "-framework AudioToolbox" "-framework AVFoundation"
                                                  "-framework Metal" "-framework Foundation")
@@ -409,6 +430,10 @@ if(dcusa_editions)
             # entitlements and fetches a profile for the team's devices
             # (cmake --build --preset ios-device passes -allowProvisioningUpdates).
             set(DCUSA_IOS_TEAM "" CACHE STRING "Apple development team ID for device builds")
+            set(dcusa_device_family "1,2")  # iPhone, iPad
+            if(DCUSA_VISIONOS)
+                set(dcusa_device_family "7")  # Apple Vision Pro
+            endif()
             if(NOT DCUSA_IOS_TEAM)
                 message(FATAL_ERROR "A device build needs -DDCUSA_IOS_TEAM=<team id>")
             endif()
@@ -418,7 +443,7 @@ if(dcusa_editions)
                 XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
                 XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
                 XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/DaytonaUSA.entitlements"
-                XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+                XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "${dcusa_device_family}")
         elseif(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
             add_custom_command(TARGET DaytonaUSA POST_BUILD
                 COMMAND codesign --force --sign - --timestamp=none "$<TARGET_BUNDLE_DIR:DaytonaUSA>"

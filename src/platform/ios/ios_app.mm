@@ -1,4 +1,5 @@
-// The game as an iOS / iPadOS app (iPhone and iPad).
+// The game as an iOS / iPadOS app (iPhone and iPad), and on Apple Vision Pro
+// in a floating 16:9 window (visionOS: the same app, flat, no stereo).
 //
 // UIKit owns the main thread, so the game runs on a thread of its own with a
 // large stack (translated code recurses deeply and keeps guest registers in
@@ -287,7 +288,8 @@ void start_game_thread() {
     [super viewDidLayoutSubviews];
     _message.frame = CGRectInset(self.view.bounds, 24, 24);
     CAMetalLayer* layer = (CAMetalLayer*)self.view.layer;
-    const CGFloat scale = self.view.window.windowScene.screen.nativeScale ?: 2.0;
+    // The display's pixels per point (also on visionOS, which has no UIScreen).
+    const CGFloat scale = self.view.traitCollection.displayScale > 0 ? self.view.traitCollection.displayScale : 2.0;
     layer.contentsScale = scale;
 }
 
@@ -442,6 +444,7 @@ int launcher_key(UIKey* key) {
     start_game_thread();
 }
 
+#if !TARGET_OS_VISION
 - (BOOL)prefersStatusBarHidden {
     return YES;
 }
@@ -453,6 +456,7 @@ int launcher_key(UIKey* key) {
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return UIInterfaceOrientationMaskLandscape;
 }
+#endif
 
 @end
 
@@ -463,9 +467,23 @@ int launcher_key(UIKey* key) {
 @implementation DCSceneDelegate
 - (void)scene:(UIScene*)scene willConnectToSession:(UISceneSession*)session options:(UISceneConnectionOptions*)options {
     if (![scene isKindOfClass:[UIWindowScene class]]) return;
-    self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene*)scene];
+    UIWindowScene* windowScene = (UIWindowScene*)scene;
+    self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
     self.window.rootViewController = [DCViewController new];
     [self.window makeKeyAndVisible];
+#if TARGET_OS_VISION
+    // Apple Vision Pro: a floating window, 16:9 (the game's 1280x720 in
+    // points to start), kept 16:9 as it is resized; flat, no stereo.
+    windowScene.sizeRestrictions.minimumSize = CGSizeMake(640, 360);
+    windowScene.sizeRestrictions.maximumSize = CGSizeMake(3840, 2160);
+    UIWindowSceneGeometryPreferencesVision* geometry =
+        [[UIWindowSceneGeometryPreferencesVision alloc] initWithSize:CGSizeMake(1280, 720)];
+    geometry.resizingRestrictions = UIWindowSceneResizingRestrictionsUniform;
+    [windowScene requestGeometryUpdateWithPreferences:geometry
+                                         errorHandler:^(NSError* error) {
+                                             NSLog(@"window geometry: %@", error);
+                                         }];
+#endif
 }
 @end
 
@@ -474,7 +492,9 @@ int launcher_key(UIKey* key) {
 
 @implementation DCAppDelegate
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)options {
+#if !TARGET_OS_VISION
     application.idleTimerDisabled = YES;  // a game the player drives with a pad
+#endif
     return YES;
 }
 

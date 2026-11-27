@@ -176,6 +176,15 @@ agreed to this).
       renders; PHASE3 "Memory"). The boot's 44 s loading screen on the phone
       (Future work, "Boot time, further").
 
+8b. **Apple Vision Pro.** The iOS app built for visionOS (presets
+   `visionos-sim`, `visionos-device`; `DCUSA_VISIONOS`, `Info.vision.plist.in`):
+   a floating window, 1280x720 points to start, resizing kept to 16:9
+   (`UIWindowSceneResizingRestrictionsUniform`), flat, controller-driven.
+   Checked in the Vision Pro Simulator: the window in the room, the
+   launcher, START into the game (CRIWARE, PRESS START, 43 FPS with BC
+   decoded in software). Not yet: resizing by hand, a headset (the extended
+   virtual addressing entitlement may not exist on visionOS), an app icon.
+
 9. **The 2017 edition** (one app with a game choice at start is the goal).
    Done: the translator's 2017 tables (`CRT_DISPATCH_TABLES`, `CRT_NATIVE`,
    `SITE_OVERRIDES[2017]`, every site checked by disassembly against 2019;
