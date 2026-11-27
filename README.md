@@ -33,12 +33,25 @@ build/mac-host/dcrun --content "<folder>" build/mac-host/prepared
 
 Given the cache folder, dcrun offers every edition it was built with
 (`DCUSA_PREPARED_CACHE`, below) whose cache (`DCUSA2019.cache`,
-`DCUSA2017.cache`) and game folder are there. With two, the window opens on
-the edition picker: the title images on a carousel that turns as you move
-(the cards always face you, the chosen one at the front), chosen with the pad
-(left / right, then Start, gas or A), the arrow keys and Return, or a click
-(on the front card: choose it; on another: turn to it); 2017 stands on the left, 2019 on the right, and it starts on 2019).
-`--edition 2017|2019` or `DCUSA_EDITION` skips it; a headless run takes 2019.
+`DCUSA2017.cache`) and game folder are there. The window opens on the
+launcher (`src/platform/launcher`, the same as daytona-shim's on Windows and
+the Steam Deck):
+
+- the title: the logo, the edition (left / right when both are there),
+  START, OPTIONS and CONTROLS;
+- OPTIONS: one list of free play, the volumes and the game's rules (the
+  edition's `ShellData.ini` and `GameSettings.ini`, in its container);
+- CONTROLS: the controller layout, by button position (the edition's
+  `controls.ini`, in its container); A on an action waits for the button,
+  stick or trigger to use.
+
+The pad drives it (d-pad or left stick, A / Cross to select, B / Circle to go
+back), or the keys (arrows, Return, Esc / Backspace). Its sounds and music
+are the game's own (`rom/sound/csb/SE.csb`, `rom/sound/adx/d1a_bgm01_sel.adx`,
+looped at the file's own loop points). B on the title closes it. The edition
+started last is shown first (`launcher.ini` beside the caches).
+`--edition 2017|2019`, `DCUSA_EDITION` or `DCUSA_LAUNCHER=0` skip it; a
+headless run takes 2019.
 A cache file instead of the folder runs that edition. Each edition keeps what
 the game writes in its own container folder beside the caches (`container`
 for 2019, `container-2017`).
@@ -107,9 +120,8 @@ The app reads its files from its Documents folder (reachable from the Files
 app, or Finder with the device connected): `DCUSA2019.cache` and / or
 `DCUSA2017.cache` and the `shaders` folder (all from the Mac's
 `build/mac-host/prepared`) and the game folders. With both editions there
-(and built in), the app opens on the edition picker (controller: left /
-right, then A, Menu or the right trigger; or a tap on the front card, while a
-tap on another turns the carousel to it);
+the app opens on the launcher (as on the Mac, above: the edition, START,
+OPTIONS, CONTROLS; a controller or a hardware keyboard drives it);
 `DEVICECTL_CHILD_DCUSA_EDITION=2017` skips it. The game writes to
 `Documents/container` (2019) or `Documents/container-2017`. Shaders cannot be translated on the device, so the shaders folder must
 already hold every shader the game uses. In the Simulator, put them in place
@@ -148,7 +160,7 @@ and `DEVICECTL_CHILD_DCUSA_PAD_SCRIPT=race.txt` plays a pad script.
 
 A native x86_64 Linux build: the same game code and host layer, with a Vulkan
 renderer (`src/gpu/vulkan.cpp`, in place of Metal) and SDL3 for the window,
-the controller, the sound and the edition picker (`src/platform/sdl`). It is
+the controller, the sound and the launcher (`src/platform/sdl`). It is
 cross-compiled on the Mac against Valve's Steam Runtime 3 ("sniper") SDK, so
 it runs on SteamOS as it is:
 
@@ -279,6 +291,24 @@ The shell's menu (`shell/GameTest.ini`, `GameAdvancedTest.ini`) also lists
 GameSettings.ini; `--shell-setting GameSettings...` then writes a file with
 only the keys given, and whether that edition reads one is not checked.
 
+### controls.ini (the controller layout, per edition)
+
+The launcher's CONTROLS writes `controls.ini` in the edition's container
+(`container/controls.ini`, `container-2017/controls.ini`); the game reads it
+when it starts (`runtime/pad_mapping`). One key per action in `[Pad]`:
+`Steering`, `Gas`, `Brake`, `Start`, `Coin`, `ShiftUp`, `ShiftDown`,
+`View1`-`View4`, `Gear1`-`Gear4`. Values are positions: `a` (bottom), `b`
+(right), `x` (left), `y` (top), `back`, `start`, `leftshoulder`,
+`rightshoulder`, `leftstick`, `rightstick`, `dpup`, `dpdown`, `dpleft`,
+`dpright`, `misc1`, `paddle1`-`paddle4`, `touchpad`; axes `leftx`, `lefty`,
+`rightx`, `righty`, `lefttrigger`, `righttrigger`; `none`. Without the file
+(or a key), the default layout: Steering `leftx`, Gas `righttrigger`, Brake
+`lefttrigger`, Start `start`, Coin `back`, ShiftUp `rightshoulder`,
+ShiftDown `leftshoulder`, View1-4 `y` / `x` / `b` / `a`, gears none.
+
+`launcher.ini` beside the caches (`[Launcher] Edition=2017|2019`) is the
+edition started last, shown first.
+
 ### iOS Settings app
 
 "Title boot screen" (on by default) shows the boot screen (`DCUSA_BOOT_SCREEN`).
@@ -295,8 +325,9 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_FULLSCREEN=0\|1` | SDL builds (Linux, Steam Deck): start full screen. Default on a Steam Deck (and set by its `run.sh`), off elsewhere; F11 or Alt+Return toggles it. |
 | `DCUSA_VSYNC=0` | Vulkan: present without waiting for the display (mailbox or immediate). Default: vsync. |
 | `DCUSA_GAMES=<folder>` | The Steam Deck package's `run.sh`: the folder holding the game folders (default its `games` folder). |
-| `DCUSA_EDITION=2017\|2019` | Run that edition without the edition picker (dcrun's `--edition`; on iOS through devicectl). Unset: the picker when two are offered, else the one there is. |
-| `DCUSA_TITLE_DIR=<folder>` | Where the editions' title images (`title.png`, `title2017.png`) are looked for first, for the picker and the boot screen (default `<cache folder>/boot`; the Mac app sets its own). |
+| `DCUSA_EDITION=2017\|2019` | Run that edition without the launcher (dcrun's `--edition`; on iOS through devicectl). Unset: the launcher. |
+| `DCUSA_LAUNCHER=0` | dcrun: skip the launcher and run the first edition offered (2019 when it is there). Default: the launcher in a window. |
+| `DCUSA_TITLE_DIR=<folder>` | Where the editions' title images (`title.png`, `title2017.png`) are looked for first, for the boot screen (default `<cache folder>/boot`; the Mac app sets its own). |
 | `DCUSA_PAD=0` | Ignore game controllers. |
 | `DCUSA_PAD_SCRIPT=<file>` | Play a pad script instead of a controller (`src/runtime/pad_script.hpp`; on iOS a file in Documents). Its frames count presents. |
 | `DCUSA_PAD_SCRIPT_FROM=attract` | Frame 1 of the script is the first present of attract, so one script fits both a paced and an unpaced boot. |
@@ -341,6 +372,10 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 
 | Variable | Effect |
 | --- | --- |
+| `DCUSA_LAUNCHER_SHOT=<file>` | The launcher keeps writing its latest frame there (every 20 frames): a PNG on Mac and iOS, a BMP with SDL. |
+| `DCUSA_LAUNCHER_SCREEN=options\|controls` | The launcher opens on that list. |
+| `DCUSA_LAUNCHER_PROMPTS=ps\|xbox\|nintendo\|keys` | The launcher's button prompts for that pad, whatever is connected. |
+| `DCUSA_LAUNCHER_START=1` | The launcher presses START by itself after a second (the hand-over to the game, unattended). |
 | `DCUSA_STATS=1` | Draw, texture and frame-time reports at presents 1, 30 and every `DCUSA_EVERY`; also host API logging (Vulkan: passes, barriers and resolves per frame, every 1000 frames). |
 | `DCUSA_EVERY=<n>` | Report (and with `DCUSA_FRAME`, write) every nth present. |
 | `DCUSA_FRAME=<prefix>` | Write frames as `<prefix>.<n>.ppm` (presents 1, 30, every `DCUSA_EVERY`). |

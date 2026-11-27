@@ -9,8 +9,8 @@
 // and Finder can reach (UIFileSharingEnabled): the prepared caches built on a
 // Mac by dcprepare (DCUSA2019.cache, DCUSA2017.cache), the translated shaders
 // (shaders/msl, shaders/src) and the game install folders as found on the PC.
-// With both editions there, the app first shows their title images to choose
-// from (controller or tap). Settings the game writes go to Documents/container
+// The app first shows the launcher (platform/launcher: the edition, START,
+// OPTIONS, CONTROLS), driven by a controller or a hardware keyboard. Settings the game writes go to Documents/container
 // (2019) or Documents/container-2017. Shaders cannot be translated on the
 // device (no Python, no processes), so the shaders folder must hold every one
 // the game uses.
@@ -31,12 +31,16 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "audio/ds_mixer.hpp"
+#include "platform/launcher/launcher.hpp"
+#include "platform/launcher/launcher_metal.hpp"
+#include "runtime/pad_mapping.hpp"
 #include "gpu/metal.hpp"
 #include "platform/edition_choice.hpp"
 #include "platform/macos/core_audio_output.hpp"
@@ -150,6 +154,8 @@ void* run_game(void*) {
     }
     const dcusa::EditionChoice choice = *g.choice;
     const std::filesystem::path cache = choice.cache;
+    // The edition's controller layout (the launcher's CONTROLS).
+    dcusa::set_pad_bindings(dcusa::launcher::edition_pad_bindings(docs / dcusa::container_name(choice.edition)));
     setenv("DCUSA_METAL", "1", 0);
     setenv("DCUSA_SHADERS", shaders.c_str(), 0);
     // The boot screen (the Settings app's "Title boot screen", on unless turned
@@ -250,17 +256,18 @@ void start_game_thread() {
 @implementation DCViewController {
     UILabel* _message;
     BOOL _started;
-    // The edition picker, while it is up.
+    // The launcher, while it is up.
     std::vector<dcusa::EditionChoice> _choices;
-    std::unique_ptr<dcusa::PickerInput> _input;
-    std::unique_ptr<dcusa::Carousel> _carousel;
-    UIView* _picker;
-    CAGradientLayer* _floor;
-    NSMutableArray<UIImageView*>* _images;
-    NSMutableArray<UIImageView*>* _mirrors;
-    NSMutableArray<UIView*>* _dims;
-    NSMutableArray<UILabel*>* _titles;
+    std::vector<dcusa::launcher::LauncherEdition> _editions;
+    std::unique_ptr<dcusa::launcher::Launcher> _launcher;
+    std::unique_ptr<dcusa::launcher::MetalLauncherRenderer> _renderer;
+    std::unique_ptr<dcusa::PadSource> _pad;
+    std::unique_ptr<dcusa::AudioOutput> _audio;
     CADisplayLink* _poll;
+    BOOL _ticking;
+    // A hardware keyboard: the key held and when it repeats.
+    int _key;
+    double _key_next;
 }
 
 - (void)loadView {
@@ -279,7 +286,6 @@ void start_game_thread() {
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     _message.frame = CGRectInset(self.view.bounds, 24, 24);
-    [self layoutPicker];
     CAMetalLayer* layer = (CAMetalLayer*)self.view.layer;
     const CGFloat scale = self.view.window.windowScene.screen.nativeScale ?: 2.0;
     layer.contentsScale = scale;
@@ -299,8 +305,8 @@ void start_game_thread() {
         label.hidden = NO;
     };
     _choices = find_choices(g.documents, &g.no_choice);
-    if (_choices.size() > 1 && !std::getenv("DCUSA_EDITION")) {
-        [self showPicker];
+    if (!_choices.empty() && !std::getenv("DCUSA_EDITION")) {
+        [self showLauncher];
         return;
     }
     // One edition, or DCUSA_EDITION (devicectl --environment-variables) picks it.
@@ -313,141 +319,126 @@ void start_game_thread() {
     start_game_thread();
 }
 
-// The editions' title images on a carousel (dcusa::Carousel: a ring seen in
-// perspective, the cards always facing the viewer), each with a reflection
-// on a dark floor; the front card framed, its name below.
-- (void)showPicker {
-    // Oldest first, left to right (2017, 2019), starting on 2019.
-    const int start = dcusa::arrange_for_picker(_choices);
-    _input = std::make_unique<dcusa::PickerInput>(static_cast<int>(_choices.size()), start);
-    _carousel = std::make_unique<dcusa::Carousel>(static_cast<int>(_choices.size()), start);
-    _picker = [UIView new];
-    _picker.backgroundColor = UIColor.blackColor;
-    [_picker addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped:)]];
-    _floor = [CAGradientLayer layer];
-    _floor.colors = @[ (id)UIColor.blackColor.CGColor, (id)[UIColor colorWithWhite:0.10 alpha:1].CGColor ];
-    [_picker.layer addSublayer:_floor];
-    _images = [NSMutableArray array];
-    _mirrors = [NSMutableArray array];
-    _dims = [NSMutableArray array];
-    _titles = [NSMutableArray array];
-    for (std::size_t i = 0; i < _choices.size(); ++i) {
-        UIImage* picture = _choices[i].image.empty() ? nil : [UIImage imageWithContentsOfFile:@(_choices[i].image.c_str())];
-        UIImageView* image = [[UIImageView alloc] initWithImage:picture];
-        image.contentMode = UIViewContentModeScaleToFill;
-        image.backgroundColor = [UIColor colorWithWhite:0.25 alpha:1];
-        image.layer.borderColor = UIColor.whiteColor.CGColor;
-        UIView* dim = [UIView new];  // farther round the ring: darker
-        dim.backgroundColor = UIColor.blackColor;
-        [image addSubview:dim];
-        // The reflection: upside down, fading out over half its height.
-        UIImageView* mirror = [[UIImageView alloc] initWithImage:picture];
-        mirror.contentMode = UIViewContentModeScaleToFill;
-        mirror.transform = CGAffineTransformMakeScale(1, -1);
-        CAGradientLayer* fade = [CAGradientLayer layer];
-        fade.colors = @[ (id)[UIColor colorWithWhite:0 alpha:0].CGColor, (id)[UIColor colorWithWhite:0 alpha:0.3].CGColor ];
-        fade.locations = @[ @0.5, @1.0 ];  // flipped: the card's foot is at the bottom of this layer
-        mirror.layer.mask = fade;
-        UILabel* title = [UILabel new];
-        title.text = @(_choices[i].title.c_str());
-        title.textColor = UIColor.whiteColor;
-        title.textAlignment = NSTextAlignmentCenter;
-        [_picker addSubview:mirror];
-        [_picker addSubview:image];
-        [_picker addSubview:title];
-        [_images addObject:image];
-        [_mirrors addObject:mirror];
-        [_dims addObject:dim];
-        [_titles addObject:title];
+// The launcher, drawn into the view's Metal layer each frame until START.
+- (void)showLauncher {
+    Game& g = game();
+    int start = 0;
+    _editions = dcusa::launcher::launcher_editions(_choices, g.documents, g.documents, &start);
+    _renderer = std::make_unique<dcusa::launcher::MetalLauncherRenderer>((__bridge void*)self.view.layer);
+    int w = 0, h = 0;
+    _renderer->drawable_size(w, h);
+    _launcher = std::make_unique<dcusa::launcher::Launcher>();
+    if (!_launcher->init(_editions, start, w, h, false)) {  // no quitting an iOS app
+        _launcher.reset();
+        start_game_thread();
+        return;
     }
-    [self.view addSubview:_picker];
-    [self layoutPicker];
-    _poll = [CADisplayLink displayLinkWithTarget:self selector:@selector(pollPad:)];
+    _audio = dcusa::make_core_audio_output();
+    const auto pull = [](void* user, std::span<float> out) {
+        static_cast<dcusa::launcher::Launcher*>(user)->mix(out.data(), out.size() / 2);
+    };
+    if (_audio && !_audio->start(dcusa::launcher::Launcher::kRate, pull, _launcher.get())) _audio.reset();
+    _pad = dcusa::make_gamecontroller_pad();
+    _key = -1;
+    [self becomeFirstResponder];
+    _poll = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
     [_poll addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 
-// Every card where the carousel puts it now, back to front.
-- (void)layoutPicker {
-    if (_picker == nil) return;
-    const CGRect b = self.view.bounds;
-    const float vw = static_cast<float>(b.size.width), vh = static_cast<float>(b.size.height);
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    _picker.frame = b;
-    const dcusa::CarouselCard front = _carousel->card(_input->selected(), vw, vh);
-    const CGFloat floor_y = front.cy + front.h / 2 - vh * 0.25;
-    _floor.frame = CGRectMake(0, floor_y, vw, vh - floor_y);
-    const CGFloat text = MAX(14.0, b.size.width * 0.024);
-    CGFloat z = 0;
-    for (int i : _carousel->draw_order(vw, vh)) {
-        const dcusa::CarouselCard k = _carousel->card(i, vw, vh);
-        const CGRect r = CGRectMake(k.cx - k.w / 2, k.cy - k.h / 2, k.w, k.h);
-        UIImageView* image = _images[static_cast<NSUInteger>(i)];
-        UIImageView* mirror = _mirrors[static_cast<NSUInteger>(i)];
-        image.frame = r;
-        image.layer.zPosition = z + 2;
-        image.layer.borderWidth = 4 * k.title_alpha;
-        _dims[static_cast<NSUInteger>(i)].frame = image.bounds;
-        _dims[static_cast<NSUInteger>(i)].alpha = 1 - k.brightness;
-        mirror.bounds = CGRectMake(0, 0, r.size.width, r.size.height);
-        mirror.center = CGPointMake(CGRectGetMidX(r), CGRectGetMaxY(r) + 3 + r.size.height / 2);
-        mirror.layer.mask.frame = mirror.bounds;
-        mirror.alpha = k.brightness;
-        mirror.layer.zPosition = z + 1;
-        UILabel* title = _titles[static_cast<NSUInteger>(i)];
-        title.font = [UIFont boldSystemFontOfSize:text];
-        title.frame = CGRectMake(0, vh * 0.88, vw, text * 1.6);
-        title.alpha = k.title_alpha;
-        title.layer.zPosition = 100;
-        z += 3;
-    }
-    [CATransaction commit];
+// A hardware keyboard (iPad Magic Keyboard, Bluetooth; the Simulator's):
+// arrows, Return / Enter / Space, Esc / Backspace; the arrows repeat while held.
+namespace {
+struct LauncherKey {
+    UIKeyboardHIDUsage usage;
+    dcusa::launcher::Action action;
+    bool repeats;
+};
+const LauncherKey kLauncherKeys[] = {
+    {UIKeyboardHIDUsageKeyboardUpArrow, dcusa::launcher::Action::Up, true},
+    {UIKeyboardHIDUsageKeyboardDownArrow, dcusa::launcher::Action::Down, true},
+    {UIKeyboardHIDUsageKeyboardLeftArrow, dcusa::launcher::Action::Left, true},
+    {UIKeyboardHIDUsageKeyboardRightArrow, dcusa::launcher::Action::Right, true},
+    {UIKeyboardHIDUsageKeyboardReturnOrEnter, dcusa::launcher::Action::Confirm, false},
+    {UIKeyboardHIDUsageKeypadEnter, dcusa::launcher::Action::Confirm, false},
+    {UIKeyboardHIDUsageKeyboardSpacebar, dcusa::launcher::Action::Confirm, false},
+    {UIKeyboardHIDUsageKeyboardEscape, dcusa::launcher::Action::Back, false},
+    {UIKeyboardHIDUsageKeyboardDeleteOrBackspace, dcusa::launcher::Action::Back, false},
+};
+int launcher_key(UIKey* key) {
+    if (key == nil) return -1;
+    for (int i = 0; i < static_cast<int>(std::size(kLauncherKeys)); ++i)
+        if (kLauncherKeys[i].usage == key.keyCode) return i;
+    return -1;
+}
+}  // namespace
+
+- (BOOL)canBecomeFirstResponder {
+    return YES;
 }
 
-// A tap on the front card chooses it; on another, turns the ring to it.
-- (void)tapped:(UITapGestureRecognizer*)tap {
-    const CGPoint p = [tap locationInView:_picker];
-    const CGRect b = _picker.bounds;
-    const int i = _carousel->hit(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(b.size.width),
-                                 static_cast<float>(b.size.height));
-    if (i < 0) return;
-    if (i == _input->selected()) [self choose:i];
-    else _input->select(i);
-}
-
-// Every frame: the controller (left / right on the d-pad or stick, then A,
-// Menu or the right trigger) and the ring's turn.
-- (void)pollPad:(CADisplayLink*)link {
-    GCExtendedGamepad* pad = GCController.current.extendedGamepad;
-    if (pad == nil) {
-        for (GCController* c in GCController.controllers)
-            if (c.extendedGamepad != nil) {
-                pad = c.extendedGamepad;
-                break;
-            }
-    }
-    if (pad != nil) {
-        const float x = std::fabs(pad.dpad.xAxis.value) > std::fabs(pad.leftThumbstick.xAxis.value)
-                            ? pad.dpad.xAxis.value
-                            : pad.leftThumbstick.xAxis.value;
-        const bool confirm = pad.buttonA.pressed || pad.buttonMenu.pressed || pad.rightTrigger.value > 0.5f;
-        if (_input->pad(x, confirm)) {
-            [self choose:_input->selected()];
-            return;
+- (void)pressesBegan:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event {
+    bool used = false;
+    if (_launcher != nullptr)
+        for (UIPress* press in presses) {
+            const int i = launcher_key(press.key);
+            if (i < 0) continue;
+            _key = i;
+            _key_next = CACurrentMediaTime() + 0.38;
+            _launcher->key(kLauncherKeys[i].action);
+            used = true;
         }
-    }
-    _carousel->select(_input->selected());
-    if (_carousel->step(link.targetTimestamp - link.timestamp)) [self layoutPicker];
+    if (!used) [super pressesBegan:presses withEvent:event];
 }
 
-- (void)choose:(int)index {
-    if (_picker == nil || index < 0 || index >= static_cast<int>(_choices.size())) return;
+- (void)pressesEnded:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event {
+    for (UIPress* press in presses)
+        if (launcher_key(press.key) == _key) _key = -1;
+    [super pressesEnded:presses withEvent:event];
+}
+
+- (void)pressesCancelled:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event {
+    _key = -1;
+    [super pressesCancelled:presses withEvent:event];
+}
+
+// A held arrow repeats.
+- (void)keys {
+    if (_key < 0 || !kLauncherKeys[_key].repeats) return;
+    const double now = CACurrentMediaTime();
+    if (now < _key_next) return;
+    _key_next = now + 0.11;
+    _launcher->key(kLauncherKeys[_key].action);
+}
+
+- (void)tick:(CADisplayLink*)link {
+    (void)link;
+    if (_launcher == nullptr || _ticking) return;
+    _ticking = YES;  // reading the controller runs the run loop, which may call back here
+    if (auto* gamepad = dynamic_cast<dcusa::GamepadSource*>(_pad.get())) _launcher->pad(gamepad->read());
+    [self keys];
+    int w = 0, h = 0;
+    _renderer->drawable_size(w, h);
+    _launcher->resize(w, h);
+    _renderer->draw(*_launcher, _launcher->frame());
+    _ticking = NO;
+    if (_launcher->result() == dcusa::launcher::Launcher::Result::Start) [self startChosen];
+}
+
+- (void)startChosen {
     [_poll invalidate];
     _poll = nil;
-    [_picker removeFromSuperview];
-    _picker = nil;
-    game().choice = _choices[static_cast<std::size_t>(index)];
-    std::fprintf(stderr, "ios: edition %s chosen\n", dcusa::edition_info(_choices[static_cast<std::size_t>(index)].edition).id.data());
+    if (_audio) _audio->stop();
+    _audio.reset();
+    const dcusa::launcher::LauncherEdition* chosen = _launcher->edition(_launcher->chosen());
+    if (chosen == nullptr) return;
+    const dcusa::EditionChoice choice = chosen->choice;  // the launcher goes next
+    _launcher.reset();
+    _renderer.reset();
+    _pad.reset();
+    Game& g = game();
+    dcusa::launcher::remember_edition(g.documents, choice.edition);
+    g.choice = choice;
+    std::fprintf(stderr, "ios: edition %s chosen\n", dcusa::edition_info(choice.edition).id.data());
     start_game_thread();
 }
 

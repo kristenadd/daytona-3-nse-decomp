@@ -5,9 +5,9 @@
 //  - The game window: an SDL window with a Vulkan surface (gpu::set_layer
 //    takes the SDL_Window*). Full screen with DCUSA_FULLSCREEN=1 or on a
 //    Steam Deck; F11 or Alt+Return toggles it; closing it or Ctrl+Q ends the run.
-//  - The edition picker: the title images on the carousel (platform/
-//    edition_choice), in a window of its own that closes before the game's
-//    opens (an SDL renderer and the game's Vulkan surface never share one).
+//  - The launcher (platform/launcher): drawn with an SDL renderer in a
+//    window of its own that closes before the game's opens (an SDL renderer
+//    and the game's Vulkan surface never share one).
 //  - The controller: the first SDL gamepad (a Steam Deck's own controls
 //    included), mapped with runtime/pad_mapping.
 //  - The sound: the default playback device, float stereo.

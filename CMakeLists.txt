@@ -63,10 +63,30 @@ add_library(dcusa_system STATIC
     src/system/exe_manifest.cpp
     src/system/exe_image.cpp
     src/system/content.cpp
-    src/system/files.cpp)
+    src/system/files.cpp
+    src/system/shell_settings.cpp)
 target_include_directories(dcusa_system PUBLIC src)
 target_link_libraries(dcusa_system PUBLIC ZLIB::ZLIB)
 dcusa_warnings(dcusa_system)
+
+# ---- launcher: the title, OPTIONS and CONTROLS screens shown before the game ----
+# Platform-free (src/platform/launcher): the platforms draw its triangles with
+# SDL or Metal and play its sound. Fonts and logo are compiled in.
+set(dcusa_launcher_assets "${CMAKE_CURRENT_BINARY_DIR}/launcher_assets.cpp")
+add_custom_command(OUTPUT "${dcusa_launcher_assets}"
+    COMMAND ${CMAKE_COMMAND}
+            "-DIN_FILES=title_font=${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/RussoOne-Regular.ttf\;body_font=${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/TitilliumWeb-Bold.ttf\;logo=${CMAKE_CURRENT_SOURCE_DIR}/src/platform/launcher/logo.png"
+            "-DOUT=${dcusa_launcher_assets}" -P "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/launcher/embed.cmake"
+    DEPENDS third_party/fonts/RussoOne-Regular.ttf third_party/fonts/TitilliumWeb-Bold.ttf
+            src/platform/launcher/logo.png src/platform/launcher/embed.cmake
+    COMMENT "Embedding the launcher's fonts and logo")
+add_library(dcusa_launcher STATIC
+    src/platform/launcher/launcher.cpp
+    src/platform/launcher/sound_bank.cpp
+    "${dcusa_launcher_assets}")
+target_include_directories(dcusa_launcher PUBLIC src)
+target_link_libraries(dcusa_launcher PUBLIC dcusa_system dcusa_runtime)
+target_compile_options(dcusa_launcher PRIVATE -Wall -Wextra)
 
 # ---- runtime: fail-closed reporting and the platform contract ----
 add_library(dcusa_runtime STATIC
@@ -295,7 +315,7 @@ if(dcusa_editions)
 
     if(NOT DCUSA_IOS AND DCUSA_PLATFORM STREQUAL "sdl")
         add_executable(dcrun tools/dcrun/main.cpp src/platform/sdl/sdl_platform.cpp src/platform/edition_choice.cpp)
-        target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system SDL3::SDL3)
+        target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system dcusa_launcher SDL3::SDL3)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             # Libraries packaged beside the binary (tools/linux/package.sh) are found there.
             set_target_properties(dcrun PROPERTIES BUILD_RPATH "$ORIGIN/lib" INSTALL_RPATH "$ORIGIN/lib")
@@ -305,20 +325,24 @@ if(dcusa_editions)
     elseif(NOT DCUSA_IOS)
         add_executable(dcrun tools/dcrun/main.cpp src/platform/macos/gamecontroller_pad.mm
                              src/platform/macos/game_window.mm src/platform/macos/core_audio_output.mm
-                             src/platform/edition_choice.cpp)
+                             src/platform/launcher/launcher_metal.mm src/platform/edition_choice.cpp)
         set_source_files_properties(src/platform/macos/gamecontroller_pad.mm src/platform/macos/game_window.mm
-                                    src/platform/macos/core_audio_output.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-        target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system "-framework GameController" "-framework AppKit"
-                                            "-framework QuartzCore" "-framework AudioToolbox")
+                                    src/platform/macos/core_audio_output.mm src/platform/launcher/launcher_metal.mm
+                                    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(dcrun PRIVATE dcusa_generated dcusa_system dcusa_launcher "-framework GameController"
+                                            "-framework AppKit" "-framework QuartzCore" "-framework AudioToolbox"
+                                            "-framework Metal")
         dcusa_warnings(dcrun)
     else()
         # The iPhone / iPad app. Simulator builds are signed ad hoc after linking;
         # a device build needs a development team (DCUSA_IOS_TEAM) and the
         # extended virtual addressing entitlement (the 4 GB guest space).
         add_executable(DaytonaUSA MACOSX_BUNDLE src/platform/ios/ios_app.mm src/platform/macos/gamecontroller_pad.mm
-                                                src/platform/macos/core_audio_output.mm src/platform/edition_choice.cpp)
+                                                src/platform/macos/core_audio_output.mm
+                                                src/platform/launcher/launcher_metal.mm src/platform/edition_choice.cpp)
         set_source_files_properties(src/platform/ios/ios_app.mm src/platform/macos/gamecontroller_pad.mm
-                                    src/platform/macos/core_audio_output.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+                                    src/platform/macos/core_audio_output.mm src/platform/launcher/launcher_metal.mm
+                                    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         set(DCUSA_IOS_BUNDLE_ID "local.dcusa.DaytonaUSA" CACHE STRING "bundle identifier of the iOS app")
         set_target_properties(DaytonaUSA PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Info.plist.in"
@@ -377,7 +401,7 @@ if(dcusa_editions)
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Settings.bundle"
                     "$<TARGET_BUNDLE_DIR:DaytonaUSA>/Settings.bundle"
             COMMENT "Compiling the launch screen, copying Settings.bundle")
-        target_link_libraries(DaytonaUSA PRIVATE dcusa_generated dcusa_system "-framework UIKit" "-framework GameController"
+        target_link_libraries(DaytonaUSA PRIVATE dcusa_generated dcusa_system dcusa_launcher "-framework UIKit" "-framework GameController"
                                                  "-framework QuartzCore" "-framework AudioToolbox" "-framework AVFoundation"
                                                  "-framework Metal" "-framework Foundation")
         if(CMAKE_GENERATOR STREQUAL "Xcode" AND NOT CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")

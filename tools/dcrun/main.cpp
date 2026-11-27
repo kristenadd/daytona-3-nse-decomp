@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -42,6 +43,9 @@
 #include "runtime/pad_script.hpp"
 #include "runtime/fail_closed.hpp"
 #include "system/content.hpp"
+#include "system/shell_settings.hpp"
+#include "platform/launcher/launcher.hpp"
+#include "runtime/pad_mapping.hpp"
 #include "system/edition.hpp"
 #include "system/exe_image.hpp"
 
@@ -152,56 +156,9 @@ bool apply_shell_setting(const std::filesystem::path& install_root, const std::f
     }
     const std::string section = setting.substr(0, dot), key = setting.substr(dot + 1, eq - dot - 1),
                       value = setting.substr(eq + 1);
-    const char* const file = section == "GameSettings" ? "GameSettings.ini" : "ShellData.ini";
-    const std::filesystem::path copy = writable / "ShellData" / file;
-    std::error_code ec;
-    if (!std::filesystem::exists(copy)) {
-        std::filesystem::create_directories(copy.parent_path(), ec);
-        std::filesystem::copy_file(install_root / "ShellData" / file, copy, ec);
-    }
-    std::ifstream in(copy);
-    std::vector<std::string> lines;
-    for (std::string l; std::getline(in, l);) {
-        if (!l.empty() && l.back() == '\r') l.pop_back();
-        lines.push_back(l);
-    }
-    in.close();
-    // Replace the key in its section, or add it (and the section) at the end.
-    bool in_section = false, done = false;
-    std::size_t section_end = lines.size();
-    for (std::size_t i = 0; i < lines.size() && !done; ++i) {
-        const std::string& l = lines[i];
-        if (!l.empty() && l.front() == '[') {
-            if (in_section) section_end = i;
-            in_section = l == "[" + section + "]";
-            if (in_section) section_end = lines.size();
-            continue;
-        }
-        if (in_section && l.compare(0, key.size() + 1, key + "=") == 0) {
-            lines[i] = key + "=" + value;
-            done = true;
-        }
-    }
-    if (!done) {
-        bool have = false;
-        for (std::size_t i = 0; i < lines.size(); ++i)
-            if (lines[i] == "[" + section + "]") {
-                have = true;
-                std::size_t at = i + 1;
-                while (at < lines.size() && (lines[at].empty() || lines[at].front() != '[')) ++at;
-                lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(at), key + "=" + value);
-                break;
-            }
-        if (!have) {
-            lines.push_back("[" + section + "]");
-            lines.push_back(key + "=" + value);
-        }
-    }
-    (void)section_end;
-    std::ofstream out(copy, std::ios::binary);
-    for (const std::string& l : lines) out << l << "\r\n";
-    std::fprintf(stderr, "shell setting %s [%s] %s=%s\n", file, section.c_str(), key.c_str(), value.c_str());
-    return static_cast<bool>(out);
+    const bool ok = dcusa::set_shell_setting(install_root, writable, section, key, value);
+    std::fprintf(stderr, "shell setting [%s] %s=%s\n", section.c_str(), key.c_str(), value.c_str());
+    return ok;
 }
 
 void usage() {
@@ -210,7 +167,8 @@ void usage() {
                  "             [--shell-setting Section.Key=Value ...] <prepared cache or cache folder>\n"
                  "  Opens a window and plays; --headless (or DCUSA_WINDOW=0) runs offscreen.\n"
                  "  Given the cache folder (DCUSA2019.cache, DCUSA2017.cache), a window first\n"
-                 "  shows the editions to choose from; --edition or DCUSA_EDITION picks one.\n"
+                 "  shows the launcher (edition, START, OPTIONS, CONTROLS); --edition or\n"
+                 "  DCUSA_EDITION picks one and skips it, as does DCUSA_LAUNCHER=0.\n"
                  "  --shell-setting changes the operator settings in ShellData.ini, for example\n"
                  "  Credit.Freeplay=0 (coins) or 1 (free play), Audio.MusicVolume=80, and the\n"
                  "  game rules in GameSettings.ini: \"GameSettings.DIFFICULTY=HARD\",\n"
@@ -347,12 +305,27 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::size_t pick = 0;
-        if (choices.size() > 1 && window) {
-            pick = static_cast<std::size_t>(window->choose(choices, pad.get()));
+        // The launcher (the title, OPTIONS, CONTROLS, START) in a window,
+        // unless an edition was asked for or DCUSA_LAUNCHER=0.
+        const char* launcher_env = std::getenv("DCUSA_LAUNCHER");
+        const bool launch = window && !want && !(launcher_env && std::strcmp(launcher_env, "0") == 0);
+        if (launch) {
+            int start = 0;
+            const std::vector<dcusa::launcher::LauncherEdition> editions = dcusa::launcher::launcher_editions(
+                choices, content ? std::filesystem::path(content) : std::filesystem::path(), cache_dir, &start);
+            const int chosen = window->choose(editions, start, pad.get());
+            if (chosen < 0) {
+                std::fprintf(stderr, "launcher closed\n");
+                return 0;
+            }
+            const dcusa::Edition e = editions[static_cast<std::size_t>(chosen)].choice.edition;
+            dcusa::launcher::remember_edition(cache_dir, e);
+            for (std::size_t i = 0; i < choices.size(); ++i)
+                if (choices[i].edition == e) pick = i;
         }
         const dcusa::EditionChoice& c = choices[pick];
-        std::fprintf(stderr, "edition %s%s\n", dcusa::edition_info(c.edition).id.data(),
-                     choices.size() > 1 && window ? " (chosen)" : "");
+        std::fprintf(stderr, "edition %s%s\n", dcusa::edition_info(c.edition).id.data(), launch ? " (chosen)" : "");
+
         chosen_image = c.image;
         loaded = dcusa::exe_image_load_cache(c.cache.c_str(), c.edition, image, &error);
         if (!loaded) std::fprintf(stderr, "%s\n", error.c_str());
@@ -376,6 +349,8 @@ int main(int argc, char** argv) {
         }
     }
     if (!loaded) return 1;
+    // The edition's controller layout (the launcher's CONTROLS: controls.ini in its container).
+    dcusa::set_pad_bindings(dcusa::launcher::edition_pad_bindings(cache_dir / dcusa::container_name(image.edition)));
     // The boot screen shows the chosen edition's title (DCUSA_BOOT_SCREEN_IMAGE overrides).
     if (!chosen_image.empty()) setenv("DCUSA_BOOT_SCREEN_IMAGE", chosen_image.c_str(), 0);
 

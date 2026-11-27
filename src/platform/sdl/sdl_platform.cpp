@@ -10,22 +10,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <vector>
 
 #include "recomp/overlay.hpp"
 #include "runtime/pad_mapping.hpp"
-
-// stb_image is compiled in gpu/boot_screen_stb.cpp; only its declarations here.
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wall"
-#pragma clang diagnostic ignored "-Wextra"
-#pragma clang diagnostic ignored "-Wconversion"
-#endif
-#include "../../../third_party/stb/stb_image.h"
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
 
 namespace dcusa {
 namespace {
@@ -77,7 +66,7 @@ public:
 
     void* layer() override { return window(); }
 
-    int choose(const std::vector<EditionChoice>& given, PadSource* pad) override;
+    int choose(const std::vector<launcher::LauncherEdition>& editions, int start, PadSource* pad) override;
 
     void drawable_size(std::uint32_t& width, std::uint32_t& height) override {
         int w = static_cast<int>(width_), h = static_cast<int>(height_);
@@ -112,146 +101,121 @@ private:
     SDL_Window* window_ = nullptr;
 };
 
-// ---- the edition picker ----
+// ---- the launcher ----
 
-SDL_Texture* load_texture(SDL_Renderer* r, const std::string& path) {
-    if (path.empty()) return nullptr;
-    int w = 0, h = 0, n = 0;
-    unsigned char* px = stbi_load(path.c_str(), &w, &h, &n, 4);
-    if (px == nullptr) return nullptr;
-    SDL_Texture* t = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
-    if (t != nullptr) {
-        SDL_UpdateTexture(t, nullptr, px, w * 4);
-        SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(t, SDL_SCALEMODE_LINEAR);
-    }
-    stbi_image_free(px);
-    return t;
-}
-
-int SdlGameWindow::choose(const std::vector<EditionChoice>& given, PadSource* pad) {
-    std::vector<EditionChoice> items = given;
-    const int start = arrange_for_picker(items);
+int SdlGameWindow::choose(const std::vector<launcher::LauncherEdition>& editions, int start, PadSource* pad) {
+    using launcher::Action;
+    using launcher::Launcher;
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (want_fullscreen()) flags |= SDL_WINDOW_FULLSCREEN;
     SDL_Window* w = nullptr;
     SDL_Renderer* r = nullptr;
     if (!SDL_CreateWindowAndRenderer(title_.c_str(), static_cast<int>(width_), static_cast<int>(height_), flags, &w, &r)) {
-        std::fprintf(stderr, "sdl: no picker window: %s\n", SDL_GetError());
-        return 0;
+        std::fprintf(stderr, "sdl: no launcher window: %s\n", SDL_GetError());
+        return start;
     }
     SDL_RaiseWindow(w);
+    SDL_HideCursor();
     SDL_SetRenderVSync(r, 1);
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    std::vector<SDL_Texture*> images;
-    for (const EditionChoice& item : items) images.push_back(load_texture(r, item.image.string()));
-    PickerInput input(static_cast<int>(items.size()), start);
-    Carousel carousel(static_cast<int>(items.size()), start);
-    int selected = start, chosen = -1;
-    auto last = std::chrono::steady_clock::now();
-    while (chosen < 0) {
-        int pw = 0, ph = 0;
-        SDL_GetCurrentRenderOutputSize(r, &pw, &ph);
-        const float vw = static_cast<float>(pw), vh = static_cast<float>(ph);
+    int pw = 0, ph = 0;
+    SDL_GetCurrentRenderOutputSize(r, &pw, &ph);
+    Launcher ui;
+    if (!ui.init(editions, start, pw, ph, true)) {
+        SDL_DestroyRenderer(r);
+        SDL_DestroyWindow(w);
+        return start;
+    }
+    std::unique_ptr<AudioOutput> audio = make_sdl_audio_output();
+    const auto pull = [](void* user, std::span<float> out) { static_cast<Launcher*>(user)->mix(out.data(), out.size() / 2); };
+    if (audio && !audio->start(Launcher::kRate, pull, &ui)) audio.reset();
+    auto* gamepad = dynamic_cast<GamepadSource*>(pad);
+    static_assert(sizeof(launcher::Vertex) == sizeof(SDL_Vertex), "the launcher's vertices are SDL_Vertex-shaped");
+    std::vector<SDL_Texture*> textures;
+    int generation = -1;
+    while (ui.result() == Launcher::Result::Running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (common_event(e, w)) continue;
-            if (e.type == SDL_EVENT_KEY_DOWN) {
-                if (e.key.key == SDLK_LEFT && selected > 0) --selected;
-                else if (e.key.key == SDLK_RIGHT && selected + 1 < static_cast<int>(items.size())) ++selected;
-                else if (e.key.key == SDLK_RETURN || e.key.key == SDLK_SPACE || e.key.key == SDLK_KP_ENTER) chosen = selected;
-            } else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                float x = e.button.x, y = e.button.y;
-                SDL_RenderCoordinatesFromWindow(r, e.button.x, e.button.y, &x, &y);
-                const int i = carousel.hit(x, y, vw, vh);
-                if (i >= 0 && i == selected) chosen = i;
-                else if (i >= 0) selected = i;
+            if (e.type != SDL_EVENT_KEY_DOWN) continue;
+            switch (e.key.key) {
+                case SDLK_UP: ui.key(Action::Up); break;
+                case SDLK_DOWN: ui.key(Action::Down); break;
+                case SDLK_LEFT: ui.key(Action::Left); break;
+                case SDLK_RIGHT: ui.key(Action::Right); break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                    if (!e.key.repeat) ui.key(Action::Confirm);
+                    break;
+                case SDLK_ESCAPE:
+                case SDLK_BACKSPACE:
+                    if (!e.key.repeat) ui.key(Action::Back);
+                    break;
+                default: break;
             }
         }
-        input.select(selected);
-        if (pad != nullptr) {
-            const PadSnapshot s = pad->sample();
-            const bool confirm = (s.buttons & (PadSnapshot::Start | PadSnapshot::View1 | PadSnapshot::View2 | PadSnapshot::View3 |
-                                               PadSnapshot::View4)) != 0 ||
-                                 s.accelerator > 0.5f;
-            if (input.pad(s.steering, confirm)) chosen = input.selected();
-            selected = input.selected();
+        if (gamepad != nullptr) ui.pad(gamepad->read());
+        SDL_GetCurrentRenderOutputSize(r, &pw, &ph);
+        ui.resize(pw, ph);
+        const launcher::DrawList& list = ui.frame();
+        if (generation != ui.texture_generation()) {
+            generation = ui.texture_generation();
+            for (SDL_Texture* t : textures) SDL_DestroyTexture(t);
+            textures.clear();
+            for (const launcher::Texture& t : ui.textures()) {
+                SDL_Texture* tex = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, t.width, t.height);
+                if (tex != nullptr) {
+                    SDL_UpdateTexture(tex, nullptr, t.rgba.data(), t.width * 4);
+                    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+                    SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+                }
+                textures.push_back(tex);
+            }
         }
-        const auto now = std::chrono::steady_clock::now();
-        carousel.select(selected);
-        carousel.step(std::chrono::duration<double>(now - last).count());
-        last = now;
-
-        // Black above, a dark floor below the cards' feet.
-        SDL_SetRenderDrawColor(r, 0, 0, 0, 255);
+        SDL_SetRenderDrawColor(r, 4, 20, 50, 255);
         SDL_RenderClear(r);
-        const CarouselCard front = carousel.card(selected, vw, vh);
-        const float floor_y = front.cy + front.h / 2 - vh * 0.25f;
-        const SDL_FColor top{0, 0, 0, 1}, bottom{0.10f, 0.10f, 0.10f, 1};
-        const SDL_Vertex quad[4] = {{{0, floor_y}, top, {0, 0}}, {{vw, floor_y}, top, {0, 0}},
-                                    {{vw, vh}, bottom, {0, 0}}, {{0, vh}, bottom, {0, 0}}};
-        const int order[6] = {0, 1, 2, 0, 2, 3};
-        SDL_RenderGeometry(r, nullptr, quad, 4, order, 6);
-        for (int i : carousel.draw_order(vw, vh)) {
-            const CarouselCard k = carousel.card(i, vw, vh);
-            const SDL_FRect rect{k.cx - k.w / 2, k.cy - k.h / 2, k.w, k.h};
-            SDL_Texture* t = images[static_cast<std::size_t>(i)];
-            if (t != nullptr) {
-                // The reflection: the card upside down below it, fading out
-                // over half its height (in strips, each fainter than the last).
-                float tw = 0, th = 0;
-                SDL_GetTextureSize(t, &tw, &th);
-                constexpr int kStrips = 24;
-                const float strip = rect.h * 0.5f / kStrips;
-                for (int j = 0; j < kStrips; ++j) {
-                    const float fade = 1.0f - (static_cast<float>(j) + 0.5f) / kStrips;
-                    const SDL_FRect src{0, th - th * (static_cast<float>(j + 1) * strip / rect.h), tw, th * (strip / rect.h)};
-                    const SDL_FRect dst{rect.x, rect.y + rect.h + 3 + static_cast<float>(j) * strip, rect.w, strip};
-                    SDL_SetTextureAlphaModFloat(t, 0.28f * fade * fade * k.brightness);
-                    SDL_RenderTextureRotated(r, t, &src, &dst, 0, nullptr, SDL_FLIP_VERTICAL);
-                }
-                SDL_SetTextureAlphaModFloat(t, 1.0f);
-                SDL_RenderTexture(r, t, nullptr, &rect);
+        const auto* verts = reinterpret_cast<const SDL_Vertex*>(list.vertices.data());
+        for (const launcher::Batch& b : list.batches) {
+            if (b.count == 0) continue;
+            if (b.clipped) {
+                const SDL_Rect clip{static_cast<int>(b.clip_x), static_cast<int>(b.clip_y), static_cast<int>(b.clip_w),
+                                    static_cast<int>(b.clip_h)};
+                SDL_SetRenderClipRect(r, &clip);
             } else {
-                SDL_SetRenderDrawColor(r, 64, 64, 64, 255);
-                SDL_RenderFillRect(r, &rect);
+                SDL_SetRenderClipRect(r, nullptr);
             }
-            if (k.brightness < 1) {  // farther round the ring: darker
-                SDL_SetRenderDrawColorFloat(r, 0, 0, 0, 1 - k.brightness);
-                SDL_RenderFillRect(r, &rect);
-            }
-            if (k.title_alpha > 0) {
-                SDL_SetRenderDrawColorFloat(r, 1, 1, 1, k.title_alpha);
-                for (float inset = 1; inset <= 4; ++inset) {
-                    const SDL_FRect f{rect.x - inset, rect.y - inset, rect.w + 2 * inset, rect.h + 2 * inset};
-                    SDL_RenderRect(r, &f);
+            SDL_Texture* t = b.texture >= 0 && b.texture < static_cast<int>(textures.size())
+                                 ? textures[static_cast<std::size_t>(b.texture)]
+                                 : nullptr;
+            SDL_RenderGeometry(r, t, verts, static_cast<int>(list.vertices.size()),
+                               reinterpret_cast<const int*>(list.indices.data() + b.first), static_cast<int>(b.count));
+        }
+        SDL_SetRenderClipRect(r, nullptr);
+        if (const char* shot = std::getenv("DCUSA_LAUNCHER_SHOT")) {  // testing: the latest frame
+            static int frames = 0;
+            if (++frames % 20 == 0)
+                if (SDL_Surface* sf = SDL_RenderReadPixels(r, nullptr)) {
+                    SDL_SaveBMP(sf, shot);
+                    SDL_DestroySurface(sf);
                 }
-                // The name under the front card (SDL's built-in 8 px font, scaled).
-                const float scale = std::max(2.0f, vw * 0.024f / 8.0f);
-                const std::string& name = items[static_cast<std::size_t>(i)].title;
-                SDL_SetRenderScale(r, scale, scale);
-                SDL_RenderDebugText(r, (vw / scale - static_cast<float>(name.size()) * 8) / 2, vh * 0.89f / scale, name.c_str());
-                SDL_SetRenderScale(r, 1, 1);
-            }
         }
         SDL_RenderPresent(r);
     }
-    for (SDL_Texture* t : images)
-        if (t != nullptr) SDL_DestroyTexture(t);
+    if (audio) audio->stop();
+    for (SDL_Texture* t : textures) SDL_DestroyTexture(t);
     SDL_DestroyRenderer(r);
     SDL_DestroyWindow(w);
-    for (std::size_t i = 0; i < given.size(); ++i)
-        if (given[i].edition == items[static_cast<std::size_t>(chosen)].edition) return static_cast<int>(i);
-    return 0;
+    return ui.result() == Launcher::Result::Start ? ui.chosen() : -1;
 }
 
 // ---- the controller ----
 
-class SdlPad : public PadSource {
+class SdlPad : public GamepadSource {
 public:
     SdlPad() { init_subsystem(SDL_INIT_GAMEPAD); }
 
-    PadSnapshot sample() override {
+    GamepadState read() override {
         if (SDL_IsMainThread() && SDL_WasInit(SDL_INIT_VIDEO) == 0) SDL_PumpEvents();
         SDL_UpdateGamepads();
         if (pad_ != nullptr && !SDL_GamepadConnected(pad_)) {
@@ -291,12 +255,33 @@ public:
             state.right_shoulder = button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
             state.start = button(SDL_GAMEPAD_BUTTON_START);
             state.back = button(SDL_GAMEPAD_BUTTON_BACK);
+            state.left_y = std::clamp(axis(SDL_GAMEPAD_AXIS_LEFTY), -1.0f, 1.0f);
+            state.right_x = std::clamp(axis(SDL_GAMEPAD_AXIS_RIGHTX), -1.0f, 1.0f);
+            state.right_y = std::clamp(axis(SDL_GAMEPAD_AXIS_RIGHTY), -1.0f, 1.0f);
+            state.left_stick = button(SDL_GAMEPAD_BUTTON_LEFT_STICK);
+            state.right_stick = button(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+            state.dpad_up = button(SDL_GAMEPAD_BUTTON_DPAD_UP);
+            state.dpad_down = button(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+            state.dpad_left = button(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+            state.dpad_right = button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+            state.misc = button(SDL_GAMEPAD_BUTTON_MISC1);
+            state.paddle[0] = button(SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1);
+            state.paddle[1] = button(SDL_GAMEPAD_BUTTON_LEFT_PADDLE1);
+            state.paddle[2] = button(SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2);
+            state.paddle[3] = button(SDL_GAMEPAD_BUTTON_LEFT_PADDLE2);
+            state.touchpad = button(SDL_GAMEPAD_BUTTON_TOUCHPAD);
+            // The face buttons' names, for the launcher's prompts.
+            switch (SDL_GetGamepadButtonLabel(pad_, SDL_GAMEPAD_BUTTON_SOUTH)) {
+                case SDL_GAMEPAD_BUTTON_LABEL_CROSS: state.labels = GamepadState::Labels::PlayStation; break;
+                case SDL_GAMEPAD_BUTTON_LABEL_B: state.labels = GamepadState::Labels::Nintendo; break;
+                default: break;
+            }
             // R3 (right stick press): the frame-rate overlay on or off.
             const bool r3 = button(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
             if (r3 && !r3_) toggle_fps_overlay();
             r3_ = r3;
         }
-        return map_gamepad(state);
+        return state;
     }
 
 private:

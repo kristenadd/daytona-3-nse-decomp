@@ -220,9 +220,16 @@ agreed to this).
    `--edition 2017` and the 2019 default both reach attract from one dcrun;
    `ctest -LE phase5` passes. Not yet tried: choosing with a controller (Mac
    or iOS), a device build. Containers: `container` (2019), `container-2017`.
-   The picker is a carousel (`Carousel` in `platform/edition_choice`: a ring
-   in perspective, cards facing the viewer, reflections on a dark floor);
-   checked turning on the Mac (keys) and in the iPad Simulator (tap).
+   The carousel picker has since been replaced by the launcher
+   (`src/platform/launcher`, the same as daytona-shim's Windows / Deck
+   launcher): the logo, the edition (left / right), START, OPTIONS (free play,
+   volumes, the rules: the container's ShellData / GameSettings, through
+   `system/shell_settings`) and CONTROLS (the controller layout:
+   `controls.ini` in the container, read by `runtime/pad_mapping`), with the
+   game's own sounds and looping select music. Platform-free core; drawn with
+   Metal on Mac / iOS (`launcher_metal.mm`) and an SDL renderer on Linux.
+   Checked: Mac (all three screens, START into the game), iPad Simulator
+   (keyboard into OPTIONS, START into the game), SDL build on the Mac.
    A slim 2017 install (only the files that differ from 2019, the rest
    read from the 2019 folder) was tried and dropped: it saved 1.3 of 5.4 GB
    (the rest are re-exported textures), and the user did not want the cost
