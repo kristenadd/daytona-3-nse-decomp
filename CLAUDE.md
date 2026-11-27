@@ -230,6 +230,8 @@ agreed to this).
    Metal on Mac / iOS (`launcher_metal.mm`) and an SDL renderer on Linux.
    Checked: Mac (all three screens, START into the game), iPad Simulator
    (keyboard into OPTIONS, START into the game), SDL build on the Mac.
+   **Verified** by the user on the iPhone and the Mac app (6d07350): "it
+   works".
    A slim 2017 install (only the files that differ from 2019, the rest
    read from the 2019 folder) was tried and dropped: it saved 1.3 of 5.4 GB
    (the rest are re-exported textures), and the user did not want the cost
