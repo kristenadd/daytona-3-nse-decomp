@@ -184,8 +184,12 @@ agreed to this).
    launcher, START into the game (CRIWARE, PRESS START, 43 FPS with BC
    decoded in software). On the headset (Apple M2, BCn in hardware; both
    memory entitlements accepted): boots, the launcher works with an Xbox
-   pad, a race reached; open: in the race no steering or throttle (buttons
-   and R3 work), and the user found it slow. Layered app icon
+   pad. Steering and throttle needed a `GCEventInteraction` on the game
+   view (visionOS otherwise turns the pad into gaze pinches; the sticks came
+   through in rare bursts); **verified** by the user in a race. A full race:
+   60 ticks a second, 1-3% skipped, GPU 7-8.5 ms a frame, thermal "fair".
+   The user found an earlier run slow; if it still feels uneven, the likely
+   cause is 60 pictures on the 90 Hz display. Layered app icon
    (`Assets.vision.xcassets`). Not yet: resizing by hand.
 
 9. **The 2017 edition** (one app with a game choice at start is the goal).

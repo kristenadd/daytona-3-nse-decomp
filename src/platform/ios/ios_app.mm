@@ -274,6 +274,14 @@ void start_game_thread() {
 - (void)loadView {
     DCMetalView* view = [DCMetalView new];
     view.backgroundColor = UIColor.blackColor;
+#if TARGET_OS_VISION
+    // visionOS turns a controller's input into pinches at what the player
+    // looks at unless the view takes it: then the sticks and triggers reach
+    // GameController (the launcher and the game) and nothing else.
+    GCEventInteraction* controller = [GCEventInteraction new];
+    controller.handledEventTypes = GCUIEventTypeGamepad;
+    [view addInteraction:controller];
+#endif
     self.view = view;
     _message = [UILabel new];
     _message.textColor = UIColor.whiteColor;
