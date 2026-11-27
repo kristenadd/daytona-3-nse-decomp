@@ -549,3 +549,12 @@ shader source and stays out of the repository.
 | `tools/dcprepare` | verifies installations and writes the prepared images |
 | `tools/make_manifests.py` | regenerates the manifests from pristine executables (digests only, no game bytes) |
 | `tests` | CTest suite |
+
+## License
+
+The code in this repository is under the [MIT License](LICENSE). Third-party
+code keeps its own licence: meshoptimizer (MIT) and stb (MIT or public domain)
+in `third_party/`, and the launcher's fonts, Russo One and Titillium Web, under
+the SIL Open Font License (`third_party/fonts`). The licence does not cover
+Daytona Championship USA itself: the game, its code, art, sound and names
+belong to Sega, and you need your own copy to run it.
