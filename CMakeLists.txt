@@ -78,13 +78,15 @@ dcusa_warnings(dcusa_system)
 # ---- launcher: the title, OPTIONS and CONTROLS screens shown before the game ----
 # Platform-free (src/platform/launcher): the platforms draw its triangles with
 # SDL or Metal and play its sound. Fonts and logo are compiled in.
+include(cmake/branding.cmake)
+dcusa_branding(logo "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/launcher/logo.png" dcusa_logo)
 set(dcusa_launcher_assets "${CMAKE_CURRENT_BINARY_DIR}/launcher_assets.cpp")
 add_custom_command(OUTPUT "${dcusa_launcher_assets}"
     COMMAND ${CMAKE_COMMAND}
-            "-DIN_FILES=title_font=${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/RussoOne-Regular.ttf\;body_font=${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/TitilliumWeb-Bold.ttf\;logo=${CMAKE_CURRENT_SOURCE_DIR}/src/platform/launcher/logo.png"
+            "-DIN_FILES=title_font=${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/RussoOne-Regular.ttf\;body_font=${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/TitilliumWeb-Bold.ttf\;logo=${dcusa_logo}"
             "-DOUT=${dcusa_launcher_assets}" -P "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/launcher/embed.cmake"
     DEPENDS third_party/fonts/RussoOne-Regular.ttf third_party/fonts/TitilliumWeb-Bold.ttf
-            src/platform/launcher/logo.png src/platform/launcher/embed.cmake
+            "${dcusa_logo}" src/platform/launcher/embed.cmake
     COMMENT "Embedding the launcher's fonts and logo")
 add_library(dcusa_launcher STATIC
     src/platform/launcher/launcher.cpp
@@ -377,11 +379,26 @@ if(dcusa_editions)
                 set(dcusa_actool_platform xros)
             endif()
             set(dcusa_actool_devices --target-device vision)
-            set(dcusa_assets "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Assets.vision.xcassets")
+            set(dcusa_catalog Assets.vision.xcassets)
         else()
             set(dcusa_actool_platform ${DCUSA_IOS_PLATFORM})
             set(dcusa_actool_devices --target-device iphone --target-device ipad)
-            set(dcusa_assets "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Assets.xcassets")
+            set(dcusa_catalog Assets.xcassets)
+        endif()
+        # The catalog is copied into the build with branding.ini's pictures in it.
+        set(dcusa_assets "${CMAKE_CURRENT_BINARY_DIR}/${dcusa_catalog}")
+        file(REMOVE_RECURSE "${dcusa_assets}")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/${dcusa_catalog}" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
+        if(DCUSA_VISIONOS)
+            set(dcusa_src_layers "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/${dcusa_catalog}/AppIcon.solidimagestack")
+            set(dcusa_layers "${dcusa_assets}/AppIcon.solidimagestack")
+            dcusa_branding(vision_back "${dcusa_src_layers}/Back.solidimagestacklayer/Content.imageset/Back.png" dcusa_pic)
+            configure_file("${dcusa_pic}" "${dcusa_layers}/Back.solidimagestacklayer/Content.imageset/Back.png" COPYONLY)
+            dcusa_branding(vision_front "${dcusa_src_layers}/Front.solidimagestacklayer/Content.imageset/Front.png" dcusa_pic)
+            configure_file("${dcusa_pic}" "${dcusa_layers}/Front.solidimagestacklayer/Content.imageset/Front.png" COPYONLY)
+        else()
+            dcusa_branding(icon "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/${dcusa_catalog}/AppIcon.appiconset/AppIcon-1024.png" dcusa_pic)
+            configure_file("${dcusa_pic}" "${dcusa_assets}/AppIcon.appiconset/AppIcon-1024.png" COPYONLY)
         endif()
         add_custom_command(TARGET DaytonaUSA POST_BUILD
             COMMAND xcrun actool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>"

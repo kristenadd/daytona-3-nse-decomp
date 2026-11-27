@@ -211,6 +211,15 @@ cmake --preset mac-sdl -DDCUSA_GENERATED_DIR="$PWD/build/x86tr/2019/gen;$PWD/bui
 cmake --build --preset mac-sdl --target dcrun
 ```
 
+## Logo and icons
+
+The launcher logo and the app icons in this repository are generic (a
+chequered flag, plain lettering); the game's own logo is Sega's and is not
+committed. To build with your own, make them with
+`tools/branding/make_branding.py` and copy
+[branding.example.ini](branding.example.ini) to `branding.ini` (not committed)
+pointing at them: [tools/branding/README.md](tools/branding/README.md).
+
 ## Settings
 
 The port has no settings file of its own. The game reads three .ini
@@ -457,6 +466,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_PLATFORM` | `apple` (Metal, AppKit / UIKit) or `sdl` (Vulkan and SDL3: Linux, and the Mac test build). Default: `apple` on Apple systems, `sdl` elsewhere. Presets `mac-sdl` and `linux-deck`. |
 | `DCUSA_LINUX_SYSROOT`, `DCUSA_LLVM` | The Linux cross build (`cmake/linux-x86_64.cmake`): the sysroot (default `build/toolchains/sniper`) and the LLVM folder (default `/opt/homebrew/opt/llvm`). |
 | `DCUSA_BOOT_TITLE` | Title image put in the iOS app (default `<prepared>/boot/title.png`; a `title2017.png` beside it goes in too). |
+| `DCUSA_BRANDING_FILE` | Remap file for the launcher logo and app icons (default `branding.ini` beside CMakeLists.txt, not committed; without it the generic ones). Keys `logo`, `icon`, `vision_back`, `vision_front`; [tools/branding/README.md](tools/branding/README.md). |
 
 ## Building and testing (macOS, Apple silicon)
 

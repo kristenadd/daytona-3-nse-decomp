@@ -29,8 +29,14 @@ for f in title.png title2017.png font.ttf; do
     [[ -f $prepared/boot/$f ]] && cp $prepared/boot/$f $stage/Resources/boot/$f
 done
 
-# The icon: the iOS app's 1024 px image at the sizes an .icns holds.
+# The icon: the iOS app's 1024 px image at the sizes an .icns holds, or
+# branding.ini's `icon` (tools/branding/README.md).
 icon=$repo/src/platform/ios/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+if [[ -f $repo/branding.ini ]]; then
+    mapped=$(sed -n 's/^[[:space:]]*icon[[:space:]]*=[[:space:]]*//p' $repo/branding.ini | tail -1 | sed 's/[[:space:]]*$//')
+    [[ -n $mapped && $mapped != /* ]] && mapped=$repo/$mapped
+    [[ -n $mapped && -f $mapped ]] && icon=$mapped
+fi
 iconset=$work/AppIcon.iconset
 mkdir -p $iconset
 for s in 16 32 128 256 512; do
