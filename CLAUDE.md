@@ -182,8 +182,11 @@ agreed to this).
    (`UIWindowSceneResizingRestrictionsUniform`), flat, controller-driven.
    Checked in the Vision Pro Simulator: the window in the room, the
    launcher, START into the game (CRIWARE, PRESS START, 43 FPS with BC
-   decoded in software). Not yet: resizing by hand, a headset (the extended
-   virtual addressing entitlement may not exist on visionOS), an app icon.
+   decoded in software). On the headset (Apple M2, BCn in hardware; both
+   memory entitlements accepted): boots, the launcher works with an Xbox
+   pad, a race reached; open: in the race no steering or throttle (buttons
+   and R3 work), and the user found it slow. Layered app icon
+   (`Assets.vision.xcassets`). Not yet: resizing by hand.
 
 9. **The 2017 edition** (one app with a game choice at start is the goal).
    Done: the translator's 2017 tables (`CRT_DISPATCH_TABLES`, `CRT_NATIVE`,

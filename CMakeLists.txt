@@ -368,18 +368,30 @@ if(dcusa_editions)
         else()
             set(DCUSA_IOS_PLATFORM iphoneos)
         endif()
-        # (visionOS: no icon yet; its icons are layered image stacks.)
-        if(NOT DCUSA_VISIONOS)
+        # visionOS: a layered icon (Assets.vision.xcassets: the logo in front of
+        # the swooshes, a solid image stack the system masks round).
+        if(DCUSA_VISIONOS)
+            if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+                set(dcusa_actool_platform xrsimulator)
+            else()
+                set(dcusa_actool_platform xros)
+            endif()
+            set(dcusa_actool_devices --target-device vision)
+            set(dcusa_assets "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Assets.vision.xcassets")
+        else()
+            set(dcusa_actool_platform ${DCUSA_IOS_PLATFORM})
+            set(dcusa_actool_devices --target-device iphone --target-device ipad)
+            set(dcusa_assets "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Assets.xcassets")
+        endif()
         add_custom_command(TARGET DaytonaUSA POST_BUILD
             COMMAND xcrun actool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>"
-                    --platform ${DCUSA_IOS_PLATFORM}
+                    --platform ${dcusa_actool_platform}
                     --minimum-deployment-target ${CMAKE_OSX_DEPLOYMENT_TARGET}
-                    --target-device iphone --target-device ipad --app-icon AppIcon
+                    ${dcusa_actool_devices} --app-icon AppIcon
                     --output-partial-info-plist "${CMAKE_CURRENT_BINARY_DIR}/assets-partial.plist"
                     --output-format human-readable-text --errors --warnings
-                    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Assets.xcassets"
+                    "${dcusa_assets}"
             COMMENT "Compiling the app icon")
-        endif()
         # The launch screen and the boot screen's title: the attract title made
         # from the player's game on the Mac (tools/bootscreen/capture_title.py),
         # never committed. Without it the launch screen is black and the boot

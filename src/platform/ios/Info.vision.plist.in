@@ -11,6 +11,10 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
     <key>CFBundleVersion</key><string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+    <key>CFBundleIcons</key>
+    <dict><key>CFBundlePrimaryIcon</key><dict><key>CFBundleIconName</key><string>AppIcon</string></dict></dict>
+    <key>LSApplicationCategoryType</key><string>public.app-category.racing-games</string>
+    <key>LSSupportsGameMode</key><true/>
     <key>MinimumOSVersion</key><string>2.0</string>
     <key>UIDeviceFamily</key><array><integer>7</integer></array>
     <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string><string>metal</string></array>
