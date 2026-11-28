@@ -11,6 +11,8 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
     <key>CFBundleVersion</key><string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+    <!-- No encryption beyond the system's: App Store Connect asks nothing on upload. -->
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
     <key>CFBundleIcons</key>
     <dict><key>CFBundlePrimaryIcon</key><dict><key>CFBundleIconName</key><string>AppIcon</string></dict></dict>
     <key>LSApplicationCategoryType</key><string>public.app-category.racing-games</string>

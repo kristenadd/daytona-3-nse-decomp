@@ -20,6 +20,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "visionOS")
     set(DCUSA_IOS ON)
     set(DCUSA_VISIONOS ON)
 endif()
+# Xcode device builds: `xcodebuild archive` installs only the app (the libraries
+# skip it), so the archive is an app archive that -exportArchive accepts (the
+# App Store workflow, .github/workflows/app-store.yml).
+if(DCUSA_IOS AND CMAKE_GENERATOR STREQUAL "Xcode")
+    set(CMAKE_XCODE_ATTRIBUTE_SKIP_INSTALL YES)
+endif()
 
 if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
     message(FATAL_ERROR "Apple builds require -DCMAKE_OSX_ARCHITECTURES=arm64 (use the presets)")
@@ -352,6 +358,8 @@ if(dcusa_editions)
                                     src/platform/macos/core_audio_output.mm src/platform/launcher/launcher_metal.mm
                                     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         set(DCUSA_IOS_BUNDLE_ID "local.dcusa.DaytonaUSA" CACHE STRING "bundle identifier of the iOS app")
+        set(DCUSA_APP_VERSION "0.1" CACHE STRING "the app's version (CFBundleShortVersionString)")
+        set(DCUSA_BUILD_NUMBER "1" CACHE STRING "the app's build number (CFBundleVersion)")
         if(DCUSA_VISIONOS)
             set(dcusa_info_plist "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Info.vision.plist.in")
         else()
@@ -361,8 +369,16 @@ if(dcusa_editions)
             MACOSX_BUNDLE_INFO_PLIST "${dcusa_info_plist}"
             MACOSX_BUNDLE_GUI_IDENTIFIER "${DCUSA_IOS_BUNDLE_ID}"
             MACOSX_BUNDLE_BUNDLE_NAME "DaytonaUSA"
-            MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
-            MACOSX_BUNDLE_BUNDLE_VERSION "1")
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${DCUSA_APP_VERSION}"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${DCUSA_BUILD_NUMBER}")
+        # Where the post-build steps put the icon, launch screen and titles: in an
+        # Xcode build the bundle Xcode is building (an archive builds it in its own
+        # folder, not CONFIGURATION_BUILD_DIR).
+        if(CMAKE_GENERATOR STREQUAL "Xcode")
+            set(dcusa_bundle "\${TARGET_BUILD_DIR}/\${WRAPPER_NAME}")
+        else()
+            set(dcusa_bundle "$<TARGET_BUNDLE_DIR:DaytonaUSA>")
+        endif()
         # The app icon: the asset catalog compiled into the bundle (Assets.car and
         # the 60/76 pt PNGs that Info.plist names), before the bundle is signed.
         if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
@@ -401,7 +417,7 @@ if(dcusa_editions)
             configure_file("${dcusa_pic}" "${dcusa_assets}/AppIcon.appiconset/AppIcon-1024.png" COPYONLY)
         endif()
         add_custom_command(TARGET DaytonaUSA POST_BUILD
-            COMMAND xcrun actool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>"
+            COMMAND xcrun actool --compile "${dcusa_bundle}"
                     --platform ${dcusa_actool_platform}
                     --minimum-deployment-target ${CMAKE_OSX_DEPLOYMENT_TARGET}
                     ${dcusa_actool_devices} --app-icon AppIcon
@@ -417,7 +433,7 @@ if(dcusa_editions)
             "attract title for the iOS launch and boot screens (capture_title.py)")
         if(EXISTS "${DCUSA_BOOT_TITLE}")
             add_custom_command(TARGET DaytonaUSA POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy "${DCUSA_BOOT_TITLE}" "$<TARGET_BUNDLE_DIR:DaytonaUSA>/boot_title.png"
+                COMMAND ${CMAKE_COMMAND} -E copy "${DCUSA_BOOT_TITLE}" "${dcusa_bundle}/boot_title.png"
                 COMMENT "Copying the boot title")
         else()
             message(STATUS "No boot title at ${DCUSA_BOOT_TITLE}: launch screen black, boot screen off")
@@ -429,26 +445,26 @@ if(dcusa_editions)
         if(EXISTS "${dcusa_boot_dir}/title2017.png")
             add_custom_command(TARGET DaytonaUSA POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy "${dcusa_boot_dir}/title2017.png"
-                        "$<TARGET_BUNDLE_DIR:DaytonaUSA>/boot_title2017.png"
+                        "${dcusa_bundle}/boot_title2017.png"
                 COMMENT "Copying the 2017 boot title")
         endif()
         if(EXISTS "${dcusa_boot_dir}/font.ttf")
             add_custom_command(TARGET DaytonaUSA POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy "${dcusa_boot_dir}/font.ttf" "$<TARGET_BUNDLE_DIR:DaytonaUSA>/boot_font.ttf"
+                COMMAND ${CMAKE_COMMAND} -E copy "${dcusa_boot_dir}/font.ttf" "${dcusa_bundle}/boot_font.ttf"
                 COMMENT "Copying the boot screen font")
         endif()
         if(DCUSA_VISIONOS)
             add_custom_command(TARGET DaytonaUSA POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Settings.bundle"
-                        "$<TARGET_BUNDLE_DIR:DaytonaUSA>/Settings.bundle"
+                        "${dcusa_bundle}/Settings.bundle"
                 COMMENT "Copying Settings.bundle")
         else()
         add_custom_command(TARGET DaytonaUSA POST_BUILD
-            COMMAND xcrun ibtool --compile "$<TARGET_BUNDLE_DIR:DaytonaUSA>/LaunchScreen.storyboardc"
+            COMMAND xcrun ibtool --compile "${dcusa_bundle}/LaunchScreen.storyboardc"
                     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/LaunchScreen.storyboard"
                     --target-device iphone --target-device ipad --minimum-deployment-target ${CMAKE_OSX_DEPLOYMENT_TARGET}
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/Settings.bundle"
-                    "$<TARGET_BUNDLE_DIR:DaytonaUSA>/Settings.bundle"
+                    "${dcusa_bundle}/Settings.bundle"
             COMMENT "Compiling the launch screen, copying Settings.bundle")
         endif()
         target_link_libraries(DaytonaUSA PRIVATE dcusa_generated dcusa_system dcusa_launcher "-framework UIKit" "-framework GameController"
@@ -472,7 +488,11 @@ if(dcusa_editions)
                 XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
                 XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
                 XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/ios/DaytonaUSA.entitlements"
-                XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "${dcusa_device_family}")
+                XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "${dcusa_device_family}"
+                # Archives: the app is the one product installed (see SKIP_INSTALL above).
+                XCODE_ATTRIBUTE_SKIP_INSTALL NO
+                XCODE_ATTRIBUTE_INSTALL_PATH "$(LOCAL_APPS_DIR)"
+                XCODE_GENERATE_SCHEME ON)
         elseif(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
             add_custom_command(TARGET DaytonaUSA POST_BUILD
                 COMMAND codesign --force --sign - --timestamp=none "$<TARGET_BUNDLE_DIR:DaytonaUSA>"

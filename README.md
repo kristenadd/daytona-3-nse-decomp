@@ -180,6 +180,43 @@ xcrun devicectl device install app --device <udid> build/visionos-device/RelWith
 
 It has no app icon yet (visionOS icons are layered image stacks).
 
+## App Store and TestFlight
+
+[.github/workflows/app-store.yml](.github/workflows/app-store.yml) builds the
+iPhone / iPad and Vision Pro apps on GitHub's macOS runners, signs them for
+the App Store and uploads them to App Store Connect. Run it from Actions ▸
+App Store ▸ Run workflow:
+
+- **mode**: `testflight` uploads (internal testers get the build once it is
+  processed; `testflight_groups` also gives it to those groups); `review`
+  uploads and submits that version for App Review, with the metadata already in
+  App Store Connect, not released automatically; `build` archives and exports
+  only, to check the build.
+- **platforms**: `both`, `ios` or `visionos`.
+- **version**: `X.Y.Z` (empty: the newest `vX.Y.Z` tag, or 1.0.0). The build
+  number is the run number.
+
+A pushed tag `vX.Y.Z` uploads that version of both apps to TestFlight.
+
+What the build needs and this public repository does not hold comes from
+elsewhere: the prepared caches and boot screen titles from the private
+repository `kristenadd/daytona-ci-assets` (a read-only deploy key), and the
+logo and icons (your `branding.ini` pictures) from secrets, so only these
+builds carry them. The `.ipa` never becomes a run artifact. The secrets are
+listed at the top of the workflow and set by the owner's signing tool
+(`~/Projects/SigningSecrets`, `push kristenadd/daytona-3-nse-decomp`). After
+remaking a cache or the pictures, commit the cache to the assets repository,
+or run that push again for the pictures.
+
+Once, by hand: create the app in App Store Connect (Apps ▸ +, bundle ID
+`IOS_BUNDLE_ID`, `local.dcusa.DaytonaUSA`), then Add Platform ▸ visionOS on
+its page. Until then uploads fail (a tag push only warns).
+
+To check an archive locally: `cmake --preset ios-device -DDCUSA_IOS_TEAM=<team id> ...`,
+then `xcodebuild -project build/ios-device/DaytonaUSA.xcodeproj -scheme DaytonaUSA
+-configuration RelWithDebInfo -destination generic/platform=iOS -archivePath <path>
+-allowProvisioningUpdates archive`.
+
 ## Linux and the Steam Deck
 
 A native x86_64 Linux build: the same game code and host layer, with a Vulkan
@@ -463,6 +500,8 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_ORDER_FILE` | Linker order file for dcrun. |
 | `DCUSA_IOS_TEAM` | Development team for a device build. |
 | `DCUSA_IOS_BUNDLE_ID` | iOS bundle identifier (default `local.dcusa.DaytonaUSA`). |
+| `DCUSA_APP_VERSION` | The app's version, `CFBundleShortVersionString` (default `0.1`; the App Store workflow sets it). |
+| `DCUSA_BUILD_NUMBER` | The app's build number, `CFBundleVersion` (default `1`; the App Store workflow uses the run number). |
 | `DCUSA_PLATFORM` | `apple` (Metal, AppKit / UIKit) or `sdl` (Vulkan and SDL3: Linux, and the Mac test build). Default: `apple` on Apple systems, `sdl` elsewhere. Presets `mac-sdl` and `linux-deck`. |
 | `DCUSA_LINUX_SYSROOT`, `DCUSA_LLVM` | The Linux cross build (`cmake/linux-x86_64.cmake`): the sysroot (default `build/toolchains/sniper`) and the LLVM folder (default `/opt/homebrew/opt/llvm`). |
 | `DCUSA_BOOT_TITLE` | Title image put in the iOS app (default `<prepared>/boot/title.png`; a `title2017.png` beside it goes in too). |
