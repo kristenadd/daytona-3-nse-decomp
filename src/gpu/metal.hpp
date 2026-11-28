@@ -46,6 +46,19 @@ void generate_mips(std::uint32_t id);
 
 void upload_buffer(std::uint32_t id, const std::uint8_t* bytes, std::size_t size);
 
+// The buffer ring (d3d11.cpp): guest memory the GPU reads in place. Metal wraps
+// it in one buffer (page-aligned base and size, from the caller's thread, before
+// the first use_guest_bytes); false where the backend cannot (Vulkan), and the
+// caller keeps copying.
+bool set_guest_ring(void* base, std::size_t bytes);
+// A buffer's bytes are now `bytes`, inside the ring, read where they are (no
+// copy). The caller leaves them unchanged until frames_completed() has passed
+// the present being recorded.
+void use_guest_bytes(std::uint32_t id, const std::uint8_t* bytes, std::size_t size);
+// How many presents' command buffers have completed (frames numbered from 0, as
+// frame_gpu_times counts them). Any thread.
+std::uint64_t frames_completed();
+
 // D3D11_SAMPLER_DESC, as the guest passed it.
 struct SamplerDesc {
     std::uint32_t filter = 0, address[3] = {1, 1, 1};

@@ -14,6 +14,7 @@ void upload_texture_region(std::uint32_t id, std::uint32_t x, std::uint32_t y, s
                            const std::uint8_t* bytes, std::size_t size, std::uint32_t row_pitch);
 void generate_mips(std::uint32_t id);
 void upload_buffer(std::uint32_t id, const std::uint8_t* bytes, std::size_t size);
+void use_guest_bytes(std::uint32_t id, const std::uint8_t* bytes, std::size_t size);
 void create_sampler(std::uint32_t id, const SamplerDesc& desc);
 void destroy(std::uint32_t id);
 void clear_target(std::uint32_t texture, std::uint32_t mip, std::uint32_t slice, const float rgba[4]);

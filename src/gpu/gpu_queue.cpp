@@ -38,7 +38,7 @@ namespace dcusa::gpu {
 namespace {
 
 enum class Op : std::uint8_t {
-    CreateTexture, UploadTexture, UploadTextureSub, UploadTextureRegion, GenerateMips, UploadBuffer, CreateSampler, Destroy, ClearTarget, ClearDepth,
+    CreateTexture, UploadTexture, UploadTextureSub, UploadTextureRegion, GenerateMips, UploadBuffer, UseGuestBytes, CreateSampler, Destroy, ClearTarget, ClearDepth,
     DrawIndexed, Draw, Submit, SetLayer, Show, SetTrace, Antialias,
 };
 
@@ -97,6 +97,7 @@ void replay(const Batch& b) {
                 break;
             case Op::GenerateMips: direct::generate_mips(c.id); break;
             case Op::UploadBuffer: direct::upload_buffer(c.id, b.bytes.data() + c.index, c.size); break;
+            case Op::UseGuestBytes: direct::use_guest_bytes(c.id, static_cast<const std::uint8_t*>(c.ptr), c.size); break;
             case Op::CreateSampler: direct::create_sampler(c.id, b.samplers[c.index]); break;
             case Op::Destroy: direct::destroy(c.id); break;
             case Op::ClearTarget: direct::clear_target(c.id, c.a, c.b, c.f); break;
@@ -270,6 +271,16 @@ void upload_buffer(std::uint32_t id, const std::uint8_t* bytes, std::size_t size
     Cmd& c = record(Op::UploadBuffer);
     c.id = id;
     c.index = at;
+    c.size = size;
+}
+
+// Only a pointer is recorded: the ring's bytes stay put until the GPU is done.
+void use_guest_bytes(std::uint32_t id, const std::uint8_t* bytes, std::size_t size) {
+    if (!threaded()) return direct::use_guest_bytes(id, bytes, size);
+    if (bytes == nullptr || size == 0) return;
+    Cmd& c = record(Op::UseGuestBytes);
+    c.id = id;
+    c.ptr = const_cast<std::uint8_t*>(bytes);
     c.size = size;
 }
 

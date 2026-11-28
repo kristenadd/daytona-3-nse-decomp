@@ -167,6 +167,10 @@ struct Device {
     // buffers moved out of parked arenas (compact_parked).
     id<MTLBuffer> static_arena = nil;
     NSUInteger static_used = 0;
+    // The buffer ring (set_guest_ring): guest memory wrapped without a copy.
+    id<MTLBuffer> ring = nil;
+    const std::uint8_t* ring_base = nullptr;
+    std::size_t ring_bytes = 0;
     // Frames committed without waiting, each with the arenas it retired.
     std::deque<std::pair<id<MTLCommandBuffer>, std::vector<id<MTLBuffer>>>> in_flight;
     std::unordered_map<std::uint32_t, id<MTLSamplerState>> samplers;
@@ -2243,6 +2247,15 @@ void upload_buffer(std::uint32_t key, const std::uint8_t* bytes, std::size_t siz
     ++g_dev->stats.uploads;
 }
 
+// The bytes stay in the guest's ring; the buffer points there.
+void use_guest_bytes(std::uint32_t key, const std::uint8_t* bytes, std::size_t size) {
+    if (!enabled() || bytes == nullptr || size == 0) return;
+    Device& d = *g_dev;
+    if (d.ring == nil || bytes < d.ring_base || bytes + size > d.ring_base + d.ring_bytes) return upload_buffer(key, bytes, size);
+    set_buffer(key, {d.ring, static_cast<NSUInteger>(bytes - d.ring_base), size});
+    ++d.stats.uploads;
+}
+
 void create_sampler(std::uint32_t key, const SamplerDesc& desc) {
     if (!enabled()) return;
     MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
@@ -3127,10 +3140,15 @@ struct FrameTimes {
 constexpr std::size_t kFrameTimes = 64;
 FrameTimes g_frame_times[kFrameTimes];
 std::uint64_t g_frames_committed = 0;  // the render thread's (or the device's) count
+std::atomic<std::uint64_t> g_frames_done{0};  // frames_completed()
 
 void time_gpu(id<MTLCommandBuffer> cmd) {
     const std::uint64_t frame = g_frames_committed++;
     [cmd addCompletedHandler:^(id<MTLCommandBuffer> done) {
+        // One queue completes in order; the maximum, in case handlers overlap.
+        for (std::uint64_t seen = g_frames_done.load(std::memory_order_relaxed);
+             seen < frame + 1 && !g_frames_done.compare_exchange_weak(seen, frame + 1, std::memory_order_release);) {
+        }
         const double s = done.GPUEndTime - done.GPUStartTime;
         if (s > 0) g_gpu_us += static_cast<std::uint64_t>(s * 1e6);
         ++g_gpu_buffers;
@@ -3317,6 +3335,22 @@ const Stats& stats() {
 }  // namespace direct
 
 std::uint64_t gpu_busy_us() { return direct::g_gpu_us.load(std::memory_order_relaxed); }
+
+std::uint64_t frames_completed() { return direct::g_frames_done.load(std::memory_order_acquire); }
+
+// Before the first use_guest_bytes is recorded, so the render thread sees it
+// (the queue's handover orders the two).
+bool set_guest_ring(void* base, std::size_t bytes) {
+    if (!enabled() || base == nullptr || bytes == 0) return false;
+    Device& d = *g_dev;
+    if (d.ring == nil) {
+        d.ring = [d.dev newBufferWithBytesNoCopy:base length:bytes options:MTLResourceStorageModeShared deallocator:nil];
+        if (d.ring == nil) return false;
+        d.ring_base = static_cast<const std::uint8_t*>(base);
+        d.ring_bytes = bytes;
+    }
+    return d.ring_base == base && d.ring_bytes == bytes;
+}
 
 bool frame_gpu_times(std::uint64_t frame, std::uint64_t* start_us, std::uint64_t* end_us) {
     const direct::FrameTimes& f = direct::g_frame_times[frame % direct::kFrameTimes];

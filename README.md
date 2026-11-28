@@ -458,7 +458,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_SKIP_LOG=<n>` | Every n presents, ticks per second and how many skipped the render, tick wall and CPU times, draws, GPU time per frame (mean and max), time given to other guest threads, and the slowest frame with its breakdown: the race timer then (the HUD's, guest 0x19C98EC in 1/64 s), and the guest thread that took the most of its time (by procedure). The handover / wait / pipeline / resource columns need `DCUSA_HITCH`. |
 | `DCUSA_MEM=<n>` | Every n presents, host memory by kind (with `DCUSA_GPU_THREAD=0`). |
 | `DCUSA_MEM_LIST=1` | List the Metal allocations in the memory report. |
-| `DCUSA_MAP_STATS=<n>` | Every n presents, D3D Map calls by type and bytes. |
+| `DCUSA_MAP_STATS=<n>` | Every n presents, D3D Map calls by type and bytes, and what the buffer ring did (slots, bytes copied in for maps other than discard, buffers moved back out, waits for the GPU, presents that filled it). |
 | `DCUSA_GPU_PASSES=1` | GPU time per render pass; `DCUSA_GPU_PASSES_LOG=1` also prints draws per frame. |
 | `DCUSA_GPU_QUERIES=0` | Zeros for GPU timestamp queries (turns off dynamic resolution). |
 | `DCUSA_GPU_QUERY_LAG=<k>` | Hold GPU times back k presents, as on a slower GPU. |
@@ -466,6 +466,7 @@ gives it Game Mode's CPU and GPU priority while it is in front.
 | `DCUSA_GPU_THREAD=0` | Encode Metal on the main thread instead of the render thread. |
 | `DCUSA_FRAMES_IN_FLIGHT=<1-4>` | Frames queued to the GPU (default 2). |
 | `DCUSA_ARENA=0` | New Metal storage for every buffer upload instead of the arenas. |
+| `DCUSA_BUFFER_RING=0` | Copy mapped buffers to the GPU again instead of the buffer ring (default on with Metal; Vulkan always copies): a write Map or an UpdateSubresource of a buffer up to 4 MB gets a fresh slot in 128 MB of guest memory that Metal reads in place, so Unmap copies nothing. |
 | `DCUSA_METAL_TRACE=<n>` | One line per draw of frame n; `DCUSA_METAL_TRACE_FRAMES=<k>` for k frames; `DCUSA_METAL_TRACE_CB=1` command buffers. |
 | `DCUSA_METAL_SCAN=<n>` | Scan the render targets at present n. |
 | `DCUSA_SHADER_TRACE=1`, `DCUSA_QUERY_TRACE=1`, `DCUSA_SHOW_TRACE=1` | Trace shader binds, queries, presents and the boot screen. |

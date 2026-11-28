@@ -156,6 +156,126 @@ std::uint32_t g_frame_draws = 0;       // draws in it so far
 std::vector<LiveMap> live_maps;
 std::uint32_t scratch_used = 0;
 
+// The buffer ring (DCUSA_BUFFER_RING, on with Metal): every write Map and
+// every UpdateSubresource of a buffer up to kRingSlotMax gives the buffer a
+// fresh slot here, and the slot becomes its home. Metal reads the slot where
+// it is (one MTLBuffer over the ring, gpu::set_guest_ring), so Unmap queues
+// a pointer instead of copying the bytes twice (into the render queue, then
+// into an upload arena). Draws already recorded keep the old slot: D3D11's
+// rename on discard. Maps other than WRITE_DISCARD copy the current bytes in.
+//
+// Reuse: the ring is written in kRingChunk chunks. On entering a chunk, the
+// chunk kRingAhead further on is swept: a buffer whose home is still in it
+// (mapped once, then kept) moves back to its stored bytes with a copying
+// upload, so nothing after that present reads the chunk. A chunk is written
+// again only once the GPU has completed the present it was swept in.
+constexpr std::uint32_t kRing = 0xF4000000u;
+constexpr std::uint32_t kRingBytes = 128u << 20;
+constexpr std::uint32_t kRingChunk = 8u << 20;
+constexpr std::uint32_t kRingChunks = kRingBytes / kRingChunk;
+constexpr std::uint32_t kRingAhead = 6;
+constexpr std::uint32_t kRingSlotMax = 4u << 20;
+static_assert(kRing >= kBufferHomes + kBufferHomeBytes, "buffer ring overlaps the buffer homes");
+static_assert(std::uint64_t(kRing) + kRingBytes <= kComCall, "buffer ring overlaps the COM thunks");
+static_assert(kRingAhead < kRingChunks && kRingBytes % kRingChunk == 0, "buffer ring chunks");
+
+struct RingChunk {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> slots;  // (resource, slot) written here
+    std::uint64_t swept = 0;  // the present it was last swept in
+    bool written = false;
+};
+struct BufferRing {
+    int state = -1;  // -1 not tried, 0 off, 1 on
+    std::uint64_t pos = 0;  // bytes written since the start, the ring's offset modulo kRingBytes
+    RingChunk chunks[kRingChunks];
+    // DCUSA_MAP_STATS: what happened since the last line.
+    std::uint64_t slots = 0, bytes = 0, copied_in = 0, parked = 0, parked_bytes = 0, waits = 0, full = 0;
+    double wait_ms = 0;
+} g_ring;
+
+bool in_ring(std::uint32_t at) { return at >= kRing && at - kRing < kRingBytes; }
+
+bool ring_on(std::uint8_t* mem) {
+    if (g_ring.state >= 0) return g_ring.state == 1;
+    g_ring.state = 0;
+    const char* e = std::getenv("DCUSA_BUFFER_RING");
+    if ((e != nullptr && std::atoi(e) == 0) || !gpu::enabled()) return false;
+    if (mprotect(mem + kRing, kRingBytes, PROT_READ | PROT_WRITE) != 0) return false;
+    if (!gpu::set_guest_ring(mem + kRing, kRingBytes)) return false;
+    g_ring.state = 1;
+    return true;
+}
+
+// A buffer whose home is a ring slot goes back to its stored bytes (and the GPU
+// gets them copied), so the slot can be written again.
+void ring_park(std::uint8_t* mem, std::uint32_t resource, std::uint32_t slot) {
+    buffer_home.erase(resource);
+    auto it = stored.find(resource);
+    if (it == stored.end() || it->second.bytes.empty()) return;
+    std::memcpy(it->second.bytes.data(), mem + slot, it->second.bytes.size());
+    gpu::upload_buffer(resource, it->second.bytes.data(), it->second.bytes.size());
+    ++g_ring.parked;
+    g_ring.parked_bytes += it->second.bytes.size();
+}
+
+// A fresh slot of `size` bytes for `resource` (its new home, filled by the
+// caller), or 0: too large, or the ring would overrun a present still being
+// recorded (the caller then takes the copying path).
+std::uint32_t ring_alloc(std::uint8_t* mem, std::uint32_t resource, std::uint32_t size) {
+    // 256: the strictest constant buffer offset alignment Metal asks for.
+    const std::uint32_t need = (size + 255u) & ~255u;
+    if (size == 0 || need > kRingSlotMax || !ring_on(mem)) return 0;
+    std::uint64_t pos = g_ring.pos;
+    if (pos % kRingChunk != 0 && pos % kRingChunk + need > kRingChunk) pos += kRingChunk - pos % kRingChunk;
+    if (pos % kRingChunk == 0) {
+        const std::uint64_t k = pos / kRingChunk;
+        RingChunk& next = g_ring.chunks[k % kRingChunks];
+        if (next.written && next.swept >= g_frames_presented) {
+            ++g_ring.full;  // a whole ring in one present: nothing to wait for
+            return 0;
+        }
+        RingChunk& ahead = g_ring.chunks[(k + kRingAhead) % kRingChunks];
+        for (const auto& [res, slot] : ahead.slots)
+            if (auto h = buffer_home.find(res); h != buffer_home.end() && h->second == slot) ring_park(mem, res, slot);
+        ahead.slots.clear();
+        ahead.swept = g_frames_presented;
+        if (next.written && gpu::frames_completed() <= next.swept) {
+            const auto w0 = std::chrono::steady_clock::now();
+            while (gpu::frames_completed() <= next.swept) std::this_thread::sleep_for(std::chrono::microseconds(50));
+            g_ring.wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
+            ++g_ring.waits;
+        }
+        next.written = true;
+        next.slots.clear();
+    }
+    const std::uint32_t slot = kRing + static_cast<std::uint32_t>(pos % kRingBytes);
+    g_ring.pos = pos + need;
+    g_ring.chunks[(pos / kRingChunk) % kRingChunks].slots.emplace_back(resource, slot);
+    ++g_ring.slots;
+    g_ring.bytes += size;
+    return slot;
+}
+
+// The buffer's bytes now (its home, else the stored copy), copied into `slot`;
+// the slot becomes its home, and a fixed home it had is freed.
+void ring_take(std::uint8_t* mem, std::uint32_t resource, std::uint32_t slot, std::uint32_t size, bool copy_in) {
+    auto h = buffer_home.find(resource);
+    if (copy_in) {
+        const std::uint8_t* now = nullptr;
+        if (h != buffer_home.end()) now = mem + h->second;
+        else if (auto it = stored.find(resource); it != stored.end() && it->second.bytes.size() >= size) now = it->second.bytes.data();
+        if (now != nullptr) std::memcpy(mem + slot, now, size);
+        else std::memset(mem + slot, 0, size);
+        g_ring.copied_in += size;
+    }
+    if (h != buffer_home.end()) {
+        if (!in_ring(h->second)) free_homes.emplace(home_size[h->second], h->second);
+        h->second = slot;
+    } else {
+        buffer_home[resource] = slot;
+    }
+}
+
 struct Element {
     char name[24]{};
     std::uint32_t format = 0;
@@ -2595,6 +2715,23 @@ void update_subresource(Cpu& c) {
         const std::uint32_t size = static_cast<std::uint32_t>(it->second.bytes.size());
         std::uint32_t left = 0, right = size;
         if (box != 0) left = ld32(c.mem, box), right = std::min(ld32(c.mem, box + 12), size);
+        // A home in the ring is not written in place: a fresh slot with the
+        // bytes it had, or back to the stored bytes when there is none.
+        if (in_ring(h->second)) {
+            if (const std::uint32_t slot = ring_alloc(c.mem, res, size); slot != 0) {
+                ring_take(c.mem, res, slot, size, true);
+                if (right > left) std::memcpy(c.mem + slot + left, c.mem + src, right - left);
+                gpu::use_guest_bytes(res, c.mem + slot, size);
+                ret_stdcall(c, kSOk, 28);
+                return;
+            }
+            ring_park(c.mem, res, h->second);
+            StoredBytes& sb = it->second;
+            if (right > left) std::memcpy(sb.bytes.data() + left, c.mem + src, right - left);
+            sync_gpu(c.mem, res);
+            ret_stdcall(c, kSOk, 28);
+            return;
+        }
         if (right > left) std::memcpy(c.mem + h->second + left, c.mem + src, right - left);
         gpu::upload_buffer(res, c.mem + h->second, size);
         ret_stdcall(c, kSOk, 28);
@@ -2883,6 +3020,46 @@ void map_resource(Cpu& c) {
         const char* e = std::getenv("DCUSA_BUFFER_HOMES");
         return e == nullptr || std::atoi(e) != 0;
     }();
+    // DCUSA_MAP_STATS=<presents>: Maps by type and bytes, and what the buffer
+    // ring did, every that many presents.
+    static const int map_stats = std::getenv("DCUSA_MAP_STATS") ? std::atoi(std::getenv("DCUSA_MAP_STATS")) : 0;
+    if (map_stats > 0) {
+        static std::uint64_t counts[8]{}, bytes[8]{};
+        static std::uint64_t last = 0;
+        ++counts[type & 7u];
+        bytes[type & 7u] += size;
+        if (g_frames_presented >= last + static_cast<std::uint64_t>(map_stats)) {
+            BufferRing& r = g_ring;
+            std::fprintf(stderr, "maps over %d presents: discard %llu (%llu KB) no-overwrite %llu (%llu KB) write %llu read %llu rw %llu; "
+                         "ring %d: %llu slots (%llu KB), %llu KB copied in, %llu parked (%llu KB), %llu waits (%.1f ms), %llu full\n",
+                         map_stats, (unsigned long long)counts[4], (unsigned long long)(bytes[4] >> 10),
+                         (unsigned long long)counts[5], (unsigned long long)(bytes[5] >> 10), (unsigned long long)counts[2],
+                         (unsigned long long)counts[1], (unsigned long long)counts[3], r.state, (unsigned long long)r.slots,
+                         (unsigned long long)(r.bytes >> 10), (unsigned long long)(r.copied_in >> 10), (unsigned long long)r.parked,
+                         (unsigned long long)(r.parked_bytes >> 10), (unsigned long long)r.waits, r.wait_ms, (unsigned long long)r.full);
+            std::fill(std::begin(counts), std::end(counts), 0);
+            std::fill(std::begin(bytes), std::end(bytes), 0);
+            r.slots = r.bytes = r.copied_in = r.parked = r.parked_bytes = r.waits = r.full = 0;
+            r.wait_ms = 0;
+            last = g_frames_presented;
+        }
+    }
+    if (homes && size != 0 && it != stored.end() && gpu::enabled() && ld32(c.mem, resource + 4) != Texture && type != 1u) {
+        if (const std::uint32_t slot = ring_alloc(c.mem, resource, size); slot != 0) {
+            ring_take(c.mem, resource, slot, size, type != 4u);
+            live_maps.push_back(LiveMap{resource, slot, size, true, true});
+            if (out != 0) {
+                st32(c.mem, out, slot);
+                st32(c.mem, out + 4, pitch);
+                st32(c.mem, out + 8, 0);
+            }
+            ret_stdcall(c, kSOk, 24);
+            return;
+        }
+        // No slot: a home in the ring is not written in place (draws already
+        // recorded may read it); the buffer goes back to its stored bytes first.
+        if (auto h = buffer_home.find(resource); h != buffer_home.end() && in_ring(h->second)) ring_park(c.mem, resource, h->second);
+    }
     if (homes && size != 0 && it != stored.end() && gpu::enabled() && ld32(c.mem, resource + 4) != Texture) {
         std::uint32_t home = 0;
         if (auto h = buffer_home.find(resource); h != buffer_home.end()) {
@@ -2927,23 +3104,6 @@ void map_resource(Cpu& c) {
         scratch_used += (size + 15u) & ~15u;
     }
     live_maps.push_back(LiveMap{resource, at, size, type != 1u, false});
-    // DCUSA_MAP_STATS=<presents>: Maps by type and bytes, every that many presents.
-    static const int map_stats = std::getenv("DCUSA_MAP_STATS") ? std::atoi(std::getenv("DCUSA_MAP_STATS")) : 0;
-    if (map_stats > 0) {
-        static std::uint64_t counts[8]{}, bytes[8]{};
-        static std::uint64_t last = 0;
-        ++counts[type & 7u];
-        bytes[type & 7u] += size;
-        if (g_frames_presented >= last + static_cast<std::uint64_t>(map_stats)) {
-            std::fprintf(stderr, "maps over %d presents: discard %llu (%llu KB) no-overwrite %llu (%llu KB) write %llu read %llu rw %llu\n",
-                         map_stats, (unsigned long long)counts[4], (unsigned long long)(bytes[4] >> 10),
-                         (unsigned long long)counts[5], (unsigned long long)(bytes[5] >> 10), (unsigned long long)counts[2],
-                         (unsigned long long)counts[1], (unsigned long long)counts[3]);
-            std::fill(std::begin(counts), std::end(counts), 0);
-            std::fill(std::begin(bytes), std::end(bytes), 0);
-            last = g_frames_presented;
-        }
-    }
     if (out != 0) {
         st32(c.mem, out, size == 0 ? kMapScratch : at);
         st32(c.mem, out + 4, pitch);
@@ -2974,7 +3134,8 @@ void unmap_resource(Cpu& c) {
             if (it->write) {
                 const std::uint8_t* bytes = c.mem + it->at;
                 if (it->size >= 64 && it->size <= 1024) note_projection(bytes);
-                gpu::upload_buffer(resource, bytes, it->size);
+                if (in_ring(it->at)) gpu::use_guest_bytes(resource, bytes, it->size);
+                else gpu::upload_buffer(resource, bytes, it->size);
             }
             live_maps.erase(it);
             break;
@@ -4075,7 +4236,7 @@ void destroy(std::uint8_t* mem, std::uint32_t obj) {
     if (kind == Srv || kind == Rtv || kind == Dsv) drop_ref(mem, ld32(mem, obj + 12));
     stored.erase(obj);
     if (auto h = buffer_home.find(obj); h != buffer_home.end()) {
-        free_homes.emplace(home_size[h->second], h->second);
+        if (!in_ring(h->second)) free_homes.emplace(home_size[h->second], h->second);
         buffer_home.erase(h);
     }
     for (auto it = live_maps.begin(); it != live_maps.end();) it = it->resource == obj ? live_maps.erase(it) : it + 1;

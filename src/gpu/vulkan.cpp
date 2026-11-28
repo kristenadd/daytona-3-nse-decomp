@@ -452,6 +452,7 @@ struct FrameTimes {
 constexpr std::size_t kFrameTimes = 64;
 FrameTimes g_frame_times[kFrameTimes];
 std::uint64_t g_frames_committed = 0;
+std::atomic<std::uint64_t> g_frames_done{0};  // frames_completed()
 
 void problem(const std::string& what) {
     Device& d = *g_dev;
@@ -794,6 +795,7 @@ void complete(Frame& f, bool wait) {
         }
     }
     ++g_gpu_buffers;
+    if (f.number + 1 > g_frames_done.load(std::memory_order_relaxed)) g_frames_done.store(f.number + 1, std::memory_order_release);
     release_arenas(f.retired);
     f.retired.clear();
     free_garbage(f.garbage);
@@ -2676,9 +2678,16 @@ const Stats& stats() {
     return g_dev->stats;
 }
 
+// No buffer ring on Vulkan (set_guest_ring is false), but should one be used: a copy.
+void use_guest_bytes(std::uint32_t key, const std::uint8_t* bytes, std::size_t size) { upload_buffer(key, bytes, size); }
+
 }  // namespace direct
 
 std::uint64_t gpu_busy_us() { return g_gpu_us.load(std::memory_order_relaxed); }
+
+std::uint64_t frames_completed() { return g_frames_done.load(std::memory_order_acquire); }
+
+bool set_guest_ring(void*, std::size_t) { return false; }
 
 bool frame_gpu_times(std::uint64_t frame, std::uint64_t* start_us, std::uint64_t* end_us) {
     const FrameTimes& f = g_frame_times[frame % kFrameTimes];

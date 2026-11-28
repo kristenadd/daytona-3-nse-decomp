@@ -164,6 +164,17 @@ agreed to this).
       59.2 and 58.1): the game's per-object work is already spent there. A
       real saving needs the cull before 0x733490 (the object's position and
       size in the game's own structures, not yet found).
+      The buffer ring (`DCUSA_BUFFER_RING`, an idea from d9mt's dynamic
+      buffer suballocation): every Map in a race is WRITE_DISCARD (about 600
+      a frame, 2 to 11 MB, some over 1 MB that took a new Metal buffer each);
+      each now gets a fresh slot in 128 MB of guest memory at 0xF4000000 that
+      Metal reads in place (one no-copy MTLBuffer), so Unmap queues a pointer
+      instead of two copies. Phone, same build, ring on / off, two pairs:
+      8.85 / 10.28 and 8.47 / 9.92 ms of CPU per rendered tick, skipped
+      1.9 / 3.4% and 0.9 / 2.1%, 58.8 / 58.0 and 59.5 / 58.7 pictures; no GPU
+      waits, about 1,000 buffers per 500 presents moved back out of the ring.
+      Race frames drawn right. Not run on the Mac (the user was benchmarking
+      something else there).
    2. **iPad mini 6 (4 GB):** killed for memory 15 to 30 s into boot (limit
       about 2.8 GB). Its A15 has no BC textures, so they are decoded to plain
       pixels, 4 to 8 times larger: 1.7 GB after 400 of about 2,300 textures.
