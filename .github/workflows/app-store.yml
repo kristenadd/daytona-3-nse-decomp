@@ -26,7 +26,8 @@
 #   NOTARY_API_ISSUER_ID              Identifiers & Profiles: Admin), uploads and submits.
 #   ASSETS_DEPLOY_KEY                 SSH private key, read-only deploy key of ASSETS_REPO
 #   BRANDING_B64_COUNT                the pictures: a .tar.gz of the branding folder's *.png in
-#   BRANDING_B64_01 ..                base64, split into COUNT secrets (GitHub allows 48 KB each)
+#   BRANDING_B64_01 ..                base64, split into COUNT secrets (GitHub allows 48 KB each;
+#                                     the unpack step names slots 01 to 40)
 # Variables:
 #   IOS_BUNDLE_ID                     the bundle id (registered for the team; one App Store
 #                                     Connect app with an iOS and a visionOS platform)
@@ -156,17 +157,59 @@ jobs:
           path: build/ci-assets
           persist-credentials: false
 
-      # The pictures: BRANDING_B64_01 .. _COUNT joined, decoded, unpacked, and a branding.ini for them.
+      # The pictures: BRANDING_B64_01 .. _COUNT joined, decoded, unpacked, and a branding.ini for
+      # them. Each piece is named (slots 01 to 40, 1.8 MB of base64), not the whole secrets context.
       - name: Unpack the logo and icons
         env:
-          ALL_SECRETS: ${{ toJSON(secrets) }}
+          COUNT: ${{ secrets.BRANDING_B64_COUNT }}
+          P01: ${{ secrets.BRANDING_B64_01 }}
+          P02: ${{ secrets.BRANDING_B64_02 }}
+          P03: ${{ secrets.BRANDING_B64_03 }}
+          P04: ${{ secrets.BRANDING_B64_04 }}
+          P05: ${{ secrets.BRANDING_B64_05 }}
+          P06: ${{ secrets.BRANDING_B64_06 }}
+          P07: ${{ secrets.BRANDING_B64_07 }}
+          P08: ${{ secrets.BRANDING_B64_08 }}
+          P09: ${{ secrets.BRANDING_B64_09 }}
+          P10: ${{ secrets.BRANDING_B64_10 }}
+          P11: ${{ secrets.BRANDING_B64_11 }}
+          P12: ${{ secrets.BRANDING_B64_12 }}
+          P13: ${{ secrets.BRANDING_B64_13 }}
+          P14: ${{ secrets.BRANDING_B64_14 }}
+          P15: ${{ secrets.BRANDING_B64_15 }}
+          P16: ${{ secrets.BRANDING_B64_16 }}
+          P17: ${{ secrets.BRANDING_B64_17 }}
+          P18: ${{ secrets.BRANDING_B64_18 }}
+          P19: ${{ secrets.BRANDING_B64_19 }}
+          P20: ${{ secrets.BRANDING_B64_20 }}
+          P21: ${{ secrets.BRANDING_B64_21 }}
+          P22: ${{ secrets.BRANDING_B64_22 }}
+          P23: ${{ secrets.BRANDING_B64_23 }}
+          P24: ${{ secrets.BRANDING_B64_24 }}
+          P25: ${{ secrets.BRANDING_B64_25 }}
+          P26: ${{ secrets.BRANDING_B64_26 }}
+          P27: ${{ secrets.BRANDING_B64_27 }}
+          P28: ${{ secrets.BRANDING_B64_28 }}
+          P29: ${{ secrets.BRANDING_B64_29 }}
+          P30: ${{ secrets.BRANDING_B64_30 }}
+          P31: ${{ secrets.BRANDING_B64_31 }}
+          P32: ${{ secrets.BRANDING_B64_32 }}
+          P33: ${{ secrets.BRANDING_B64_33 }}
+          P34: ${{ secrets.BRANDING_B64_34 }}
+          P35: ${{ secrets.BRANDING_B64_35 }}
+          P36: ${{ secrets.BRANDING_B64_36 }}
+          P37: ${{ secrets.BRANDING_B64_37 }}
+          P38: ${{ secrets.BRANDING_B64_38 }}
+          P39: ${{ secrets.BRANDING_B64_39 }}
+          P40: ${{ secrets.BRANDING_B64_40 }}
         run: |
           dir="$RUNNER_TEMP/branding"; mkdir -p "$dir"
           python3 -I - "$dir/branding.tar.gz" <<'EOF'
-          import base64, json, os, sys
-          s = json.loads(os.environ["ALL_SECRETS"])
-          n = int(s["BRANDING_B64_COUNT"])
-          data = "".join(s["BRANDING_B64_%02d" % i] for i in range(1, n + 1))
+          import base64, os, sys
+          n = int(os.environ["COUNT"])
+          if n > 40:
+              sys.exit(f"BRANDING_B64_COUNT is {n}; the workflow reads 40 pieces: add slots")
+          data = "".join(os.environ["P%02d" % i] for i in range(1, n + 1))
           open(sys.argv[1], "wb").write(base64.b64decode(data, validate=True))
           print(f"{n} pieces, {len(data)} characters")
           EOF
