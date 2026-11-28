@@ -422,5 +422,12 @@ agreed to this).
   times with homes, 0 of 6 without; with the homes at 0xF0000000 (static
   asserts against the heaps, pool and COM thunks) 0 of 6, and a race with the
   velocity skip ran 321 intervals (it had faulted at about 156, 9 of 9).
+- **App Store / TestFlight CI** (`.github/workflows/app-store.yml`, README "App Store and
+  TestFlight"). Caches and boot titles from the private `kristenadd/daytona-ci-assets` (deploy
+  key), logo and icons from `BRANDING_B64_*` secrets (SigningSecrets `files:` group), never an
+  artifact or cache in this public repo. Run 46096300447 (`mode=build`): both apps translated,
+  archived (ApplicationProperties present) and exported signed for the App Store, with the
+  branding pictures (iOS 30 min, visionOS 57 min). Not yet: an upload, which needs the App Store
+  Connect app record for `local.dcusa.DaytonaUSA` (with a visionOS platform), made by hand.
 - **CRT maths.** `DCUSA_SELFTEST_MATH=1`: the translated cos, sin, tan, log,
   sqrt and pow match the host's exactly.
